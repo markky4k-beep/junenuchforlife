@@ -1,0 +1,31 @@
+# ───── secrets (อย่า commit เด็ดขาด) ─────
+.env
+.env.*
+!.env.example
+**/service_account*.json
+lineoa_bot/.env
+lineoa_bot/service_account.json
+lineoa_bot/legacy/credentials/
+
+# ───── dependencies / build ─────
+node_modules/
+.vercel/
+__pycache__/
+*.pyc
+
+# ───── local data / runtime ─────
+data/
+public/uploads/tmp/
+*.log
+.claude/
+lineoa_bot/slips/
+lineoa_bot/runtime/
+lineoa_bot/.dbg/
+.dbg/
+
+# ───── scratch ─────
+tmp-*.txt
+backup_*.csv
+debug-*.md
+trae-debug-log-*.ndjson
+lineoa_bot/

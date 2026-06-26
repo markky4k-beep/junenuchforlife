@@ -1,0 +1,13 @@
+# bot รันบน Render ไม่ใช่ Vercel
+lineoa_bot/
+# secrets + local data
+.env
+.env.*
+!.env.example
+data/
+*.log
+tmp-*.txt
+backup_*.csv
+Nuchforlife/
+*.md
+.dbg/

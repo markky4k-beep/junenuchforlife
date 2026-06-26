@@ -1,0 +1,24 @@
+{
+  "name": "vape-shop-linechat",
+  "version": "1.0.0",
+  "description": "E-commerce storefront with live chat bridged to LINE Official Account",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "migrate:supabase": "node server/scripts/migrate-sqlite-to-supabase.js",
+    "export:supabase-sql": "node server/scripts/export-sqlite-to-supabase-sql.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^9.5.0",
+    "@supabase/supabase-js": "^2.108.2",
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "nodemailer": "^9.0.1",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.7.5",
+    "stripe": "^22.2.3"
+  }
+}

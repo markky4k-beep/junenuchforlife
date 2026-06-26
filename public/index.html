@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>นุชฟอร์ไลฟ์ — นวัตกรรมเพื่อเกษตรกรไทย</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#7b5cff" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <meta name="description" content="นุชฟอร์ไลฟ์ — อาหารเสริมพืช ฮอร์โมน สารจับใบ และผลิตภัณฑ์สุขภาพ พร้อมระบบสั่งซื้อออนไลน์ บทความ และ Live Chat ปรึกษานักวิชาการ" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="นุชฟอร์ไลฟ์ — นวัตกรรมเพื่อเกษตรกรไทย" />
+  <meta property="og:description" content="อาหารเสริมพืช ฮอร์โมน สารจับใบ และระบบขายออนไลน์สำหรับแบรนด์เกษตร พร้อม Live Chat และบทความความรู้" />
+  <meta property="og:image" content="/icon.svg" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="นุชฟอร์ไลฟ์ — นวัตกรรมเพื่อเกษตรกรไทย" />
+  <meta name="twitter:description" content="อาหารเสริมพืช ฮอร์โมน สารจับใบ และระบบขายออนไลน์สำหรับแบรนด์เกษตร พร้อม Live Chat และบทความความรู้" />
+  <meta name="twitter:image" content="/icon.svg" />
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Store","name":"นุชฟอร์ไลฟ์","description":"อาหารเสริมพืช ฮอร์โมน สารจับใบ และระบบขายออนไลน์สำหรับแบรนด์เกษตร","slogan":"นวัตกรรมเพื่อเกษตรกรไทย"}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css?v=20260625-3" />
+</head>
+<body>
+  <div id="scrollProgress" aria-hidden="true"></div>
+  <div id="saleBanner" class="sale-banner"></div>
+
+  <!-- shared SVG gradient defs for icons -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+    <linearGradient id="ig" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7b5cff" /><stop offset="0.55" stop-color="#c061ff" /><stop offset="1" stop-color="#4cc4ff" />
+    </linearGradient>
+  </defs></svg>
+
+  <!-- decorative animated background -->
+  <div class="bg-aurora" aria-hidden="true">
+    <div class="stars"></div>
+    <span class="orb orb-1"></span>
+    <span class="orb orb-2"></span>
+    <span class="orb orb-3"></span>
+    <div class="grid-lines"></div>
+    <div class="vignette"></div>
+  </div>
+
+  <!-- Nav (persistent) -->
+  <header class="nav glass">
+    <a href="/#/" class="brand"><span class="brand-dot"></span>นุชฟอร์ไลฟ์</a>
+    <button id="navBurger" class="nav-burger" type="button" aria-label="เปิดเมนู" aria-expanded="false" aria-controls="navPanel">
+      <span></span><span></span><span></span>
+    </button>
+    <div class="nav-panel" id="navPanel">
+      <nav class="nav-links" id="navLinks">
+        <a href="/#/">หน้าแรก</a>
+        <a href="/#/products">สินค้า</a>
+        <a href="/#/calc">คำนวณอัตรา</a>
+        <a href="/#/articles">บทความ</a>
+        <a href="/#/track">ติดตามออเดอร์</a>
+        <a href="/#/about">เกี่ยวกับเรา</a>
+      </nav>
+      <div class="nav-tools">
+        <div class="nav-account" id="navAccount"></div>
+        <div class="nav-icons">
+          <a href="/#/wishlist" class="nav-cart nav-wish" id="wishLink" aria-label="รายการโปรด" style="position:relative">
+            <svg class="nav-heart-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20.7 10.6 19.4C5.4 14.7 2 11.6 2 7.8 2 4.9 4.2 2.7 7.1 2.7c1.7 0 3.4.8 4.5 2.1 1.1-1.3 2.8-2.1 4.5-2.1 2.9 0 5.1 2.2 5.1 5.1 0 3.8-3.4 6.9-8.6 11.6L12 20.7Z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="cart-badge" id="wishCount" style="display:none">0</span>
+          </a>
+          <button id="cartLink" class="nav-cart" aria-label="ตะกร้า">
+            <svg class="cart-ico" viewBox="0 0 64 64" fill="none"><g stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11 15h7l5 26h24l4-18H23"/><circle cx="27" cy="50" r="3.2"/><circle cx="44" cy="50" r="3.2"/></g></svg>
+            <span class="cart-badge" id="cartCount">0</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+  <div class="nav-dim" id="navDim"></div>
+
+  <!-- Router renders pages here -->
+  <main id="app"></main>
+
+  <!-- Cart drawer (persistent) -->
+  <aside id="cartDrawer" class="cart-drawer glass">
+    <div class="cart-head"><h3>ตะกร้าสินค้า</h3><button id="cartClose">✕</button></div>
+    <div id="cartItems" class="cart-items"></div>
+    <div class="cart-foot">
+      <div class="cart-total">รวมทั้งหมด<span id="cartTotal">฿0</span></div>
+      <button id="checkoutBtn" class="btn btn-primary">ดำเนินการสั่งซื้อ</button>
+    </div>
+  </aside>
+  <div id="cartBackdrop" class="backdrop"></div>
+
+  <!-- Live chat (persistent) -->
+  <button id="chatToggle" class="chat-toggle" aria-label="แชท">
+    <svg class="chat-ico" viewBox="0 0 64 64" fill="none"><g stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 16h38a4 4 0 0 1 4 4v18a4 4 0 0 1-4 4H30l-10 8v-8h-7a4 4 0 0 1-4-4V20a4 4 0 0 1 4-4z"/></g><circle cx="24" cy="29" r="2.8" fill="#fff"/><circle cx="32" cy="29" r="2.8" fill="#fff"/><circle cx="40" cy="29" r="2.8" fill="#fff"/></svg>
+    <span class="chat-ping"></span>
+  </button>
+  <div id="chatBox" class="chat-box glass">
+    <div class="chat-head">
+      <div><span class="chat-title">ปรึกษานักวิชาการ</span><small id="chatStatus">กำลังเชื่อมต่อ…</small></div>
+      <div class="chat-head-act">
+        <a class="line-add" href="https://line.me/R/ti/p/@0812898885nuch" target="_blank" rel="noopener">＋ แอดไลน์</a>
+        <button id="chatClose">✕</button>
+      </div>
+    </div>
+    <div id="chatMessages" class="chat-messages"></div>
+    <form id="chatForm" class="chat-form">
+      <input id="chatInput" type="text" placeholder="พิมพ์ข้อความ…" autocomplete="off" maxlength="1000" />
+      <button type="submit" aria-label="ส่ง"><svg viewBox="0 0 24 24" fill="none"><path d="M3.5 20.5l17-8.5-17-8.5v6.5l11 2-11 2z" fill="#fff"/></svg></button>
+    </form>
+  </div>
+
+  <button id="toTop" aria-label="กลับขึ้นบน">↑</button>
+
+  <footer class="site-footer">
+    <div class="brand"><span class="brand-dot"></span>นุชฟอร์ไลฟ์</div>
+    <p>© นุชฟอร์ไลฟ์ · ผลิตภัณฑ์เพื่อการเกษตรและสุขภาพ · จัดส่งทั่วไทย</p>
+  </footer>
+
+  <script src="/app.js?v=20260627-1"></script>
+</body>
+</html>
