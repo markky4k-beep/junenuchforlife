@@ -1,0 +1,52 @@
+<svg width="2500" height="1686" viewBox="0 0 2500 1686" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgCatalog" x1="0" y1="0" x2="2500" y2="1686" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F9F6FF"/>
+      <stop offset="1" stop-color="#EFE8FF"/>
+    </linearGradient>
+    <linearGradient id="heroCatalog" x1="0" y1="0" x2="2500" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3F2B96"/>
+      <stop offset="1" stop-color="#7B5CFF"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="2500" height="1686" fill="url(#bgCatalog)"/>
+  <rect x="66" y="66" width="2368" height="1554" rx="56" fill="#FFFFFF"/>
+  <rect x="66" y="66" width="2368" height="300" rx="56" fill="url(#heroCatalog)"/>
+  <text x="152" y="176" fill="#FFFFFF" font-size="78" font-family="Arial, Helvetica, sans-serif" font-weight="700">หมวดสินค้าและลิงก์เสริม</text>
+  <text x="152" y="258" fill="#E9E0FF" font-size="42" font-family="Arial, Helvetica, sans-serif">Menu 2 สำหรับ browse สินค้าแบบเจาะหมวดและเข้าเส้นทางเสริม</text>
+
+  <rect x="132" y="430" width="688" height="500" rx="36" fill="#F4F0FF"/>
+  <rect x="906" y="430" width="688" height="500" rx="36" fill="#F3FAFF"/>
+  <rect x="1680" y="430" width="688" height="500" rx="36" fill="#F8F2FF"/>
+  <rect x="132" y="992" width="688" height="500" rx="36" fill="#FFF8EE"/>
+  <rect x="906" y="992" width="688" height="500" rx="36" fill="#F8F8FF"/>
+  <rect x="1680" y="992" width="688" height="500" rx="36" fill="#F5F0FF"/>
+
+  <circle cx="248" cy="560" r="58" fill="#5C6BFF"/>
+  <circle cx="1022" cy="560" r="58" fill="#2D9CDB"/>
+  <circle cx="1796" cy="560" r="58" fill="#8B5CF6"/>
+  <circle cx="248" cy="1122" r="58" fill="#D97706"/>
+  <circle cx="1022" cy="1122" r="58" fill="#3F2B96"/>
+  <circle cx="1796" cy="1122" r="58" fill="#7B5CFF"/>
+
+  <text x="340" y="548" fill="#263A87" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">ชุดเซต</text>
+  <text x="340" y="628" fill="#6678BC" font-size="36" font-family="Arial, Helvetica, sans-serif">เหมาะกับลูกค้าที่ต้องการสูตรคุ้มค่า</text>
+
+  <text x="1114" y="548" fill="#153B56" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">ขวดเล็ก</text>
+  <text x="1114" y="628" fill="#5C7A95" font-size="36" font-family="Arial, Helvetica, sans-serif">เริ่มลองง่าย งบเบา ตัดสินใจไว</text>
+
+  <text x="1888" y="548" fill="#452E85" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">ขวดใหญ่</text>
+  <text x="1888" y="628" fill="#7A66B6" font-size="36" font-family="Arial, Helvetica, sans-serif">เหมาะกับลูกค้าที่ใช้ต่อเนื่อง</text>
+
+  <text x="340" y="1110" fill="#5A3E00" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">บทความ</text>
+  <text x="340" y="1190" fill="#A06A17" font-size="36" font-family="Arial, Helvetica, sans-serif">เสริมความเข้าใจและคอนเทนต์ใช้งาน</text>
+
+  <text x="1114" y="1110" fill="#2C2158" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">บัญชีลูกค้า</text>
+  <text x="1114" y="1190" fill="#6B5CA5" font-size="36" font-family="Arial, Helvetica, sans-serif">เข้าสู่ระบบและดูข้อมูลในเว็บไซต์</text>
+
+  <text x="1888" y="1110" fill="#452E85" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">กลับหน้าแรก</text>
+  <text x="1888" y="1190" fill="#7A66B6" font-size="36" font-family="Arial, Helvetica, sans-serif">สลับกลับไปเมนูหลักของลูกค้า</text>
+
+  <text x="152" y="1570" fill="#8A7AAE" font-size="30" font-family="Arial, Helvetica, sans-serif">Artwork source สำหรับ export เป็น PNG/JPG ขนาด 2500x1686 แล้วอัปโหลดเข้า LINE Rich Menu</text>
+</svg>

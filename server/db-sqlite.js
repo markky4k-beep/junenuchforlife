@@ -70,6 +70,24 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 `);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS payment_logs (
+    order_id TEXT PRIMARY KEY,
+    user_id TEXT DEFAULT '',
+    product TEXT DEFAULT '',
+    amount REAL DEFAULT 0,
+    bank_name TEXT DEFAULT '',
+    account_name TEXT DEFAULT '',
+    account_number TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    slip_file_path TEXT DEFAULT '',
+    slip_message_id TEXT DEFAULT '',
+    slip_received_at TEXT DEFAULT '',
+    verification_message TEXT DEFAULT '',
+    verification_payload TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+  );
+`);
 
 // migrations เผื่อ orders เก่าไม่มีคอลัมน์ใหม่
 const orderCols = db.prepare(`PRAGMA table_info(orders)`).all().map((c) => c.name);
@@ -79,6 +97,10 @@ addCol('subtotal', `INTEGER DEFAULT 0`);
 addCol('discount', `INTEGER DEFAULT 0`);
 addCol('coupon', `TEXT DEFAULT ''`);
 addCol('shipping', `INTEGER DEFAULT 0`);
+addCol('access_token', `TEXT DEFAULT ''`);
+addCol('resources_reserved', `INTEGER DEFAULT 0`);
+addCol('channel', `TEXT DEFAULT 'web'`);
+addCol('line_user_id', `TEXT DEFAULT ''`);
 // migration: products.video
 const productCols = db.prepare(`PRAGMA table_info(products)`).all().map((c) => c.name);
 if (!productCols.includes('video')) db.exec(`ALTER TABLE products ADD COLUMN video TEXT DEFAULT ''`);
@@ -98,18 +120,119 @@ function rowToOrder(r) {
     id: r.id, items: JSON.parse(r.items), total: r.total, subtotal: r.subtotal || r.total, discount: r.discount || 0, shipping: r.shipping || 0, coupon: r.coupon || '',
     customer: JSON.parse(r.customer),
     payment_method: r.payment_method, status: r.status, paid: !!r.paid, payment_claimed: !!r.payment_claimed,
-    tracking: r.tracking, session_id: r.session_id, stripe_session: r.stripe_session, user_id: r.user_id,
+    tracking: r.tracking, session_id: r.session_id, stripe_session: r.stripe_session, user_id: r.user_id, channel: r.channel || 'web', line_user_id: r.line_user_id || '', accessToken: r.access_token || '',
+    resourcesReserved: !!r.resources_reserved,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
+function orderItemQty(item = {}) {
+  const qty = parseInt(item?.qty, 10) || 0;
+  return qty > 0 ? qty : 1;
+}
+function orderItemsSummary(items = []) {
+  if (!Array.isArray(items) || !items.length) return '';
+  const parts = items
+    .slice(0, 3)
+    .map((item) => `${String(item?.name || 'สินค้า').trim()}×${orderItemQty(item)}`);
+  if (items.length > 3) parts.push(`+${items.length - 3} รายการ`);
+  return parts.join(', ');
+}
+function orderToAdminSummary(order) {
+  const items = Array.isArray(order?.items) ? order.items : [];
+  return {
+    id: order?.id || '',
+    total: Number(order?.total || 0),
+    payment_method: order?.payment_method || '',
+    status: order?.status || '',
+    paid: !!order?.paid,
+    payment_claimed: !!order?.payment_claimed,
+    tracking: order?.tracking || '',
+    createdAt: order?.createdAt || 0,
+    user_id: order?.user_id || '',
+    channel: order?.channel || 'web',
+    line_user_id: order?.line_user_id || '',
+    customerName: String(order?.customer?.name || '').trim(),
+    customerPhone: String(order?.customer?.phone || '').trim(),
+    itemCount: items.reduce((sum, item) => sum + orderItemQty(item), 0),
+    itemSummary: orderItemsSummary(items),
+  };
+}
+function normalizeAdminSearch(value = '') {
+  return String(value || '').trim().slice(0, 80);
+}
+function buildAdminOrderWhere({ search = '', status = '' } = {}) {
+  const clauses = [];
+  const params = [];
+  const normalizedStatus = String(status || '').trim();
+  if (normalizedStatus) {
+    clauses.push(`status = ?`);
+    params.push(normalizedStatus);
+  }
+  const normalizedSearch = normalizeAdminSearch(search);
+  if (normalizedSearch) {
+    const like = `%${normalizedSearch}%`;
+    clauses.push(`(
+      id LIKE ? COLLATE NOCASE OR
+      tracking LIKE ? COLLATE NOCASE OR
+      json_extract(customer, '$.name') LIKE ? COLLATE NOCASE OR
+      json_extract(customer, '$.phone') LIKE ? COLLATE NOCASE
+    )`);
+    params.push(like, like, like, like);
+  }
+  return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params };
+}
+function buildAdminUserWhere({ search = '', role = '' } = {}) {
+  const clauses = [];
+  const params = [];
+  const normalizedRole = String(role || '').trim();
+  if (normalizedRole) {
+    clauses.push(`role = ?`);
+    params.push(normalizedRole);
+  }
+  const normalizedSearch = normalizeAdminSearch(search);
+  if (normalizedSearch) {
+    const like = `%${normalizedSearch}%`;
+    clauses.push(`(
+      id LIKE ? COLLATE NOCASE OR
+      email LIKE ? COLLATE NOCASE OR
+      name LIKE ? COLLATE NOCASE
+    )`);
+    params.push(like, like, like);
+  }
+  return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params };
+}
+function buildAdminLeadWhere({ search = '', status = '' } = {}) {
+  const clauses = [];
+  const params = [];
+  const normalizedStatus = String(status || '').trim();
+  if (normalizedStatus) {
+    clauses.push(`status = ?`);
+    params.push(normalizedStatus);
+  }
+  const normalizedSearch = normalizeAdminSearch(search);
+  if (normalizedSearch) {
+    const like = `%${normalizedSearch}%`;
+    clauses.push(`(
+      name LIKE ? COLLATE NOCASE OR
+      phone LIKE ? COLLATE NOCASE OR
+      line_id LIKE ? COLLATE NOCASE OR
+      province LIKE ? COLLATE NOCASE OR
+      crop LIKE ? COLLATE NOCASE OR
+      source LIKE ? COLLATE NOCASE
+    )`);
+    params.push(like, like, like, like, like, like);
+  }
+  return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params };
+}
 const S = {
-  insOrder: db.prepare(`INSERT INTO orders (id,items,total,subtotal,discount,shipping,coupon,customer,payment_method,status,paid,payment_claimed,tracking,session_id,stripe_session,user_id,created_at,updated_at)
-    VALUES (@id,@items,@total,@subtotal,@discount,@shipping,@coupon,@customer,@payment_method,@status,@paid,@payment_claimed,@tracking,@session_id,@stripe_session,@user_id,@created_at,@updated_at)`),
+  insOrder: db.prepare(`INSERT INTO orders (id,items,total,subtotal,discount,shipping,coupon,customer,payment_method,status,paid,payment_claimed,tracking,session_id,stripe_session,user_id,channel,line_user_id,access_token,resources_reserved,created_at,updated_at)
+    VALUES (@id,@items,@total,@subtotal,@discount,@shipping,@coupon,@customer,@payment_method,@status,@paid,@payment_claimed,@tracking,@session_id,@stripe_session,@user_id,@channel,@line_user_id,@access_token,@resources_reserved,@created_at,@updated_at)`),
   adjStock: db.prepare(`UPDATE products SET stock = MAX(0, stock + ?) WHERE id = ?`),
   getOrder: db.prepare(`SELECT * FROM orders WHERE id=?`),
   listOrders: db.prepare(`SELECT * FROM orders ORDER BY created_at DESC LIMIT ?`),
   listOrdersByUser: db.prepare(`SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT ?`),
-  updOrder: db.prepare(`UPDATE orders SET status=@status,paid=@paid,payment_claimed=@payment_claimed,tracking=@tracking,stripe_session=@stripe_session,updated_at=@updated_at WHERE id=@id`),
+  listExpiredReservations: db.prepare(`SELECT * FROM orders WHERE paid=0 AND payment_claimed=0 AND resources_reserved=1 AND status='awaiting_payment' AND created_at < ? ORDER BY created_at ASC LIMIT ?`),
+  updOrder: db.prepare(`UPDATE orders SET status=@status,paid=@paid,payment_claimed=@payment_claimed,tracking=@tracking,stripe_session=@stripe_session,resources_reserved=@resources_reserved,updated_at=@updated_at WHERE id=@id`),
   insMsg: db.prepare(`INSERT INTO messages (session_id,sender,text,at) VALUES (?,?,?,?)`),
   // users
   insUser: db.prepare(`INSERT INTO users (id,email,name,salt,hash,role,created_at) VALUES (@id,@email,@name,@salt,@hash,@role,@created_at)`),
@@ -163,7 +286,50 @@ const S = {
   listLeads: db.prepare(`SELECT * FROM leads ORDER BY created_at DESC LIMIT ?`),
   getLead: db.prepare(`SELECT * FROM leads WHERE id=?`),
   updLead: db.prepare(`UPDATE leads SET name=@name,phone=@phone,line_id=@line_id,province=@province,crop=@crop,stage=@stage,area_rai=@area_rai,problem=@problem,source=@source,landing_page=@landing_page,utm_source=@utm_source,utm_medium=@utm_medium,utm_campaign=@utm_campaign,note=@note,status=@status,updated_at=@updated_at WHERE id=@id`),
+  getPaymentLog: db.prepare(`SELECT * FROM payment_logs WHERE order_id=?`),
+  upsertPaymentLog: db.prepare(`INSERT INTO payment_logs (order_id,user_id,product,amount,bank_name,account_name,account_number,status,slip_file_path,slip_message_id,slip_received_at,verification_message,verification_payload,updated_at)
+    VALUES (@order_id,@user_id,@product,@amount,@bank_name,@account_name,@account_number,@status,@slip_file_path,@slip_message_id,@slip_received_at,@verification_message,@verification_payload,@updated_at)
+    ON CONFLICT(order_id) DO UPDATE SET
+      user_id=excluded.user_id,
+      product=excluded.product,
+      amount=excluded.amount,
+      bank_name=excluded.bank_name,
+      account_name=excluded.account_name,
+      account_number=excluded.account_number,
+      status=excluded.status,
+      slip_file_path=excluded.slip_file_path,
+      slip_message_id=excluded.slip_message_id,
+      slip_received_at=excluded.slip_received_at,
+      verification_message=excluded.verification_message,
+      verification_payload=excluded.verification_payload,
+      updated_at=excluded.updated_at`),
 };
+const _listChatSessions = db.prepare(`
+  SELECT
+    m.session_id,
+    MAX(m.at) AS last_at,
+    MAX(CASE WHEN m.sender = 'customer' THEN m.at ELSE 0 END) AS last_customer_at,
+    (SELECT x.sender FROM messages x WHERE x.session_id = m.session_id ORDER BY x.at DESC, x.id DESC LIMIT 1) AS last_sender,
+    (SELECT x.text FROM messages x WHERE x.session_id = m.session_id ORDER BY x.at DESC, x.id DESC LIMIT 1) AS last_text,
+    SUM(CASE WHEN m.sender = 'customer' THEN 1 ELSE 0 END) AS customer_count,
+    SUM(CASE WHEN m.sender = 'admin' THEN 1 ELSE 0 END) AS admin_count
+  FROM messages m
+  WHERE (? = '' OR m.session_id LIKE ? OR m.text LIKE ?)
+  GROUP BY m.session_id
+  ORDER BY last_at DESC
+  LIMIT ? OFFSET ?
+`);
+const _countChatSessions = db.prepare(`
+  SELECT COUNT(*) AS total FROM (
+    SELECT m.session_id
+    FROM messages m
+    WHERE (? = '' OR m.session_id LIKE ? OR m.text LIKE ?)
+    GROUP BY m.session_id
+  ) t
+`);
+const _chatMessages = db.prepare(`SELECT id, session_id, sender, text, at FROM messages WHERE session_id=? ORDER BY at ASC, id ASC LIMIT ?`);
+const _deleteChatMessagesBySession = db.prepare(`DELETE FROM messages WHERE session_id=?`);
+const _latestOrderBySession = db.prepare(`SELECT * FROM orders WHERE session_id=? ORDER BY created_at DESC LIMIT 1`);
 
 export function createOrder(o) {
   const now = Date.now();
@@ -172,13 +338,46 @@ export function createOrder(o) {
     customer: JSON.stringify(o.customer),
     payment_method: o.payment_method, status: o.status, paid: o.paid ? 1 : 0, payment_claimed: 0,
     tracking: o.tracking || '', session_id: o.session_id || '', stripe_session: o.stripe_session || '',
-    user_id: o.user_id || '', created_at: now, updated_at: now,
+    user_id: o.user_id || '', channel: o.channel || 'web', line_user_id: o.line_user_id || '', access_token: o.access_token || '', resources_reserved: o.resources_reserved === false ? 0 : 1, created_at: now, updated_at: now,
   });
   return getOrder(o.id);
 }
 export function getOrder(id) { return rowToOrder(S.getOrder.get(id)); }
 export function listOrders(limit = 50) { return S.listOrders.all(limit).map(rowToOrder); }
+export function listAdminOrderSummaries(limit = 500, offset = 0, filters = {}) {
+  const safeLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 500));
+  const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+  const { sql, params } = buildAdminOrderWhere(filters);
+  return db.prepare(`SELECT * FROM orders${sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, safeLimit, safeOffset).map(rowToOrder).map(orderToAdminSummary);
+}
 export function listOrdersByUser(uid, limit = 50) { return S.listOrdersByUser.all(uid, limit).map(rowToOrder); }
+export function countOrders({ paid, status, deliveredOnly = false, search = '' } = {}) {
+  const clauses = [];
+  const params = [];
+  if (paid !== undefined) { clauses.push(`paid = ?`); params.push(paid ? 1 : 0); }
+  const normalizedStatus = deliveredOnly ? 'delivered' : String(status || '').trim();
+  if (normalizedStatus) { clauses.push(`status = ?`); params.push(normalizedStatus); }
+  const normalizedSearch = normalizeAdminSearch(search);
+  if (normalizedSearch) {
+    const like = `%${normalizedSearch}%`;
+    clauses.push(`(
+      id LIKE ? COLLATE NOCASE OR
+      tracking LIKE ? COLLATE NOCASE OR
+      json_extract(customer, '$.name') LIKE ? COLLATE NOCASE OR
+      json_extract(customer, '$.phone') LIKE ? COLLATE NOCASE
+    )`);
+    params.push(like, like, like, like);
+  }
+  const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+  return db.prepare(`SELECT COUNT(*) n FROM orders${where}`).get(...params).n;
+}
+export function listOrderIdentityRows() {
+  return db.prepare(`SELECT status, customer FROM orders ORDER BY created_at DESC`).all().map((row) => ({ status: row.status, customer: JSON.parse(row.customer || '{}') }));
+}
+export function listDeliveredOrderTimingRows() {
+  return db.prepare(`SELECT created_at, updated_at FROM orders WHERE status='delivered' ORDER BY created_at DESC`).all();
+}
+export function listExpiredOrderReservations(beforeTs, limit = 50) { return S.listExpiredReservations.all(beforeTs, limit).map(rowToOrder); }
 export function updateOrder(id, patch) {
   const cur = getOrder(id);
   if (!cur) return null;
@@ -186,19 +385,139 @@ export function updateOrder(id, patch) {
     id, status: patch.status ?? cur.status, paid: (patch.paid ?? cur.paid) ? 1 : 0,
     payment_claimed: (patch.payment_claimed ?? cur.payment_claimed) ? 1 : 0,
     tracking: patch.tracking ?? cur.tracking, stripe_session: patch.stripe_session ?? cur.stripe_session,
+    resources_reserved: (patch.resources_reserved ?? cur.resourcesReserved) ? 1 : 0,
     updated_at: Date.now(),
   });
   return getOrder(id);
 }
+
+const reserveOrderResourcesTx = db.transaction(({ items = [], coupon = '' } = {}) => {
+  for (const item of items) {
+    const id = String(item?.id || '').trim();
+    const qty = Math.max(1, parseInt(item?.qty, 10) || 0);
+    if (!id || !qty) continue;
+    const info = db.prepare(`UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?`).run(qty, id, qty);
+    if (!info.changes) throw new Error(`สินค้าไม่พอสำหรับ ${id}`);
+  }
+  const code = String(coupon || '').trim().toUpperCase();
+  if (code) {
+    const info = db.prepare(`UPDATE coupons SET used = used + 1 WHERE code = ? AND (max_uses <= 0 OR used < max_uses)`).run(code);
+    if (!info.changes) throw new Error(`คูปอง ${code} ใช้งานไม่ได้แล้ว`);
+  }
+});
+
+const releaseOrderResourcesTx = db.transaction(({ items = [], coupon = '' } = {}) => {
+  for (const item of items) {
+    const id = String(item?.id || '').trim();
+    const qty = Math.max(1, parseInt(item?.qty, 10) || 0);
+    if (!id || !qty) continue;
+    db.prepare(`UPDATE products SET stock = stock + ? WHERE id = ?`).run(qty, id);
+  }
+  const code = String(coupon || '').trim().toUpperCase();
+  if (code) db.prepare(`UPDATE coupons SET used = MAX(0, used - 1) WHERE code = ?`).run(code);
+});
+
+export function reserveOrderResources(payload) { reserveOrderResourcesTx(payload || {}); }
+export function releaseOrderResources(payload) { releaseOrderResourcesTx(payload || {}); }
+
+function rowToPaymentLog(r) {
+  if (!r) return null;
+  return {
+    order_id: r.order_id,
+    user_id: r.user_id || '',
+    product: r.product || '',
+    amount: r.amount || 0,
+    bank_name: r.bank_name || '',
+    account_name: r.account_name || '',
+    account_number: r.account_number || '',
+    status: r.status || '',
+    slip_file_path: r.slip_file_path || '',
+    slip_message_id: r.slip_message_id || '',
+    slip_received_at: r.slip_received_at || '',
+    verification_message: r.verification_message || '',
+    verification_payload: r.verification_payload || '',
+    updated_at: r.updated_at || '',
+  };
+}
+
+export function getPaymentLog(orderId) {
+  return rowToPaymentLog(S.getPaymentLog.get(String(orderId || '').trim()));
+}
+
+export function upsertPaymentLog(orderId, patch = {}) {
+  const payload = {
+    order_id: String(orderId || '').trim(),
+    user_id: '',
+    product: '',
+    amount: 0,
+    bank_name: '',
+    account_name: '',
+    account_number: '',
+    status: '',
+    slip_file_path: '',
+    slip_message_id: '',
+    slip_received_at: '',
+    verification_message: '',
+    verification_payload: '',
+    updated_at: new Date().toISOString(),
+    ...(getPaymentLog(orderId) || {}),
+    ...patch,
+    order_id: String(orderId || '').trim(),
+    updated_at: new Date().toISOString(),
+  };
+  S.upsertPaymentLog.run(payload);
+  return getPaymentLog(orderId);
+}
 export function saveMessage(sessionId, sender, text, at = Date.now()) { S.insMsg.run(sessionId, sender, text, at); }
 const _msgsSince = db.prepare(`SELECT sender, text, at FROM messages WHERE session_id=? AND at>? ORDER BY at ASC LIMIT 100`);
 export function listMessagesSince(sessionId, after = 0) { return _msgsSince.all(String(sessionId || ''), Number(after) || 0); }
+export function listChatSessions({ search = '', limit = 20, offset = 0 } = {}) {
+  const normalizedSearch = String(search || '').trim().slice(0, 80);
+  const like = normalizedSearch ? `%${normalizedSearch}%` : '';
+  const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+  const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+  const items = _listChatSessions.all(normalizedSearch, like, like, safeLimit, safeOffset).map((row) => ({
+    session_id: row.session_id,
+    last_at: Number(row.last_at || 0),
+    last_customer_at: Number(row.last_customer_at || 0),
+    last_sender: String(row.last_sender || '').trim(),
+    last_text: String(row.last_text || '').trim(),
+    customer_count: Number(row.customer_count || 0),
+    admin_count: Number(row.admin_count || 0),
+  }));
+  const total = Number(_countChatSessions.get(normalizedSearch, like, like)?.total || 0);
+  return { items, total };
+}
+export function listChatMessages(sessionId, limit = 200) {
+  const safeLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 200));
+  return _chatMessages.all(String(sessionId || '').trim(), safeLimit);
+}
+export function deleteChatSession(sessionId) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return false;
+  _deleteChatMessagesBySession.run(normalizedSessionId);
+  return true;
+}
+export function findLatestOrderBySessionId(sessionId) {
+  return rowToOrder(_latestOrderBySession.get(String(sessionId || '').trim()));
+}
 
 // ───────────── users / tokens ─────────────
 export function createUser(u) { S.insUser.run({ ...u, created_at: Date.now() }); return getUserById(u.id); }
 export function getUserByEmail(email) { return S.userByEmail.get(String(email).toLowerCase()); }
 export function getUserById(id) { return S.userById.get(id); }
 export function listUsers() { return S.listUsers.all(); }
+export function listAdminUsers(limit = 500, offset = 0, filters = {}) {
+  const safeLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 500));
+  const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+  const { sql, params } = buildAdminUserWhere(filters);
+  return db.prepare(`SELECT id,email,name,role,created_at FROM users${sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, safeLimit, safeOffset);
+}
+export function countUsers({ search = '', role = '' } = {}) {
+  const { sql, params } = buildAdminUserWhere({ search, role });
+  return db.prepare(`SELECT COUNT(*) n FROM users${sql}`).get(...params).n;
+}
+export function listUserIdentityRows() { return S.listUsers.all().map((u) => ({ id: u.id, email: u.email, role: u.role })); }
 export function createToken(token, userId, ttlMs = 1000 * 60 * 60 * 24 * 30) {
   S.insToken.run(token, userId, Date.now(), Date.now() + ttlMs);
 }
@@ -281,6 +600,17 @@ export function createLead(lead) {
 }
 export function getLead(id) { return rowToLead(S.getLead.get(id)); }
 export function listLeads(limit = 200) { return S.listLeads.all(limit).map(rowToLead); }
+export function listAdminLeads(limit = 500, offset = 0, filters = {}) {
+  const safeLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 500));
+  const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+  const { sql, params } = buildAdminLeadWhere(filters);
+  return db.prepare(`SELECT * FROM leads${sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, safeLimit, safeOffset).map(rowToLead);
+}
+export function countLeads({ search = '', status = '' } = {}) {
+  const { sql, params } = buildAdminLeadWhere({ search, status });
+  return db.prepare(`SELECT COUNT(*) n FROM leads${sql}`).get(...params).n;
+}
+export function listLeadIdentityRows() { return db.prepare(`SELECT name,phone,line_id,province FROM leads ORDER BY created_at DESC`).all(); }
 export function updateLead(id, patch) {
   const cur = getLead(id);
   if (!cur) return null;
@@ -319,6 +649,16 @@ function rowToProduct(r) {
 export function getProduct(id) { return rowToProduct(S.getProduct.get(id)); }
 export function listProducts(includeInactive = false) {
   return (includeInactive ? S.listProductsAll : S.listProductsActive).all().map(rowToProduct);
+}
+export function listProductsByIds(ids = [], includeInactive = false) {
+  const cleanIds = [...new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!cleanIds.length) return [];
+  const placeholders = cleanIds.map(() => '?').join(',');
+  const sql = `SELECT * FROM products WHERE id IN (${placeholders})${includeInactive ? '' : ' AND active=1'}`;
+  return db.prepare(sql).all(...cleanIds).map(rowToProduct);
+}
+export function countProducts(includeInactive = false) {
+  return db.prepare(`SELECT COUNT(*) n FROM products ${includeInactive ? '' : 'WHERE active=1'}`).get().n;
 }
 export function createProduct(p) {
   S.insProduct.run({
@@ -365,6 +705,65 @@ export function allReviewStats() {
   const out = {};
   for (const r of S.allReviewStats.all()) out[r.product_id] = { count: r.c, avg: Math.round(r.a * 10) / 10 };
   return out;
+}
+export function getAdminOrderAnalytics(days = 30) {
+  const safeDays = Math.min(90, Math.max(7, parseInt(days, 10) || 30));
+  const orders = listOrders(5000);
+  const dayMs = 86400000;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const series = [];
+  for (let i = safeDays - 1; i >= 0; i--) {
+    const start = today.getTime() - i * dayMs;
+    const dayOrders = orders.filter((order) => order.createdAt >= start && order.createdAt < start + dayMs);
+    const paidOrders = dayOrders.filter((order) => order.paid && order.status !== 'cancelled');
+    series.push({
+      date: new Date(start).toISOString().slice(0, 10),
+      revenue: paidOrders.reduce((sum, order) => sum + order.total, 0),
+      orders: dayOrders.length,
+    });
+  }
+  const paidOrders = orders.filter((order) => order.paid && order.status !== 'cancelled');
+  const revenue = paidOrders.reduce((sum, order) => sum + order.total, 0);
+  const statusBreakdown = {};
+  for (const order of orders) statusBreakdown[order.status] = (statusBreakdown[order.status] || 0) + 1;
+  const payment = { promptpay: orders.filter((order) => order.payment_method === 'promptpay').length, card: orders.filter((order) => order.payment_method === 'card').length };
+  const topProducts = Object.values(orders.reduce((map, order) => {
+    for (const item of order.items || []) {
+      const key = item.name || 'ไม่ระบุสินค้า';
+      const row = map[key] || { name: key, qty: 0, revenue: 0 };
+      row.qty += Number(item.qty || 0);
+      row.revenue += Number(item.price || 0) * Number(item.qty || 0);
+      map[key] = row;
+    }
+    return map;
+  }, {})).sort((a, b) => b.qty - a.qty || b.revenue - a.revenue).slice(0, 5);
+  return {
+    days: safeDays,
+    series,
+    totals: { revenue, orders: orders.length, paidOrders: paidOrders.length, aov: paidOrders.length ? Math.round(revenue / paidOrders.length) : 0, discountGiven: orders.reduce((sum, order) => sum + (order.discount || 0), 0) },
+    statusBreakdown,
+    payment,
+    topProducts,
+  };
+}
+export function getAdminDashboardStats() {
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*) AS orders,
+      COALESCE(SUM(CASE WHEN paid = 1 AND status <> 'cancelled' THEN total ELSE 0 END), 0) AS revenue,
+      COALESCE(SUM(CASE WHEN paid = 0 AND status NOT IN ('cancelled', 'expired') THEN 1 ELSE 0 END), 0) AS pending
+    FROM orders
+  `).get();
+  const recent = db.prepare(`SELECT id, total, status, customer FROM orders ORDER BY created_at DESC LIMIT 6`).all();
+  return {
+    orders: Number(totals.orders || 0),
+    revenue: Number(totals.revenue || 0),
+    pending: Number(totals.pending || 0),
+    leads: countLeads(),
+    users: countUsers(),
+    products: countProducts(true),
+    recent: recent.map((order) => ({ id: order.id, total: order.total, status: order.status, name: JSON.parse(order.customer || '{}')?.name || '' })),
+  };
 }
 export function userReviewed(productId, userId) { return !!S.userReviewed.get(productId, userId); }
 

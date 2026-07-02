@@ -5,8 +5,12 @@
   "type": "module",
   "main": "server/index.js",
   "scripts": {
+    "build": "node server/scripts/build-client-assets.js",
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
+    "verify:chat": "node server/scripts/verify-chat-realtime.js",
+    "verify:chat:supabase": "node server/scripts/verify-chat-supabase-realtime.js",
+    "import:markky": "node server/scripts/import-markkyproduction-products.js",
     "migrate:supabase": "node server/scripts/migrate-sqlite-to-supabase.js",
     "export:supabase-sql": "node server/scripts/export-sqlite-to-supabase-sql.js"
   },
@@ -20,5 +24,8 @@
     "qrcode": "^1.5.4",
     "socket.io": "^4.7.5",
     "stripe": "^22.2.3"
+  },
+  "devDependencies": {
+    "terser": "^5.48.0"
   }
 }

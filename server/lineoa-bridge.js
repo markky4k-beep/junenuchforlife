@@ -56,6 +56,7 @@ export async function sendVisitorMessage(getSetting, { sessionId, name, text }) 
     },
     body: JSON.stringify({
       session_id: sessionId,
+      website_session_id: sessionId,
       name: name || '',
       text,
       website_webhook_url: callbackUrl(getSetting),

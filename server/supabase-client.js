@@ -9,23 +9,36 @@ export function supabaseEnv() {
   return { url, publishableKey, serviceRoleKey };
 }
 
-export function isSupabaseConfigured() {
+export function isSupabaseConfigured({ requireServiceRole = false } = {}) {
   const { url, publishableKey, serviceRoleKey } = supabaseEnv();
-  return Boolean(url && (serviceRoleKey || publishableKey));
+  return Boolean(url && (requireServiceRole ? serviceRoleKey : (serviceRoleKey || publishableKey)));
 }
-
-export function createSupabaseAdminClient() {
-  const { url, serviceRoleKey, publishableKey } = supabaseEnv();
+export function createSupabasePublicClient() {
+  const { url, publishableKey } = supabaseEnv();
   if (!url) throw new Error('ยังไม่ได้ตั้งค่า SUPABASE_URL');
-  const key = serviceRoleKey || publishableKey;
-  if (!key) throw new Error('ยังไม่ได้ตั้งค่า SUPABASE_PUBLISHABLE_KEY หรือ SUPABASE_SERVICE_ROLE_KEY ที่ใช้งานได้');
-  return createClient(url, key, {
+  if (!publishableKey) throw new Error('ยังไม่ได้ตั้งค่า SUPABASE_PUBLISHABLE_KEY ที่ใช้งานได้');
+  return createClient(url, publishableKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
       detectSessionInUrl: false,
     },
   });
+}
+export function createSupabaseServiceClient() {
+  const { url, serviceRoleKey, publishableKey } = supabaseEnv();
+  if (!url) throw new Error('ยังไม่ได้ตั้งค่า SUPABASE_URL');
+  if (!serviceRoleKey) throw new Error('ยังไม่ได้ตั้งค่า SUPABASE_SERVICE_ROLE_KEY ที่ใช้งานได้');
+  return createClient(url, serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+export function createSupabaseAdminClient() {
+  return createSupabaseServiceClient();
 }
 
 function storageBucketName() {

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Console | คุณจูนนุชฟอร์ไลฟ์</title>
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex" />
+  <meta name="referrer" content="no-referrer" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css?v=20260628-10" />
+  <style>
+    .admin-boot-shell { opacity: 1; }
+    .admin-boot-shell .admin-main { display: grid; gap: 22px; }
+    .admin-boot-panel {
+      border-radius: 30px;
+      border: 1px solid rgba(40, 30, 90, 0.10);
+      background: rgba(255, 255, 255, 0.86);
+      min-height: 220px;
+      padding: 24px;
+    }
+    .admin-boot-chart { min-height: 280px; }
+    .admin-boot-line,
+    .admin-boot-pill {
+      display: block;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(123,92,255,.08), rgba(123,92,255,.16), rgba(123,92,255,.08));
+      background-size: 200% 100%;
+      animation: adminBootPulse 1.25s ease-in-out infinite;
+    }
+    .admin-boot-line { height: 14px; }
+    .admin-boot-pill { height: 10px; }
+    .admin-boot-title { width: 180px; margin-bottom: 20px; }
+    .admin-boot-sub { width: 120px; opacity: .7; }
+    .admin-boot-chart .admin-boot-line { margin-bottom: 18px; }
+    .admin-boot-chart .admin-boot-line:last-child { margin-bottom: 0; }
+    .admin-boot-nav { display: grid; gap: 10px; margin-top: 16px; }
+    .admin-boot-nav .admin-boot-pill:nth-child(1) { width: 86%; }
+    .admin-boot-nav .admin-boot-pill:nth-child(2) { width: 72%; }
+    .admin-boot-nav .admin-boot-pill:nth-child(3) { width: 78%; }
+    .admin-boot-nav .admin-boot-pill:nth-child(4) { width: 64%; }
+    .admin-boot-nav .admin-boot-pill:nth-child(5) { width: 82%; }
+    .admin-boot-nav .admin-boot-pill:nth-child(6) { width: 69%; }
+    .admin-boot-nav .admin-boot-pill:nth-child(7) { width: 76%; }
+    .admin-boot-nav .admin-boot-pill:nth-child(8) { width: 58%; }
+    @keyframes adminBootPulse {
+      0% { background-position: 0% 50%; opacity: .7; }
+      50% { background-position: 100% 50%; opacity: 1; }
+      100% { background-position: 0% 50%; opacity: .7; }
+    }
+  </style>
+</head>
+<body>
+  <script>
+    if (!location.hash || !location.hash.startsWith('#/admin')) location.replace('/secure-admin#/admin');
+  </script>
+  <div id="saleBanner" class="sale-banner"></div>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+    <linearGradient id="ig" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7b5cff" /><stop offset="0.55" stop-color="#c061ff" /><stop offset="1" stop-color="#4cc4ff" />
+    </linearGradient>
+  </defs></svg>
+  <div class="bg-aurora" aria-hidden="true">
+    <div class="stars"></div>
+    <span class="orb orb-1"></span>
+    <span class="orb orb-2"></span>
+    <span class="orb orb-3"></span>
+    <div class="grid-lines"></div>
+    <div class="vignette"></div>
+  </div>
+  <div class="bg-veil" aria-hidden="true"></div>
+  <header class="nav glass">
+    <a href="/secure-admin#/admin" class="brand"><span class="brand-dot"></span>Admin Console</a>
+    <button id="navBurger" class="nav-burger" type="button" aria-label="เปิดเมนู" aria-expanded="false" aria-controls="navPanel">
+      <span></span><span></span><span></span>
+    </button>
+    <div class="nav-panel" id="navPanel">
+      <nav class="nav-links" id="navLinks">
+        <a href="/secure-admin#/admin">กำลังตรวจสิทธิ์...</a>
+        <a href="/secure-admin#/admin/inbox">Inbox</a>
+        <a href="/#/">กลับหน้าเว็บ</a>
+      </nav>
+      <div class="nav-tools">
+        <div class="nav-account" id="navAccount"></div>
+        <div class="nav-icons">
+          <button id="cartLink" class="nav-cart" aria-label="ตะกร้า" style="display:none"></button>
+        </div>
+      </div>
+    </div>
+  </header>
+  <div class="nav-dim" id="navDim"></div>
+  <main id="app" data-prepaint="1">
+    <section class="section page-top admin-boot-shell" aria-hidden="true">
+      <div class="admin">
+        <aside class="admin-side glass">
+          <div class="admin-brand"><span class="brand-dot"></span>หลังบ้าน คุณจูนนุชฟอร์ไลฟ์</div>
+          <div class="admin-boot-nav">
+            <span class="admin-boot-pill"></span>
+            <span class="admin-boot-pill"></span>
+            <span class="admin-boot-pill"></span>
+            <span class="admin-boot-pill"></span>
+            <span class="admin-boot-pill"></span>
+            <span class="admin-boot-pill"></span>
+            <span class="admin-boot-pill"></span>
+            <span class="admin-boot-pill"></span>
+          </div>
+        </aside>
+        <div class="admin-main">
+          <div>
+            <span class="admin-boot-line admin-boot-title"></span>
+            <span class="admin-boot-line admin-boot-sub"></span>
+          </div>
+          <div class="stat-cards">
+            <div class="stat-card"><span class="admin-boot-line admin-boot-sub"></span><b class="admin-boot-line" style="width:72%;height:34px"></b></div>
+            <div class="stat-card"><span class="admin-boot-line admin-boot-sub"></span><b class="admin-boot-line" style="width:64%;height:34px"></b></div>
+            <div class="stat-card"><span class="admin-boot-line admin-boot-sub"></span><b class="admin-boot-line" style="width:70%;height:34px"></b></div>
+            <div class="stat-card"><span class="admin-boot-line admin-boot-sub"></span><b class="admin-boot-line" style="width:52%;height:34px"></b></div>
+          </div>
+          <div class="admin-boot-panel admin-boot-chart">
+            <span class="admin-boot-line" style="width:220px"></span>
+            <span class="admin-boot-line" style="width:100%;height:12px"></span>
+            <span class="admin-boot-line" style="width:96%;height:12px"></span>
+            <span class="admin-boot-line" style="width:92%;height:12px"></span>
+            <span class="admin-boot-line" style="width:88%;height:12px"></span>
+            <span class="admin-boot-line" style="width:84%;height:12px"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <aside id="cartDrawer" class="cart-drawer glass" hidden></aside>
+  <div id="cartBackdrop" class="backdrop" hidden></div>
+  <footer class="site-footer">
+    <div class="brand"><span class="brand-dot"></span>Admin Console</div>
+    <p>Restricted area · noindex · secured session</p>
+  </footer>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="/api/admin/client/app.js?v=20260628-14"></script>
+  <script type="module" src="/bg3d.js?v=20260628-8"></script>
+</body>
+</html>

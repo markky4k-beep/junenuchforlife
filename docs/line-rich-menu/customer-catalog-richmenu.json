@@ -1,0 +1,57 @@
+{
+  "size": {
+    "width": 2500,
+    "height": 1686
+  },
+  "selected": false,
+  "name": "junenuch-customer-catalog-v1",
+  "chatBarText": "หมวดสินค้า",
+  "areas": [
+    {
+      "bounds": { "x": 0, "y": 0, "width": 834, "height": 843 },
+      "action": {
+        "type": "postback",
+        "data": "lineoa:products-category:sets",
+        "displayText": "ชุดเซต"
+      }
+    },
+    {
+      "bounds": { "x": 834, "y": 0, "width": 833, "height": 843 },
+      "action": {
+        "type": "postback",
+        "data": "lineoa:products-category:small",
+        "displayText": "ขวดเล็ก"
+      }
+    },
+    {
+      "bounds": { "x": 1667, "y": 0, "width": 833, "height": 843 },
+      "action": {
+        "type": "postback",
+        "data": "lineoa:products-category:large",
+        "displayText": "ขวดใหญ่"
+      }
+    },
+    {
+      "bounds": { "x": 0, "y": 843, "width": 834, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://www.junenuchforlife.com/#/articles"
+      }
+    },
+    {
+      "bounds": { "x": 834, "y": 843, "width": 833, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://www.junenuchforlife.com/#/login"
+      }
+    },
+    {
+      "bounds": { "x": 1667, "y": 843, "width": 833, "height": 843 },
+      "action": {
+        "type": "richmenuswitch",
+        "richMenuAliasId": "line-home",
+        "data": "switch-to-line-home"
+      }
+    }
+  ]
+}

@@ -8,7 +8,7 @@ const forceSupabase = /^(1|true|yes|on)$/i.test(String(process.env.FORCE_SUPABAS
 
 export const activeProvider = forceSupabase ? 'supabase' : requestedProvider;
 
-if (activeProvider === 'supabase' && !isSupabaseConfigured()) {
+if (activeProvider === 'supabase' && !isSupabaseConfigured({ requireServiceRole: true })) {
   throw new Error('DB provider is forced to supabase but SUPABASE env is incomplete');
 }
 
@@ -19,15 +19,27 @@ const active = activeProvider === 'supabase'
 export const createOrder = (...args) => active.createOrder(...args);
 export const getOrder = (...args) => active.getOrder(...args);
 export const listOrders = (...args) => active.listOrders(...args);
+export const listAdminOrderSummaries = (...args) => active.listAdminOrderSummaries(...args);
 export const listOrdersByUser = (...args) => active.listOrdersByUser(...args);
+export const countOrders = (...args) => active.countOrders(...args);
+export const listOrderIdentityRows = (...args) => active.listOrderIdentityRows(...args);
+export const listDeliveredOrderTimingRows = (...args) => active.listDeliveredOrderTimingRows(...args);
+export const listExpiredOrderReservations = (...args) => active.listExpiredOrderReservations(...args);
 export const updateOrder = (...args) => active.updateOrder(...args);
 export const saveMessage = (...args) => active.saveMessage(...args);
 export const listMessagesSince = (...args) => active.listMessagesSince(...args);
+export const listChatSessions = (...args) => active.listChatSessions(...args);
+export const listChatMessages = (...args) => active.listChatMessages(...args);
+export const deleteChatSession = (...args) => active.deleteChatSession(...args);
+export const findLatestOrderBySessionId = (...args) => active.findLatestOrderBySessionId(...args);
 
 export const createUser = (...args) => active.createUser(...args);
 export const getUserByEmail = (...args) => active.getUserByEmail(...args);
 export const getUserById = (...args) => active.getUserById(...args);
 export const listUsers = (...args) => active.listUsers(...args);
+export const listAdminUsers = (...args) => active.listAdminUsers(...args);
+export const countUsers = (...args) => active.countUsers(...args);
+export const listUserIdentityRows = (...args) => active.listUserIdentityRows(...args);
 export const createToken = (...args) => active.createToken(...args);
 export const getToken = (...args) => active.getToken(...args);
 export const deleteToken = (...args) => active.deleteToken(...args);
@@ -45,14 +57,23 @@ export const incCouponUse = (...args) => active.incCouponUse(...args);
 export const createLead = (...args) => active.createLead(...args);
 export const getLead = (...args) => active.getLead(...args);
 export const listLeads = (...args) => active.listLeads(...args);
+export const listAdminLeads = (...args) => active.listAdminLeads(...args);
+export const countLeads = (...args) => active.countLeads(...args);
+export const listLeadIdentityRows = (...args) => active.listLeadIdentityRows(...args);
 export const updateLead = (...args) => active.updateLead(...args);
 
 export const getProduct = (...args) => active.getProduct(...args);
 export const listProducts = (...args) => active.listProducts(...args);
+export const listProductsByIds = (...args) => active.listProductsByIds(...args);
+export const countProducts = (...args) => active.countProducts(...args);
 export const createProduct = (...args) => active.createProduct(...args);
 export const updateProduct = (...args) => active.updateProduct(...args);
 export const deleteProduct = (...args) => active.deleteProduct(...args);
 export const adjustStock = (...args) => active.adjustStock(...args);
+export const reserveOrderResources = (...args) => active.reserveOrderResources(...args);
+export const releaseOrderResources = (...args) => active.releaseOrderResources(...args);
+export const getPaymentLog = (...args) => active.getPaymentLog(...args);
+export const upsertPaymentLog = (...args) => active.upsertPaymentLog(...args);
 
 export const getSetting = (...args) => active.getSetting(...args);
 export const setSetting = (...args) => active.setSetting(...args);
@@ -62,6 +83,8 @@ export const addReview = (...args) => active.addReview(...args);
 export const listReviews = (...args) => active.listReviews(...args);
 export const reviewStats = (...args) => active.reviewStats(...args);
 export const allReviewStats = (...args) => active.allReviewStats(...args);
+export const getAdminOrderAnalytics = (...args) => active.getAdminOrderAnalytics(...args);
+export const getAdminDashboardStats = (...args) => active.getAdminDashboardStats(...args);
 export const userReviewed = (...args) => active.userReviewed(...args);
 
 export const createArticle = (...args) => active.createArticle(...args);

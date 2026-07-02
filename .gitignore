@@ -25,7 +25,20 @@ lineoa_bot/.dbg/
 
 # ───── scratch ─────
 tmp-*.txt
+tmp/
 backup_*.csv
 debug-*.md
 trae-debug-log-*.ndjson
 lineoa_bot/
+data-hygiene-audit.json
+*-cookie.txt
+debug-cookies.txt
+*.rar
+
+# ───── raw media sources (ไม่ใช่ส่วนของเว็บ) ─────
+Nuchforlife/
+Reviewbest/
+markkyproduction/
+
+.vercel
+.env*.local

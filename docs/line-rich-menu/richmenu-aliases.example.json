@@ -1,0 +1,10 @@
+[
+  {
+    "richMenuAliasId": "line-home",
+    "richMenuId": "REPLACE_WITH_HOME_RICHMENU_ID"
+  },
+  {
+    "richMenuAliasId": "line-catalog",
+    "richMenuId": "REPLACE_WITH_CATALOG_RICHMENU_ID"
+  }
+]

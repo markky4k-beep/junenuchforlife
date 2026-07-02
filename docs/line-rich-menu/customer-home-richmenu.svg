@@ -1,0 +1,52 @@
+<svg width="2500" height="1686" viewBox="0 0 2500 1686" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgHome" x1="0" y1="0" x2="2500" y2="1686" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8F4FF"/>
+      <stop offset="1" stop-color="#F1E8FF"/>
+    </linearGradient>
+    <linearGradient id="heroHome" x1="0" y1="0" x2="2500" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7B5CFF"/>
+      <stop offset="1" stop-color="#3F2B96"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="2500" height="1686" fill="url(#bgHome)"/>
+  <rect x="66" y="66" width="2368" height="1554" rx="56" fill="#FFFFFF"/>
+  <rect x="66" y="66" width="2368" height="300" rx="56" fill="url(#heroHome)"/>
+  <text x="152" y="176" fill="#FFFFFF" font-size="78" font-family="Arial, Helvetica, sans-serif" font-weight="700">คุณจูนนุชฟอร์ไลฟ์</text>
+  <text x="152" y="258" fill="#E9E0FF" font-size="42" font-family="Arial, Helvetica, sans-serif">Rich Menu หลักสำหรับเส้นทางขายที่ใช้ง่ายที่สุด</text>
+
+  <rect x="132" y="430" width="688" height="500" rx="36" fill="#F7F1FF"/>
+  <rect x="906" y="430" width="688" height="500" rx="36" fill="#FFF8EE"/>
+  <rect x="1680" y="430" width="688" height="500" rx="36" fill="#F3F0FF"/>
+  <rect x="132" y="992" width="688" height="500" rx="36" fill="#F6FBFF"/>
+  <rect x="906" y="992" width="688" height="500" rx="36" fill="#F8FAFF"/>
+  <rect x="1680" y="992" width="688" height="500" rx="36" fill="#F5F0FF"/>
+
+  <circle cx="248" cy="560" r="58" fill="#7B5CFF"/>
+  <circle cx="1022" cy="560" r="58" fill="#D97706"/>
+  <circle cx="1796" cy="560" r="58" fill="#3F2B96"/>
+  <circle cx="248" cy="1122" r="58" fill="#2D9CDB"/>
+  <circle cx="1022" cy="1122" r="58" fill="#5C6BFF"/>
+  <circle cx="1796" cy="1122" r="58" fill="#8B5CF6"/>
+
+  <text x="340" y="548" fill="#2C2158" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">ดูสินค้า</text>
+  <text x="340" y="628" fill="#6B5CA5" font-size="36" font-family="Arial, Helvetica, sans-serif">เปิด Flex สินค้าและปุ่มซื้อบนเว็บ</text>
+
+  <text x="1114" y="548" fill="#5A3E00" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">โปรโมชัน</text>
+  <text x="1114" y="628" fill="#A06A17" font-size="36" font-family="Arial, Helvetica, sans-serif">พาเข้าหมวดดีลเด่นทันที</text>
+
+  <text x="1888" y="548" fill="#2C2158" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">คุยกับทีมงาน</text>
+  <text x="1888" y="628" fill="#6B5CA5" font-size="36" font-family="Arial, Helvetica, sans-serif">เปิด handoff ไปห้องแชตเว็บ realtime</text>
+
+  <text x="340" y="1110" fill="#153B56" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">รีวิวลูกค้า</text>
+  <text x="340" y="1190" fill="#5C7A95" font-size="36" font-family="Arial, Helvetica, sans-serif">เพิ่มความมั่นใจก่อนตัดสินใจซื้อ</text>
+
+  <text x="1114" y="1110" fill="#263A87" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">ติดตามออเดอร์</text>
+  <text x="1114" y="1190" fill="#5A6FB6" font-size="36" font-family="Arial, Helvetica, sans-serif">ตรวจสถานะการสั่งซื้อได้ตลอด</text>
+
+  <text x="1888" y="1110" fill="#452E85" font-size="66" font-family="Arial, Helvetica, sans-serif" font-weight="700">หมวดสินค้า</text>
+  <text x="1888" y="1190" fill="#7A66B6" font-size="36" font-family="Arial, Helvetica, sans-serif">สลับไปเมนูชุดเซต ขวดเล็ก ขวดใหญ่</text>
+
+  <text x="152" y="1570" fill="#8A7AAE" font-size="30" font-family="Arial, Helvetica, sans-serif">Artwork source สำหรับ export เป็น PNG/JPG ขนาด 2500x1686 แล้วอัปโหลดเข้า LINE Rich Menu</text>
+</svg>

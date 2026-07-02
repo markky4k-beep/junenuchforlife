@@ -25,7 +25,7 @@ junenuchforlife.com ──> Vercel (frontend static + Express API serverless)
 - [x] `vercel.json` (static + serverless routing)
 - [x] `api/index.js` (ห่อ Express เป็น serverless handler)
 - [x] `server/index.js`: export `app`, guard `server.listen`/Socket.IO เฉพาะตอนรัน local (`process.env.VERCEL`)
-- [x] Live Chat: Socket.IO → **REST polling** (`POST /api/chat/send` + `GET /api/chat/poll`) — ทดสอบ loop ผ่านแล้ว
+- [x] Live Chat production: ใช้ `POST /api/chat/send` / `POST /api/admin/inbox/:id/reply` เป็น write path และ **Supabase Realtime Broadcast** เป็น realtime transport บน Vercel โดยคง `GET /api/chat/poll` ไว้เป็น fallback
 - [x] `db.js`: dynamic import provider (better-sqlite3 ไม่โหลดบน Vercel)
 - [x] settingsCache: `ensureInit()` รันครั้งเดียวต่อ cold start
 - [x] อัปโหลด: `saveAsset()` ย้ายจากดิสก์ไปใช้ Supabase Storage อัตโนมัติเมื่อมีการตั้งค่า Supabase และ fallback เป็น local เฉพาะตอนรันนอก Vercel

@@ -1,3 +1,5 @@
+create extension if not exists pgcrypto;
+
 create table if not exists public.orders (
   id text primary key,
   items jsonb not null default '[]'::jsonb,
@@ -15,6 +17,8 @@ create table if not exists public.orders (
   session_id text not null default '',
   stripe_session text not null default '',
   user_id text not null default '',
+  access_token text not null default '',
+  resources_reserved boolean not null default false,
   created_at bigint not null,
   updated_at bigint not null
 );
@@ -125,11 +129,99 @@ create table if not exists public.articles (
 
 create index if not exists idx_orders_created_at on public.orders (created_at desc);
 create index if not exists idx_orders_user_id on public.orders (user_id);
+create unique index if not exists idx_orders_access_token on public.orders (access_token);
 create index if not exists idx_messages_session_id on public.messages (session_id);
 create index if not exists idx_products_active_sort on public.products (active, sort, created_at);
 create index if not exists idx_reviews_product_id on public.reviews (product_id, created_at desc);
 create index if not exists idx_leads_created_at on public.leads (created_at desc);
 create index if not exists idx_articles_published_created_at on public.articles (published, created_at desc);
+
+create or replace function public.reserve_order_resources(
+  p_items jsonb default '[]'::jsonb,
+  p_coupon text default ''
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  item jsonb;
+  v_id text;
+  v_qty integer;
+begin
+  if jsonb_typeof(coalesce(p_items, '[]'::jsonb)) <> 'array' then
+    raise exception 'รายการสินค้าไม่ถูกต้อง';
+  end if;
+
+  for item in select * from jsonb_array_elements(coalesce(p_items, '[]'::jsonb))
+  loop
+    v_id := btrim(coalesce(item->>'id', ''));
+    v_qty := greatest(1, coalesce((item->>'qty')::integer, 0));
+    if v_id = '' then
+      raise exception 'พบรายการสินค้าที่ไม่มีรหัส';
+    end if;
+
+    update public.products
+       set stock = stock - v_qty
+     where id = v_id
+       and stock >= v_qty;
+    if not found then
+      raise exception 'สินค้า % คงเหลือไม่พอ', v_id;
+    end if;
+  end loop;
+
+  if btrim(coalesce(p_coupon, '')) <> '' then
+    update public.coupons
+       set used = used + 1
+     where code = upper(btrim(p_coupon))
+       and active = true
+       and (expires_at = 0 or expires_at > (extract(epoch from clock_timestamp()) * 1000)::bigint)
+       and (max_uses = 0 or used < max_uses);
+    if not found then
+      raise exception 'คูปอง % ใช้งานไม่ได้แล้ว', upper(btrim(p_coupon));
+    end if;
+  end if;
+end;
+$$;
+
+create or replace function public.release_order_resources(
+  p_items jsonb default '[]'::jsonb,
+  p_coupon text default ''
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  item jsonb;
+  v_id text;
+  v_qty integer;
+begin
+  if jsonb_typeof(coalesce(p_items, '[]'::jsonb)) <> 'array' then
+    raise exception 'รายการสินค้าไม่ถูกต้อง';
+  end if;
+
+  for item in select * from jsonb_array_elements(coalesce(p_items, '[]'::jsonb))
+  loop
+    v_id := btrim(coalesce(item->>'id', ''));
+    v_qty := greatest(1, coalesce((item->>'qty')::integer, 0));
+    if v_id = '' then
+      continue;
+    end if;
+    update public.products
+       set stock = stock + v_qty
+     where id = v_id;
+  end loop;
+
+  if btrim(coalesce(p_coupon, '')) <> '' then
+    update public.coupons
+       set used = greatest(0, used - 1)
+     where code = upper(btrim(p_coupon));
+  end if;
+end;
+$$;
 
 comment on table public.orders is 'Migrated from local SQLite store';
 comment on table public.settings is 'CMS/site settings key-value store';

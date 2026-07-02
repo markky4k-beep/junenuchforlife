@@ -1,0 +1,57 @@
+{
+  "size": {
+    "width": 2500,
+    "height": 1686
+  },
+  "selected": true,
+  "name": "junenuch-customer-home-v1",
+  "chatBarText": "เมนูหลัก",
+  "areas": [
+    {
+      "bounds": { "x": 0, "y": 0, "width": 834, "height": 843 },
+      "action": {
+        "type": "postback",
+        "data": "lineoa:products-showcase",
+        "displayText": "ดูสินค้า"
+      }
+    },
+    {
+      "bounds": { "x": 834, "y": 0, "width": 833, "height": 843 },
+      "action": {
+        "type": "postback",
+        "data": "lineoa:products-category:promo",
+        "displayText": "โปรโมชัน"
+      }
+    },
+    {
+      "bounds": { "x": 1667, "y": 0, "width": 833, "height": 843 },
+      "action": {
+        "type": "postback",
+        "data": "lineoa:web-room",
+        "displayText": "คุยกับทีมงาน"
+      }
+    },
+    {
+      "bounds": { "x": 0, "y": 843, "width": 834, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://www.junenuchforlife.com/#/reviews"
+      }
+    },
+    {
+      "bounds": { "x": 834, "y": 843, "width": 833, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://www.junenuchforlife.com/#/track"
+      }
+    },
+    {
+      "bounds": { "x": 1667, "y": 843, "width": 833, "height": 843 },
+      "action": {
+        "type": "richmenuswitch",
+        "richMenuAliasId": "line-catalog",
+        "data": "switch-to-line-catalog"
+      }
+    }
+  ]
+}
