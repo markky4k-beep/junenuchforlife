@@ -713,10 +713,19 @@ async function fetchLineProfile(source = {}) {
     return null;
   }
 }
+const LINE_PROFILE_REFRESH_MS = 1000 * 60 * 60 * 24;
 async function syncLineInboxSession(source = {}, patch = {}) {
   const sessionId = lineSessionIdFromSource(source);
   if (!CHAT_SESSION_ID_RE.test(sessionId)) return null;
-  const profile = await fetchLineProfile(source);
+  // โปรไฟล์ LINE (ชื่อ/รูป) แทบไม่เปลี่ยน — ใช้ cache ใน meta ก่อน ดึงใหม่เฉพาะเมื่อเก่ากว่า 24 ชม.
+  // ตัด HTTP round trip ต่อข้อความ ทำให้ตอบลูกค้าไวขึ้น
+  const existingMeta = chatInboxMetaMap()[sessionId] || {};
+  const cachedProfile = existingMeta.lineProfileRaw && typeof existingMeta.lineProfileRaw === 'object' && !Array.isArray(existingMeta.lineProfileRaw)
+    ? existingMeta.lineProfileRaw
+    : null;
+  const cachedProfileAt = Number(existingMeta.lineProfileAt || 0);
+  const profileFresh = Boolean(cachedProfile && (Date.now() - cachedProfileAt) < LINE_PROFILE_REFRESH_MS);
+  const profile = profileFresh ? cachedProfile : ((await fetchLineProfile(source)) || cachedProfile);
   const displayName = String(
     patch.displayName
     || patch.customerName
@@ -735,6 +744,7 @@ async function syncLineInboxSession(source = {}, patch = {}) {
     lineReplyToken: String(patch.replyToken || '').trim(),
     lineReplyTokenAt: patch.replyToken ? now : Number(patch.lineReplyTokenAt || 0),
     lineProfileRaw: profile || patch.lineProfileRaw || null,
+    lineProfileAt: profileFresh ? cachedProfileAt : (profile ? Date.now() : cachedProfileAt),
     customerName: displayName,
     visitorName: displayName,
     customerAvatar: String(profile?.pictureUrl || patch.customerAvatar || '').trim(),
@@ -749,7 +759,11 @@ async function syncLineInboxSession(source = {}, patch = {}) {
   current.name = displayName;
   current.lastActiveAt = now;
   sessions.set(sessionId, current);
-  lastActiveSession = sessionId;
+  // ห้องของแอดมินเองไม่นับเป็น "ห้องล่าสุด" — กันตอบ tagless แล้ววนกลับหาตัวเอง
+  const senderUserId = String(source?.userId || '').trim();
+  if (!senderUserId || senderUserId !== String(adminUserId() || '').trim()) {
+    await rememberLastActiveSession(sessionId);
+  }
   return { sessionId, displayName, profile, metaPatch };
 }
 async function deliverLineReply(sessionId, text, meta = {}) {
@@ -971,6 +985,30 @@ const sessions = new Map();
 const ADMIN_INBOX_ROOM = 'admin:inbox';
 const ADMIN_INBOX_REALTIME_CHANNEL = 'realtime:admin:inbox';
 let lastActiveSession = null;
+// "ห้องล่าสุด" ต้องอยู่ใน DB — บน serverless แต่ละ request อาจตกคนละ instance
+// (ตัวแปร memory ใช้เป็น fallback เท่านั้น) เขียนเฉพาะตอนค่าเปลี่ยนเพื่อไม่เพิ่ม round trip ต่อข้อความ
+const LAST_ACTIVE_SESSION_KEY = 'SITE_LAST_ACTIVE_CHAT_SESSION';
+async function rememberLastActiveSession(sessionId) {
+  const key = normalizeChatSessionId(sessionId);
+  if (!key) return;
+  lastActiveSession = key;
+  if (String(settingsCache[LAST_ACTIVE_SESSION_KEY] || '') === key) return;
+  settingsCache[LAST_ACTIVE_SESSION_KEY] = key;
+  try {
+    await setSetting(LAST_ACTIVE_SESSION_KEY, key);
+  } catch (err) {
+    console.error('[chat] remember last active session fail:', err?.message || err);
+  }
+}
+async function resolveLastActiveSession() {
+  try {
+    const fromDb = normalizeChatSessionId((await getSetting(LAST_ACTIVE_SESSION_KEY)) || '');
+    if (fromDb) return fromDb;
+  } catch (err) {
+    console.error('[chat] resolve last active session fail:', err?.message || err);
+  }
+  return lastActiveSession || '';
+}
 const CHAT_SESSION_ID_RE = /^[A-Z0-9]{4,16}$/;
 const CHAT_INBOX_META_KEY = 'SITE_CHAT_INBOX_META';
 function normalizeChatSessionId(value = '') {
@@ -1119,7 +1157,7 @@ async function routeCustomerMessage({ sessionId, name, text, via = 'rest', at = 
   current.name = visitorName;
   current.lastActiveAt = now;
   sessions.set(normalizedSessionId, current);
-  lastActiveSession = normalizedSessionId;
+  await rememberLastActiveSession(normalizedSessionId);
   await saveMessage(normalizedSessionId, 'customer', clean, now);
   await patchChatInboxMeta(normalizedSessionId, {
     visitorName,
@@ -1493,15 +1531,34 @@ async function handleAdminMessage(text) {
   const oc = text.match(/^(ordersddd|orderddd|paidddd|prepareddd|shipddd|doneddd|cancelddd)\b\s*([\s\S]*)$/i);
   if (oc) return handleOrderCommand(oc[1].toLowerCase(), oc[2].trim());
   if (/^listddd\b/i.test(text)) {
-    const lines = [...sessions.entries()].map(([id, s]) => `#${id} — ${s.name} (ล่าสุด ${timeAgo(s.lastActiveAt)})`);
-    return pushToAdmin(lines.length ? 'ลูกค้าออนไลน์:\n' + lines.join('\n') : 'ยังไม่มีลูกค้าออนไลน์');
+    // อ่านห้องจาก DB — ตัวแปร memory บน serverless มองไม่เห็นห้องของ instance อื่น
+    const { items = [] } = await listChatSessions({ limit: 15 });
+    const metaMap = chatInboxMetaMap();
+    const lines = items.map((item) => {
+      const meta = metaMap[item.session_id] || {};
+      const name = String(meta.customerName || meta.visitorName || '').trim() || 'ลูกค้า';
+      return `#${item.session_id} — ${name} (ล่าสุด ${timeAgo(item.last_at || 0)})`;
+    });
+    return pushToAdmin(lines.length ? 'ห้องแชตล่าสุด:\n' + lines.join('\n') : 'ยังไม่มีห้องแชต');
   }
   const tagged = text.match(/^#([A-Z0-9]{4,16})\s+([\s\S]+)$/i);
-  let sessionId, reply;
-  if (tagged) { sessionId = tagged[1].toUpperCase(); reply = tagged[2]; }
-  else if (lastActiveSession && sessions.has(lastActiveSession)) { sessionId = lastActiveSession; reply = text; }
-  else return pushToAdmin('ตอบไม่ได้ — ใส่รหัสห้องก่อนข้อความ เช่น #7E72D9CF9A สวัสดีครับ\nคำสั่ง: listddd, ordersddd, orderddd <id>, paidddd <id>, prepareddd <id>, shipddd <id> <เลขพัสดุ>, doneddd <id>, cancelddd <id>');
+  let sessionId, reply, tagless = false;
+  if (tagged) {
+    sessionId = tagged[1].toUpperCase();
+    reply = tagged[2];
+  } else {
+    sessionId = await resolveLastActiveSession();
+    reply = text;
+    tagless = true;
+    if (!sessionId) return pushToAdmin('ตอบไม่ได้ — ใส่รหัสห้องก่อนข้อความ เช่น #7E72D9CF9A สวัสดีครับ\nคำสั่ง: listddd, ordersddd, orderddd <id>, paidddd <id>, prepareddd <id>, shipddd <id> <เลขพัสดุ>, doneddd <id>, cancelddd <id>');
+  }
   await saveAdminReply(sessionId, reply);
+  if (tagless) {
+    // ยืนยันกลับว่าไปห้องไหน — กันส่งผิดห้องแบบเงียบ ๆ
+    const meta = chatInboxMetaMap()[sessionId] || {};
+    const name = String(meta.customerName || meta.visitorName || '').trim();
+    await pushToAdmin(`✓ ส่งถึงห้องล่าสุด #${sessionId}${name ? ` (${name})` : ''}\nถ้าต้องการตอบห้องอื่น พิมพ์ #รหัสห้อง นำหน้าข้อความ หรือดูรายชื่อด้วย listddd`);
+  }
 }
 async function handleOrderCommand(cmd, rest) {
   if (cmd === 'ordersddd') {

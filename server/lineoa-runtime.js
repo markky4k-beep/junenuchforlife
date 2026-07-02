@@ -71,6 +71,13 @@ export function createLineRuntime(deps = {}) {
     return '';
   }
 
+  // ต้องไม่ว่างทั้งคู่ — กันกรณี LINE_ADMIN_USER_ID ยังไม่ตั้ง ('' === '' จะกลายเป็นแอดมินทั้งที่ไม่ใช่)
+  function isLineAdminSource(source = {}) {
+    const admin = String(typeof adminUserId === 'function' ? adminUserId() || '' : '').trim();
+    const userId = String(source?.userId || '').trim();
+    return Boolean(admin && userId && userId === admin);
+  }
+
   const lineTraceByReplyToken = new Map();
 
   function createLineTrace(event = {}) {
@@ -3278,7 +3285,7 @@ export function createLineRuntime(deps = {}) {
       lineTraceStep(event, 'handle_follow_done');
       return;
     }
-    if (event.source?.userId === adminUserId() && event.type === 'postback') {
+    if (isLineAdminSource(event.source) && event.type === 'postback') {
       lineTraceStep(event, 'admin_postback_start');
       if (await handleLineAdminPostbackEvent(event)) return;
     }
@@ -3286,7 +3293,7 @@ export function createLineRuntime(deps = {}) {
       lineTraceStep(event, 'postback_start');
       if (await handleLinePostbackEvent(event)) return;
     }
-    if (event.type === 'message' && event.message?.type === 'text' && event.source?.userId === adminUserId()) {
+    if (event.type === 'message' && event.message?.type === 'text' && isLineAdminSource(event.source)) {
       lineTraceStep(event, 'admin_text_start');
       await handleAdminMessage(String(event.message.text || '').trim());
       lineTraceStep(event, 'admin_text_done');
@@ -3411,91 +3418,110 @@ export function createLineRuntime(deps = {}) {
     const bodyEvents = Array.isArray(body?.events) ? body.events : [];
     const requestTraceStartedAt = Date.now();
     await ensureSettingsFresh();
-    for (const event of body.events || []) {
-      const eventStartedAt = Date.now();
-      const eventType = String(event?.type || '').trim();
-      const messageType = String(event?.message?.type || '').trim();
-      const textPreview = lineEventText(event).slice(0, 160);
-      const sourceKey = lineSourceKey(event?.source || {});
-      let eventKey = '';
-      try {
-        event.__lineTrace = createLineTrace(event);
-        bindLineTrace(event, event.__lineTrace);
-        lineTraceStep(event, 'request_verify_done', { bodyEventCount: bodyEvents.length });
-        lineTraceStep(event, 'settings_ready', { elapsedMs: Math.max(0, eventStartedAt - requestTraceStartedAt) });
-        if (ensureLineWebhookEventIdempotency) {
-          lineTraceStep(event, 'idempotency_start');
-          const idempotency = await ensureLineWebhookEventIdempotency(event);
-          lineTraceStep(event, 'idempotency_done', { duplicate: !!idempotency?.duplicate });
-          eventKey = String(idempotency?.eventKey || '').trim();
-          if (idempotency?.duplicate) {
-            if (recordLineWebhookAudit) {
-              await recordLineWebhookAudit({
-                eventKey,
-                eventType,
-                sourceKey,
-                messageType,
-                textPreview,
-                result: 'duplicate',
-                note: 'duplicate webhook event skipped',
-                durationMs: Date.now() - eventStartedAt,
-              });
-            }
-            await flushLineTrace(event, { result: 'success', eventKey });
-            releaseLineTrace(event);
-            continue;
-          }
-        }
-        await processLineWebhookEvent(event);
-        await flushLineTrace(event, { result: 'success', eventKey });
-        if (recordLineWebhookAudit) {
-          await recordLineWebhookAudit({
-            eventKey,
-            eventType,
-            sourceKey,
-            messageType,
-            textPreview,
-            result: 'success',
-            durationMs: Date.now() - eventStartedAt,
-          });
-        }
-      } catch (err) {
-        await flushLineTrace(event, { result: 'failed', eventKey, error: err?.message || String(err || '') });
-        if (recordLineWebhookAudit) {
-          await recordLineWebhookAudit({
-            eventKey,
-            eventType,
-            sourceKey,
-            messageType,
-            textPreview,
-            result: 'failed',
-            error: err?.message || String(err || ''),
-            durationMs: Date.now() - eventStartedAt,
-          });
-        }
-        if (recordSystemEvent) {
-          await recordSystemEvent({
-            level: 'error',
-            source: 'line_webhook',
-            type: 'event_failed',
-            message: `LINE webhook event fail: ${err?.message || 'unknown error'}`,
-            data: {
-              eventKey,
-              eventType,
-              messageType,
-              sourceKey,
-              textPreview,
-            },
-            alert: true,
-            dedupeKey: `line_webhook:${eventType}:${messageType || 'none'}`,
-          });
-        }
-        logger.error('[line] webhook event fail:', err?.message || err);
-      } finally {
-        releaseLineTrace(event);
-      }
+    // audit แบบไม่ block เส้นทางตอบลูกค้า — เก็บ promise ไว้รอปิดงานก่อนตอบ 200
+    // (บน serverless ห้ามปล่อยลอยหลังส่ง response เพราะ instance ถูก freeze)
+    const pendingAudits = [];
+    const auditNonBlocking = (entry) => {
+      if (!recordLineWebhookAudit) return;
+      pendingAudits.push(Promise.resolve().then(() => recordLineWebhookAudit(entry)).catch(() => {}));
+    };
+    // ขนานข้ามลูกค้า แต่เรียงลำดับภายใน source เดียวกัน (ข้อความคนเดิมต้องไม่สลับกัน)
+    const eventGroups = new Map();
+    for (const event of bodyEvents) {
+      const groupKey = lineSourceKey(event?.source || {}) || `anon:${eventGroups.size}`;
+      if (!eventGroups.has(groupKey)) eventGroups.set(groupKey, []);
+      eventGroups.get(groupKey).push(event);
     }
+    await Promise.all([...eventGroups.values()].map(async (groupEvents) => {
+      for (const event of groupEvents) {
+        await handleSingleLineWebhookEvent(event, {
+          bodyEventCount: bodyEvents.length,
+          requestTraceStartedAt,
+          auditNonBlocking,
+        });
+      }
+    }));
+    await Promise.allSettled(pendingAudits);
     return res.status(200).end();
+  }
+
+  async function handleSingleLineWebhookEvent(event, { bodyEventCount = 1, requestTraceStartedAt = Date.now(), auditNonBlocking = () => {} } = {}) {
+    const eventStartedAt = Date.now();
+    const eventType = String(event?.type || '').trim();
+    const messageType = String(event?.message?.type || '').trim();
+    const textPreview = lineEventText(event).slice(0, 160);
+    const sourceKey = lineSourceKey(event?.source || {});
+    let eventKey = '';
+    try {
+      event.__lineTrace = createLineTrace(event);
+      bindLineTrace(event, event.__lineTrace);
+      lineTraceStep(event, 'request_verify_done', { bodyEventCount });
+      lineTraceStep(event, 'settings_ready', { elapsedMs: Math.max(0, eventStartedAt - requestTraceStartedAt) });
+      if (ensureLineWebhookEventIdempotency) {
+        lineTraceStep(event, 'idempotency_start');
+        const idempotency = await ensureLineWebhookEventIdempotency(event);
+        lineTraceStep(event, 'idempotency_done', { duplicate: !!idempotency?.duplicate });
+        eventKey = String(idempotency?.eventKey || '').trim();
+        if (idempotency?.duplicate) {
+          auditNonBlocking({
+            eventKey,
+            eventType,
+            sourceKey,
+            messageType,
+            textPreview,
+            result: 'duplicate',
+            note: 'duplicate webhook event skipped',
+            durationMs: Date.now() - eventStartedAt,
+          });
+          await flushLineTrace(event, { result: 'success', eventKey });
+          releaseLineTrace(event);
+          return;
+        }
+      }
+      await processLineWebhookEvent(event);
+      await flushLineTrace(event, { result: 'success', eventKey });
+      auditNonBlocking({
+        eventKey,
+        eventType,
+        sourceKey,
+        messageType,
+        textPreview,
+        result: 'success',
+        durationMs: Date.now() - eventStartedAt,
+      });
+    } catch (err) {
+      await flushLineTrace(event, { result: 'failed', eventKey, error: err?.message || String(err || '') });
+      auditNonBlocking({
+        eventKey,
+        eventType,
+        sourceKey,
+        messageType,
+        textPreview,
+        result: 'failed',
+        error: err?.message || String(err || ''),
+        durationMs: Date.now() - eventStartedAt,
+      });
+      if (recordSystemEvent) {
+        await recordSystemEvent({
+          level: 'error',
+          source: 'line_webhook',
+          type: 'event_failed',
+          message: `LINE webhook event fail: ${err?.message || 'unknown error'}`,
+          data: {
+            eventKey,
+            eventType,
+            messageType,
+            sourceKey,
+            textPreview,
+          },
+          alert: true,
+          dedupeKey: `line_webhook:${eventType}:${messageType || 'none'}`,
+        });
+      }
+      logger.error('[line] webhook event fail:', err?.message || err);
+    } finally {
+      releaseLineTrace(event);
+    }
   }
 
   return {
