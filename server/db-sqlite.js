@@ -49,6 +49,31 @@ db.exec(`
   );
 `);
 db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_session_meta (
+    session_id TEXT PRIMARY KEY,
+    meta TEXT DEFAULT '{}',
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS line_webhook_events (
+    event_key TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS line_webhook_audits (
+    id TEXT PRIMARY KEY,
+    at INTEGER NOT NULL,
+    event_key TEXT DEFAULT '',
+    event_type TEXT DEFAULT '',
+    source_key TEXT DEFAULT '',
+    message_type TEXT DEFAULT '',
+    text_preview TEXT DEFAULT '',
+    result TEXT DEFAULT '',
+    duration_ms INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    note TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_line_webhook_audits_at ON line_webhook_audits(at DESC);
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -689,6 +714,71 @@ export function adjustStock(id, delta) { S.adjStock.run(delta, id); }
 export function getSetting(key) { return S.getSetting.get(key)?.value; }
 export function setSetting(key, value) { S.setSetting.run(key, value ?? ''); }
 export function allSettings() { return Object.fromEntries(S.allSettings.all().map((r) => [r.key, r.value])); }
+
+// ───────────── chat session meta (แถวละห้อง — เลิกเก็บ blob รวมใน settings) ─────────────
+const CM = {
+  listAll: db.prepare(`SELECT session_id, meta FROM chat_session_meta`),
+  get: db.prepare(`SELECT meta FROM chat_session_meta WHERE session_id=?`),
+  upsert: db.prepare(`INSERT INTO chat_session_meta (session_id, meta, updated_at) VALUES (?,?,?)
+    ON CONFLICT(session_id) DO UPDATE SET meta=excluded.meta, updated_at=excluded.updated_at`),
+  del: db.prepare(`DELETE FROM chat_session_meta WHERE session_id=?`),
+};
+function parseMetaJson(raw) {
+  try {
+    const parsed = JSON.parse(String(raw || '') || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+}
+export function listAllChatSessionMeta() {
+  return Object.fromEntries(CM.listAll.all().map((r) => [r.session_id, parseMetaJson(r.meta)]));
+}
+export function getChatSessionMeta(sessionId) {
+  const row = CM.get.get(sessionId);
+  return row ? parseMetaJson(row.meta) : null;
+}
+export function upsertChatSessionMeta(sessionId, meta = {}) {
+  CM.upsert.run(sessionId, JSON.stringify(meta || {}), Date.now());
+  return meta;
+}
+export function deleteChatSessionMeta(sessionId) { CM.del.run(sessionId); }
+
+// ───────────── LINE webhook idempotency + audit ─────────────
+const LW = {
+  claim: db.prepare(`INSERT OR IGNORE INTO line_webhook_events (event_key, at) VALUES (?,?)`),
+  cleanupEvents: db.prepare(`DELETE FROM line_webhook_events WHERE at < ?`),
+  insAudit: db.prepare(`INSERT INTO line_webhook_audits (id,at,event_key,event_type,source_key,message_type,text_preview,result,duration_ms,error,note)
+    VALUES (@id,@at,@event_key,@event_type,@source_key,@message_type,@text_preview,@result,@duration_ms,@error,@note)`),
+  listAudits: db.prepare(`SELECT * FROM line_webhook_audits ORDER BY at DESC LIMIT ?`),
+  cleanupAudits: db.prepare(`DELETE FROM line_webhook_audits WHERE at < ?`),
+};
+export function claimLineWebhookEvent(eventKey, at = Date.now()) {
+  const info = LW.claim.run(eventKey, at);
+  return { duplicate: info.changes === 0 };
+}
+export function cleanupLineWebhookEvents(beforeTs) { LW.cleanupEvents.run(beforeTs); }
+export function insertLineWebhookAudit(audit = {}) {
+  LW.insAudit.run({
+    id: String(audit.id || ''),
+    at: Number(audit.at || Date.now()),
+    event_key: String(audit.eventKey || ''),
+    event_type: String(audit.eventType || ''),
+    source_key: String(audit.sourceKey || ''),
+    message_type: String(audit.messageType || ''),
+    text_preview: String(audit.textPreview || ''),
+    result: String(audit.result || ''),
+    duration_ms: Number(audit.durationMs || 0),
+    error: String(audit.error || ''),
+    note: String(audit.note || ''),
+  });
+}
+export function listLineWebhookAudits(limit = 40) {
+  return LW.listAudits.all(limit).map((r) => ({
+    id: r.id, at: r.at, eventKey: r.event_key, eventType: r.event_type, sourceKey: r.source_key,
+    messageType: r.message_type, textPreview: r.text_preview, result: r.result,
+    durationMs: r.duration_ms, error: r.error, note: r.note,
+  }));
+}
+export function cleanupLineWebhookAudits(beforeTs) { LW.cleanupAudits.run(beforeTs); }
 
 // ───────────── reviews ─────────────
 export function addReview(productId, userId, name, rating, comment) {

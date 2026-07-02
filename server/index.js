@@ -24,6 +24,8 @@ import {
   adjustStock, reserveOrderResources, releaseOrderResources, getPaymentLog, upsertPaymentLog,
   createLead, getLead, listLeads, updateLead,
   createArticle, getArticle, listArticles, updateArticle, deleteArticle,
+  listAllChatSessionMeta, getChatSessionMeta, upsertChatSessionMeta, deleteChatSessionMeta,
+  claimLineWebhookEvent, cleanupLineWebhookEvents, insertLineWebhookAudit, listLineWebhookAudits, cleanupLineWebhookAudits,
   activeProvider,
 } from './db.js';
 import {
@@ -199,8 +201,11 @@ let settingsCacheAt = 0;
 let settingsRefreshPromise = null;
 const SETTINGS_CACHE_TTL_MS = Math.max(1000, parseInt(process.env.SETTINGS_CACHE_TTL_MS, 10) || (isServerless ? 30000 : 15000));
 async function refreshSettingsCache() {
-  settingsCache = await allSettings();
+  const [nextSettings, nextChatMeta] = await Promise.all([allSettings(), listAllChatSessionMeta()]);
+  settingsCache = nextSettings;
+  chatMetaCache = nextChatMeta;
   settingsCacheAt = Date.now();
+  await migrateLegacyChatMetaBlob().catch((err) => console.error('[chat-meta] legacy migrate fail:', err?.message || err));
   return settingsCache;
 }
 async function ensureSettingsFresh(force = false) {
@@ -610,20 +615,26 @@ function lineWebhookEventKey(event = {}) {
   return `fallback_${crypto.createHash('sha1').update(seed).digest('hex')}`;
 }
 
+// idempotency ผ่านตาราง line_webhook_events (INSERT-if-absent แบบ atomic — ไม่มี race ข้าม instance)
 async function ensureLineWebhookEventIdempotency(event = {}) {
   const eventKey = lineWebhookEventKey(event);
-  const now = Date.now();
-  let duplicate = false;
-  await updateRuntimeDiagnostics((state) => {
-    const processed = compactProcessedEventMap(state.webhook.processed, now);
-    duplicate = Boolean(processed[eventKey]);
-    if (!duplicate) processed[eventKey] = now;
-    state.webhook.processed = processed;
-    state.webhook.counters.received += 1;
-    if (duplicate) state.webhook.counters.duplicate += 1;
-    return state;
-  });
+  const { duplicate } = await claimLineWebhookEvent(eventKey, Date.now());
+  void maybeCleanupLineWebhookStorage();
   return { eventKey, duplicate };
+}
+
+let lineWebhookCleanupAt = 0;
+const LINE_WEBHOOK_AUDIT_RETENTION_MS = 1000 * 60 * 60 * 24 * 14;
+async function maybeCleanupLineWebhookStorage() {
+  const now = Date.now();
+  if (now - lineWebhookCleanupAt < 3600000) return;
+  lineWebhookCleanupAt = now;
+  try {
+    await cleanupLineWebhookEvents(now - LINE_WEBHOOK_PROCESSED_TTL_MS);
+    await cleanupLineWebhookAudits(now - LINE_WEBHOOK_AUDIT_RETENTION_MS);
+  } catch (err) {
+    console.error('[line] webhook storage cleanup fail:', err?.message || err);
+  }
 }
 
 async function recordLineWebhookAudit(entry = {}) {
@@ -641,17 +652,26 @@ async function recordLineWebhookAudit(entry = {}) {
     error: String(entry.error || '').trim().slice(0, 240),
     note: String(entry.note || '').trim().slice(0, 240),
   };
-  await updateRuntimeDiagnostics((state) => {
-    state.webhook.audits.unshift(audit);
-    state.webhook.audits = state.webhook.audits.slice(0, LINE_WEBHOOK_AUDIT_LIMIT);
-    if (audit.result === 'success') state.webhook.counters.success += 1;
-    else if (audit.result === 'duplicate') state.webhook.counters.ignored += 1;
-    else if (audit.result === 'signature_rejected') state.webhook.counters.signatureRejected += 1;
-    else if (audit.result === 'parse_failed') state.webhook.counters.parseFailed += 1;
-    else if (audit.result !== 'received') state.webhook.counters.failed += 1;
-    return state;
-  });
+  try {
+    await insertLineWebhookAudit(audit);
+  } catch (err) {
+    console.error('[line] webhook audit insert fail:', err?.message || err);
+  }
   return audit;
+}
+
+function summarizeLineWebhookAudits(audits = []) {
+  const counters = { received: 0, duplicate: 0, success: 0, failed: 0, signatureRejected: 0, parseFailed: 0, ignored: 0 };
+  for (const audit of audits) {
+    counters.received += 1;
+    const result = String(audit?.result || '');
+    if (result === 'success') counters.success += 1;
+    else if (result === 'duplicate') { counters.duplicate += 1; counters.ignored += 1; }
+    else if (result === 'signature_rejected') counters.signatureRejected += 1;
+    else if (result === 'parse_failed') counters.parseFailed += 1;
+    else if (result !== 'received') counters.failed += 1;
+  }
+  return counters;
 }
 
 function buildHealthSnapshot() {
@@ -968,35 +988,46 @@ function parseChatInboxMeta(raw = '') {
     return {};
   }
 }
+// meta ต่อห้องเก็บเป็นแถวใน chat_session_meta (ตารางจริง) — cache ใน memory ให้ helper sync ใช้ได้
+let chatMetaCache = {};
+let chatMetaBlobMigrated = false;
 function chatInboxMetaMap() {
-  return parseChatInboxMeta(settingsCache[CHAT_INBOX_META_KEY] || '');
+  return chatMetaCache || {};
 }
-async function writeChatInboxMetaMap(meta = {}) {
-  const serialized = JSON.stringify(meta);
-  await setSetting(CHAT_INBOX_META_KEY, serialized);
-  settingsCache[CHAT_INBOX_META_KEY] = serialized;
-  settingsCacheAt = Date.now();
-  return meta;
+// ย้ายข้อมูลจาก blob เดิมใน settings เข้าตารางครั้งเดียว (รองรับ deploy แรกหลังเปลี่ยนโครงสร้าง)
+async function migrateLegacyChatMetaBlob() {
+  if (chatMetaBlobMigrated) return;
+  chatMetaBlobMigrated = true;
+  const legacy = parseChatInboxMeta(settingsCache[CHAT_INBOX_META_KEY] || '');
+  const keys = Object.keys(legacy);
+  if (!keys.length) return;
+  for (const key of keys) {
+    if (chatMetaCache[key]) continue;
+    chatMetaCache[key] = legacy[key];
+    await upsertChatSessionMeta(key, legacy[key]);
+  }
+  await setSetting(CHAT_INBOX_META_KEY, '');
+  settingsCache[CHAT_INBOX_META_KEY] = '';
+  console.log(`[chat-meta] migrated ${keys.length} legacy sessions from settings blob`);
 }
 async function patchChatInboxMeta(sessionId, patch = {}) {
   const key = normalizeChatSessionId(sessionId);
   if (!key) return {};
-  const meta = chatInboxMetaMap();
-  meta[key] = {
-    ...(meta[key] || {}),
+  const current = chatMetaCache[key] || (await getChatSessionMeta(key)) || {};
+  const merged = {
+    ...current,
     ...patch,
     updatedAt: Date.now(),
   };
-  await writeChatInboxMetaMap(meta);
-  return meta[key];
+  chatMetaCache[key] = merged;
+  await upsertChatSessionMeta(key, merged);
+  return merged;
 }
 async function removeChatInboxMeta(sessionId) {
   const key = normalizeChatSessionId(sessionId);
   if (!key) return false;
-  const meta = chatInboxMetaMap();
-  if (!(key in meta)) return false;
-  delete meta[key];
-  await writeChatInboxMetaMap(meta);
+  delete chatMetaCache[key];
+  await deleteChatSessionMeta(key);
   return true;
 }
 async function markChatSessionRead(sessionId, at = Date.now()) {
@@ -2858,7 +2889,7 @@ app.get('/api/admin/diagnostics', requireAdmin, async (_req, res) => {
   const runtime = runtimeDiagnosticsState();
   const currentValidation = buildSystemValidationReport('admin_diagnostics');
   const health = buildHealthSnapshot();
-  const webhook = runtime.webhook || {};
+  const audits = await listLineWebhookAudits(300).catch(() => []);
   res.json({
     ok: true,
     generatedAt: Date.now(),
@@ -2869,9 +2900,9 @@ app.get('/api/admin/diagnostics', requireAdmin, async (_req, res) => {
       recentEvents: Array.isArray(runtime.events) ? runtime.events.slice(0, 30) : [],
       recentAlerts: Array.isArray(runtime.alerts) ? runtime.alerts.slice(0, 20) : [],
       webhook: {
-        counters: webhook.counters || {},
-        processedCount: Object.keys(webhook.processed || {}).length,
-        audits: Array.isArray(webhook.audits) ? webhook.audits.slice(0, 40) : [],
+        counters: summarizeLineWebhookAudits(audits),
+        processedCount: audits.length,
+        audits: audits.slice(0, 40),
       },
     },
   });
@@ -2908,6 +2939,29 @@ app.put('/api/admin/reviews', requireAdmin, async (req, res) => {
   await setSetting(REVIEW_GALLERY_OVERRIDES_KEY, serializeReviewGalleryOverrides(overrides));
   await refreshSettingsCache();
   res.json({ ok: true, gallery: mergedReviewGalleryData() });
+});
+// รายชื่อคนที่เคยทัก LINE OA (จาก inbox meta) — ใช้เลือกตั้ง LINE_ADMIN_USER_ID ให้ push แจ้งเตือนถึงจริง
+app.get('/api/admin/line/recent-senders', requireAdmin, async (_req, res) => {
+  await ensureSettingsFresh();
+  const currentAdminUserId = String(adminUserId() || '').trim();
+  const byUserId = new Map();
+  for (const [sessionId, meta] of Object.entries(chatInboxMetaMap())) {
+    const lineUserId = String(meta?.lineUserId || '').trim();
+    if (!lineUserId) continue;
+    const lastActiveAt = Number(meta.lastCustomerAt || meta.updatedAt || 0);
+    const existing = byUserId.get(lineUserId);
+    if (existing && existing.lastActiveAt >= lastActiveAt) continue;
+    byUserId.set(lineUserId, {
+      sessionId,
+      lineUserId,
+      name: String(meta.customerName || meta.visitorName || '').trim() || `LINE-${lineUserId.slice(-6)}`,
+      avatar: String(meta.customerAvatar || '').trim(),
+      lastActiveAt,
+      isCurrentAdmin: lineUserId === currentAdminUserId,
+    });
+  }
+  const senders = [...byUserId.values()].sort((a, b) => b.lastActiveAt - a.lastActiveAt).slice(0, 20);
+  res.json({ ok: true, currentAdminUserId, senders });
 });
 app.post('/api/admin/test-line', requireAdmin, async (req, res) => {
   if (!lineClient() || !adminUserId()) return res.status(400).json({ error: 'ยังไม่ได้ตั้งค่า LINE token หรือ admin userId' });

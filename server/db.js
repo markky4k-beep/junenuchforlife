@@ -79,6 +79,16 @@ export const getSetting = (...args) => active.getSetting(...args);
 export const setSetting = (...args) => active.setSetting(...args);
 export const allSettings = (...args) => active.allSettings(...args);
 
+export const listAllChatSessionMeta = (...args) => active.listAllChatSessionMeta(...args);
+export const getChatSessionMeta = (...args) => active.getChatSessionMeta(...args);
+export const upsertChatSessionMeta = (...args) => active.upsertChatSessionMeta(...args);
+export const deleteChatSessionMeta = (...args) => active.deleteChatSessionMeta(...args);
+export const claimLineWebhookEvent = (...args) => active.claimLineWebhookEvent(...args);
+export const cleanupLineWebhookEvents = (...args) => active.cleanupLineWebhookEvents(...args);
+export const insertLineWebhookAudit = (...args) => active.insertLineWebhookAudit(...args);
+export const listLineWebhookAudits = (...args) => active.listLineWebhookAudits(...args);
+export const cleanupLineWebhookAudits = (...args) => active.cleanupLineWebhookAudits(...args);
+
 export const addReview = (...args) => active.addReview(...args);
 export const listReviews = (...args) => active.listReviews(...args);
 export const reviewStats = (...args) => active.reviewStats(...args);

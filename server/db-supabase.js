@@ -857,6 +857,79 @@ export async function allSettings() {
   return Object.fromEntries((data || []).map((r) => [r.key, r.value]));
 }
 
+// ───────────── chat session meta (แถวละห้อง — เลิกเก็บ blob รวมใน settings) ─────────────
+function parseMetaJson(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  try {
+    const parsed = JSON.parse(String(raw || '') || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+}
+export async function listAllChatSessionMeta() {
+  const { data, error } = await supabase.from('chat_session_meta').select('session_id,meta');
+  fail(error, 'listAllChatSessionMeta');
+  return Object.fromEntries((data || []).map((r) => [r.session_id, parseMetaJson(r.meta)]));
+}
+export async function getChatSessionMeta(sessionId) {
+  const { data, error } = await supabase.from('chat_session_meta').select('meta').eq('session_id', sessionId).maybeSingle();
+  fail(error, 'getChatSessionMeta');
+  return data ? parseMetaJson(data.meta) : null;
+}
+export async function upsertChatSessionMeta(sessionId, meta = {}) {
+  const { error } = await supabase.from('chat_session_meta')
+    .upsert({ session_id: sessionId, meta: meta || {}, updated_at: Date.now() }, { onConflict: 'session_id' });
+  fail(error, 'upsertChatSessionMeta');
+  return meta;
+}
+export async function deleteChatSessionMeta(sessionId) {
+  const { error } = await supabase.from('chat_session_meta').delete().eq('session_id', sessionId);
+  fail(error, 'deleteChatSessionMeta');
+}
+
+// ───────────── LINE webhook idempotency + audit ─────────────
+export async function claimLineWebhookEvent(eventKey, at = Date.now()) {
+  const { error } = await supabase.from('line_webhook_events').insert({ event_key: eventKey, at });
+  if (error) {
+    if (String(error.code) === '23505' || /duplicate key/i.test(String(error.message || ''))) return { duplicate: true };
+    fail(error, 'claimLineWebhookEvent');
+  }
+  return { duplicate: false };
+}
+export async function cleanupLineWebhookEvents(beforeTs) {
+  const { error } = await supabase.from('line_webhook_events').delete().lt('at', beforeTs);
+  fail(error, 'cleanupLineWebhookEvents');
+}
+export async function insertLineWebhookAudit(audit = {}) {
+  const { error } = await supabase.from('line_webhook_audits').insert({
+    id: String(audit.id || ''),
+    at: Number(audit.at || Date.now()),
+    event_key: String(audit.eventKey || ''),
+    event_type: String(audit.eventType || ''),
+    source_key: String(audit.sourceKey || ''),
+    message_type: String(audit.messageType || ''),
+    text_preview: String(audit.textPreview || ''),
+    result: String(audit.result || ''),
+    duration_ms: Number(audit.durationMs || 0),
+    error: String(audit.error || ''),
+    note: String(audit.note || ''),
+  });
+  fail(error, 'insertLineWebhookAudit');
+}
+export async function listLineWebhookAudits(limit = 40) {
+  const { data, error } = await supabase.from('line_webhook_audits')
+    .select('*').order('at', { ascending: false }).limit(limit);
+  fail(error, 'listLineWebhookAudits');
+  return (data || []).map((r) => ({
+    id: r.id, at: Number(r.at), eventKey: r.event_key, eventType: r.event_type, sourceKey: r.source_key,
+    messageType: r.message_type, textPreview: r.text_preview, result: r.result,
+    durationMs: Number(r.duration_ms || 0), error: r.error, note: r.note,
+  }));
+}
+export async function cleanupLineWebhookAudits(beforeTs) {
+  const { error } = await supabase.from('line_webhook_audits').delete().lt('at', beforeTs);
+  fail(error, 'cleanupLineWebhookAudits');
+}
+
 export async function addReview(productId, userId, name, rating, comment) {
   const { error } = await supabase.from('reviews').insert({
     product_id: productId,

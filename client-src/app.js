@@ -5769,6 +5769,7 @@ async function viewAdminSettings() {
   if (!adminGuard()) return loadingView();
   const settings = await (await api('/api/admin/settings')).json();
   const health = await (await api('/api/health')).json();
+  const lineSenders = await (await api('/api/admin/line/recent-senders')).json().catch(() => ({ senders: [] }));
   const settingMap = Object.fromEntries(settings.map((item) => [item.key, item]));
   const labels = {
     LINE_CHANNEL_ACCESS_TOKEN: 'LINE Channel Access Token', LINE_CHANNEL_SECRET: 'LINE Channel Secret',
@@ -5801,6 +5802,19 @@ async function viewAdminSettings() {
       <div class="form-note" style="margin:0 0 12px"><b>Admin commands:</b> <code>listddd</code>, <code>ordersddd</code>, <code>orderddd ORDER_ID</code>, <code>paidddd ORDER_ID</code>, <code>prepareddd ORDER_ID</code>, <code>shipddd ORDER_ID TRACKING</code>, <code>doneddd ORDER_ID</code>, <code>cancelddd ORDER_ID</code></div>
       <div class="form-note" style="margin:0">การตอบห้องแชตยังใช้รูปแบบเดิม: <code>#SESSION_ID ข้อความ</code></div>
     </div>`;
+  const senderRows = (Array.isArray(lineSenders.senders) ? lineSenders.senders : []).map((s) => `<div class="adm-prod">
+    <div class="adm-prod-info"><b>${esc(s.name)} ${s.isCurrentAdmin ? '<span class="status-badge s-paid">แอดมินปัจจุบัน</span>' : ''}</b>
+    <span class="muted"><code>${esc(s.lineUserId)}</code>${s.lastActiveAt ? ' · ทักล่าสุด ' + new Date(s.lastActiveAt).toLocaleString('th-TH') : ''}</span></div>
+    <div class="adm-prod-act">${s.isCurrentAdmin ? '' : `<button class="btn-mini" type="button" data-setlineadmin="${esc(s.lineUserId)}">ตั้งเป็นแอดมิน</button>`}</div>
+  </div>`).join('');
+  const adminCapture = `
+    <div class="glass" style="padding:18px;margin-top:16px">
+      <h3 style="margin:0 0 10px">ผูกแอดมินรับแจ้งเตือน LINE ${lineSenders.currentAdminUserId ? '' : '<span class="status-badge s-awaiting_payment">ยังไม่ได้ตั้ง</span>'}</h3>
+      <p class="muted" style="margin:0 0 12px">แจ้งเตือน (ลูกค้าทักแชต/ออเดอร์ใหม่/แจ้งโอน) จะ push ไปหา userId นี้ — <b>ต้องเป็น userId ของบัญชีที่เป็นเพื่อนกับ OA นี้เท่านั้น</b> ไม่งั้นระบบส่งไม่ได้ (LINE ตอบ 400)</p>
+      <p class="muted" style="margin:0 0 12px">วิธีผูก: ① มือถือแอดมินแอดเพื่อน OA ② ส่งข้อความอะไรก็ได้หา OA ③ กดรีเฟรชรายชื่อด้านล่าง ④ กด "ตั้งเป็นแอดมิน" แล้วระบบจะส่งข้อความทดสอบให้ทันที</p>
+      <div class="pf-actions" style="margin:0 0 12px"><button class="btn btn-glass" type="button" id="refreshLineSendersBtn">รีเฟรชรายชื่อ</button></div>
+      <div class="adm-list">${senderRows || '<p class="muted">ยังไม่มีใครทักเข้ามาทาง LINE OA — ให้แอดมินส่งข้อความหา OA ก่อนแล้วกดรีเฟรช</p>'}</div>
+    </div>`;
   return adminLayout('settings', `<h2>ตั้งค่า API / LINE OA</h2>
     <div class="conn-status">LINE OA ${badge(health.lineConfigured)} · Stripe ${badge(health.stripeConfigured)} · PromptPay ${badge(health.promptpayConfigured)} · SlipOK ${badge(health.slipokConfigured)} · อีเมล ${badge(health.mailConfigured)}</div>
     <form id="settingsForm" class="set-form glass">
@@ -5819,6 +5833,7 @@ async function viewAdminSettings() {
       <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึกการตั้งค่า</button><button class="btn btn-glass" type="button" id="testLineBtn">ทดสอบส่ง LINE</button><button class="btn btn-glass" type="button" id="testLineRoomBtn">ทดสอบลิงก์ห้องแชต</button><button class="btn btn-glass" type="button" id="testMailBtn">ทดสอบส่งอีเมล</button><a class="btn btn-glass" href="${routeHref('/admin/diagnostics')}">เปิด Diagnostics</a></div>
     </form>
     <p class="form-note">ค่า secret จะแสดงแบบปิดบัง เว้นว่างไว้ = ใช้ค่าเดิม · บันทึกแล้วมีผลทันทีไม่ต้องรีสตาร์ท</p>
+    ${adminCapture}
     ${cheatSheet}`);
 }
 function diagnosticsStateBadge(status = 'info') {
@@ -7783,6 +7798,32 @@ document.body.addEventListener('click', async (e) => {
     try { const r = await api('/api/admin/test-line', { method: 'POST' }); const d = await r.json(); if (!r.ok) throw new Error(d.error); toast('ส่งข้อความทดสอบไป LINE แล้ว', 'ok'); }
     catch (err) { toast(err.message || 'ส่งไม่สำเร็จ', 'err'); }
     e.target.disabled = false; return;
+  }
+  if (id === 'refreshLineSendersBtn') {
+    e.target.disabled = true;
+    try { await render(); toast('รีเฟรชรายชื่อแล้ว', 'ok'); }
+    catch (err) { toast(err.message || 'รีเฟรชไม่สำเร็จ', 'err'); }
+    return;
+  }
+  const setLineAdminBtn = e.target.closest('[data-setlineadmin]');
+  if (setLineAdminBtn) {
+    const lineUserId = String(setLineAdminBtn.dataset.setlineadmin || '').trim();
+    if (!lineUserId) return;
+    setLineAdminBtn.disabled = true;
+    try {
+      const saveRes = await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings: { LINE_ADMIN_USER_ID: lineUserId } }) });
+      const saved = await saveRes.json().catch(() => ({}));
+      if (!saveRes.ok) throw new Error(saved.error || 'บันทึกไม่สำเร็จ');
+      const testRes = await api('/api/admin/test-line', { method: 'POST' });
+      const tested = await testRes.json().catch(() => ({}));
+      if (!testRes.ok) throw new Error(tested.error || 'บันทึกแล้ว แต่ส่งข้อความทดสอบไม่สำเร็จ — เช็คว่าบัญชีนี้เป็นเพื่อนกับ OA แล้ว');
+      toast('ตั้งแอดมินแล้ว + ส่งข้อความทดสอบสำเร็จ ✓ เช็ค LINE ได้เลย', 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message || 'ตั้งแอดมินไม่สำเร็จ', 'err');
+      setLineAdminBtn.disabled = false;
+    }
+    return;
   }
   if (id === 'testLineRoomBtn') {
     e.target.disabled = true;

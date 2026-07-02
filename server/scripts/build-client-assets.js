@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { minify } from 'terser';
 
@@ -125,4 +126,36 @@ const tasks = [
 ];
 
 await Promise.all(tasks.map(buildTask));
-console.log(`built ${tasks.length} client assets`);
+
+// stamp ?v= ด้วย content hash อัตโนมัติ — จำเป็นเพราะ asset พวกนี้ถูก cache แบบ immutable 1 ปี
+async function contentHash(file) {
+  const buf = await fs.readFile(file);
+  return crypto.createHash('md5').update(buf).digest('hex').slice(0, 10);
+}
+
+async function stampAssetVersions(htmlFile, hashByAsset) {
+  let html = await fs.readFile(htmlFile, 'utf8');
+  for (const [assetPath, hash] of Object.entries(hashByAsset)) {
+    const escaped = assetPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    html = html.replace(new RegExp(`(${escaped})(\\?v=[A-Za-z0-9._-]+)?`, 'g'), `$1?v=${hash}`);
+  }
+  await fs.writeFile(htmlFile, html, 'utf8');
+}
+
+const [stylesHash, appHash, bg3dHash, adminAppHash] = await Promise.all([
+  contentHash(path.join(projectRoot, 'public', 'styles.css')),
+  contentHash(path.join(projectRoot, 'public', 'app.js')),
+  contentHash(path.join(projectRoot, 'public', 'bg3d.js')),
+  contentHash(path.join(projectRoot, 'private-build', 'admin-app.js')),
+]);
+await stampAssetVersions(path.join(projectRoot, 'public', 'index.html'), {
+  '/styles.css': stylesHash,
+  '/app.js': appHash,
+  '/bg3d.js': bg3dHash,
+});
+await stampAssetVersions(path.join(projectRoot, 'private-build', 'admin.html'), {
+  '/styles.css': stylesHash,
+  '/api/admin/client/app.js': adminAppHash,
+  '/bg3d.js': bg3dHash,
+});
+console.log(`built ${tasks.length} client assets (styles=${stylesHash} app=${appHash} bg3d=${bg3dHash} admin=${adminAppHash})`);
