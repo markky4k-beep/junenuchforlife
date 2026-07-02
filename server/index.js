@@ -1157,21 +1157,27 @@ async function routeCustomerMessage({ sessionId, name, text, via = 'rest', at = 
   current.name = visitorName;
   current.lastActiveAt = now;
   sessions.set(normalizedSessionId, current);
-  await rememberLastActiveSession(normalizedSessionId);
-  await saveMessage(normalizedSessionId, 'customer', clean, now);
-  await patchChatInboxMeta(normalizedSessionId, {
-    visitorName,
-    customerName: metaPatch.customerName || visitorName,
-    channel: effectiveChannel,
-    channelLabel: lineChannelLabel(effectiveChannel),
-    replyMode: effectiveReplyMode || undefined,
-    lastCustomerAt: now,
-    lastMessageVia: via,
-    ...metaPatch,
-  });
-  await emitAdminInboxUpdate({ type: 'customer_message', sessionId: normalizedSessionId, text: clean, name: visitorName });
-  if (effectiveChannel === 'line_oa') return { sessionId: normalizedSessionId, name: visitorName, at: now };
-  await pushToAdmin(`[#${normalizedSessionId}] ${visitorName}:\n${clean}\n\n(ตอบกลับ: #${normalizedSessionId} ข้อความ)`);
+  // จังหวะ 1: งานเขียนอิสระต่อกัน — ยิงขนานลดเวลารอ (เดิมเรียงคิวทีละ round trip)
+  await Promise.all([
+    rememberLastActiveSession(normalizedSessionId),
+    saveMessage(normalizedSessionId, 'customer', clean, now),
+    patchChatInboxMeta(normalizedSessionId, {
+      visitorName,
+      customerName: metaPatch.customerName || visitorName,
+      channel: effectiveChannel,
+      channelLabel: lineChannelLabel(effectiveChannel),
+      replyMode: effectiveReplyMode || undefined,
+      lastCustomerAt: now,
+      lastMessageVia: via,
+      ...metaPatch,
+    }),
+  ]);
+  // จังหวะ 2: แจ้งเตือน (หลังข้อความถูกเซฟแล้ว) — broadcast กับ LINE push ขนานกันได้
+  const notifyTasks = [emitAdminInboxUpdate({ type: 'customer_message', sessionId: normalizedSessionId, text: clean, name: visitorName })];
+  if (effectiveChannel !== 'line_oa') {
+    notifyTasks.push(pushToAdmin(`[#${normalizedSessionId}] ${visitorName}:\n${clean}\n\n(ตอบกลับ: #${normalizedSessionId} ข้อความ)`));
+  }
+  await Promise.all(notifyTasks);
   return { sessionId: normalizedSessionId, name: visitorName, at: now };
 }
 async function saveAdminReply(sessionId, text, options = {}) {
@@ -1183,15 +1189,20 @@ async function saveAdminReply(sessionId, text, options = {}) {
   const channel = String(meta.channel || options.channel || 'web').trim() || 'web';
   const replyMode = channel === 'line_oa' ? lineReplyMode(meta) : LINE_CHAT_MODE_REPLY;
   if (channel === 'line_oa' && replyMode !== LINE_CHAT_MODE_WEB_ROOM) await deliverLineReply(normalizedSessionId, clean, meta);
-  await saveMessage(normalizedSessionId, 'admin', clean, at);
-  await markChatSessionRead(normalizedSessionId, at);
-  await patchChatInboxMeta(normalizedSessionId, {
-    lastAdminAt: at,
-    lastMessageVia: channel === 'line_oa' && replyMode !== LINE_CHAT_MODE_WEB_ROOM ? 'line_push' : 'admin_reply',
-    replyMode: channel === 'line_oa' ? replyMode : undefined,
-  });
-  await emitChatMessageToSession(normalizedSessionId, { from: 'admin', text: clean, at });
-  await emitAdminInboxUpdate({ type: 'admin_message', sessionId: normalizedSessionId, text: clean });
+  // เซฟข้อความ + รวม lastReadAt เข้า patch เดียว (เดิมแยก 2 ครั้ง = เขียนแถวเดิมซ้อนกันเอง)
+  await Promise.all([
+    saveMessage(normalizedSessionId, 'admin', clean, at),
+    patchChatInboxMeta(normalizedSessionId, {
+      lastReadAt: at,
+      lastAdminAt: at,
+      lastMessageVia: channel === 'line_oa' && replyMode !== LINE_CHAT_MODE_WEB_ROOM ? 'line_push' : 'admin_reply',
+      replyMode: channel === 'line_oa' ? replyMode : undefined,
+    }),
+  ]);
+  await Promise.all([
+    emitChatMessageToSession(normalizedSessionId, { from: 'admin', text: clean, at }),
+    emitAdminInboxUpdate({ type: 'admin_message', sessionId: normalizedSessionId, text: clean }),
+  ]);
   return { sessionId: normalizedSessionId, text: clean, at };
 }
 async function resolveSocketAdmin(auth = {}) {
