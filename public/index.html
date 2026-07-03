@@ -23,7 +23,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css?v=47345cd829" />
+  <link rel="stylesheet" href="/styles.css?v=15f677d705" />
 </head>
 <body>
   <div id="saleBanner" class="sale-banner"></div>
@@ -57,11 +57,16 @@
       <nav class="nav-links" id="navLinks">
         <a href="/#/">หน้าแรก</a>
         <a href="/#/products">สินค้า</a>
+        <a href="/#/community">ชุมชน</a>
         <a href="/#/reviews">รีวิวลูกค้า</a>
-        <a href="/#/calc">คำนวณอัตรา</a>
-        <a href="/#/articles">บทความ</a>
-        <a href="/#/track">ติดตามออเดอร์</a>
-        <a href="/#/about">เกี่ยวกับเรา</a>
+        <div class="nav-more">
+          <button class="nav-more-toggle" type="button" data-nav-more-toggle aria-expanded="false">เพิ่มเติม</button>
+          <div class="nav-more-menu">
+            <a href="/#/track">ติดตาม</a>
+            <a href="/#/calc">คำนวณอัตรา</a>
+            <a href="/#/about">เกี่ยวกับเรา</a>
+          </div>
+        </div>
       </nav>
       <div class="nav-tools">
         <div class="nav-account" id="navAccount"></div>
@@ -232,7 +237,8 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-  <script src="/app.js?v=50ef122af4"></script>
-  <script type="module" src="/bg3d.js?v=285f09ed59"></script>
+  <script src="/client-core.js?v=1fbafa900a"></script>
+  <script src="/app.js?v=4db4d0d6ab"></script>
+  <script type="module" src="/bg3d.js?v=e49223e6b3"></script>
 </body>
 </html>

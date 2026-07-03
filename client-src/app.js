@@ -1,16 +1,29 @@
 // ════════════════════════ State ════════════════════════
 let PRODUCTS = [];
+let productsCachePromise = null;
+let productsCacheLoaded = false;
 let ARTICLES = null;            // แคชบทความในหน่วยความจำ (โหลดครั้งเดียว ใช้ซ้ำ)
 let _afterRender = null;        // callback ทำงานหลังวาดหน้าเสร็จ (hydrate ข้อมูลแบบไม่บล็อก)
 let REVIEW_GALLERY = [];
 let reviewGalleryPromise = null;
 async function refreshProductsCache() {
+  if (productsCachePromise) return productsCachePromise;
+  productsCachePromise = (async () => {
   try {
     const response = await fetch('/api/products', { cache: 'no-store' });
     PRODUCTS = sortProductsForDisplay(await response.json());
   } catch {
     PRODUCTS = [];
+  } finally {
+    productsCacheLoaded = true;
   }
+  return PRODUCTS;
+  })().finally(() => { productsCachePromise = null; });
+  return productsCachePromise;
+}
+async function ensureProductsCache() {
+  if (productsCacheLoaded) return PRODUCTS;
+  return refreshProductsCache();
 }
 async function refreshArticlesCache() {
   try { ARTICLES = await (await fetch('/api/articles')).json(); }
@@ -117,24 +130,48 @@ function isFullAdminClient(user = currentUser) {
 function isChatAdminClient(user = currentUser) {
   return userRole(user) === ROLE_CHAT_ADMIN;
 }
+function userStoreRolesClient(user = currentUser) {
+  return Array.isArray(user?.storeRoles) ? user.storeRoles : [];
+}
+function currentStoreRoleClient(user = currentUser) {
+  const roles = userStoreRolesClient(user);
+  const selected = adminSelectedStoreId();
+  return String((roles.find((role) => String(role.storeId || '') === selected) || roles[0] || {}).role || '').trim();
+}
+function hasStoreConsoleClient(user = currentUser) {
+  return userStoreRolesClient(user).length > 0;
+}
 function canAccessAdminShellClient(user = currentUser) {
-  return isFullAdminClient(user) || isChatAdminClient(user);
+  return isFullAdminClient(user) || isChatAdminClient(user) || hasStoreConsoleClient(user);
 }
 function canAccessAdminInboxClient(user = currentUser) {
   return canAccessAdminShellClient(user);
 }
 function adminDefaultRoute(user = currentUser) {
+  if (!isFullAdminClient(user) && currentStoreRoleClient(user) === 'chat_admin') return '/admin/inbox';
   return isChatAdminClient(user) ? '/admin/inbox' : '/admin';
 }
 function accountRoleLabel(user = currentUser) {
   if (isFullAdminClient(user)) return 'ADMIN';
   if (isChatAdminClient(user)) return 'ADMIN CHAT';
+  if (hasStoreConsoleClient(user)) return 'STORE STAFF';
   return 'MEMBER';
 }
 function accountRoleDescription(user = currentUser) {
   if (isFullAdminClient(user)) return ' · ผู้ดูแลระบบ';
   if (isChatAdminClient(user)) return ' · ผู้ดูแลแชต';
+  if (hasStoreConsoleClient(user)) return ' · ทีมดูแลร้าน';
   return '';
+}
+function userDisplayName(user = currentUser) {
+  return String(user?.username || user?.name || user?.email || 'สมาชิก').trim();
+}
+function userAvatarUrl(user = currentUser) {
+  return String(user?.avatar || '').trim();
+}
+function avatarHTML({ name = '', avatar = '', cls = 'community-avatar' } = {}) {
+  const label = String(name || 'สมาชิก').trim();
+  return `<div class="${cls}">${avatar ? `<img src="${esc(avatar)}" alt="${esc(label)}">` : esc(label.slice(0, 1) || 'ส')}</div>`;
 }
 function setAuth(_token, user, _adminKey = '') {
   authToken = '';
@@ -162,9 +199,63 @@ function setAuth(_token, user, _adminKey = '') {
   syncAdminInboxChrome();
 }
 async function api(path, opts = {}) {
+  const moduleApi = window.NFLClientModules?.api;
+  if (moduleApi?.request) return moduleApi.request(path, opts, { selectedStoreId: adminSelectedStoreId });
   const headers = { ...(opts.headers || {}) };
   if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  if (String(path || '').startsWith('/api/admin/') && !headers['x-store-id']) {
+    headers['x-store-id'] = adminSelectedStoreId();
+  }
   return fetch(path, { credentials: 'same-origin', ...opts, headers });
+}
+const ADMIN_SELECTED_STORE_KEY = 'adminSelectedStoreId:v1';
+let _adminStoresContext = null;
+let _adminStoresContextAt = 0;
+function adminSelectedStoreId() {
+  const adminState = window.NFLClientModules?.adminState;
+  if (adminState?.getSelectedStoreId) return adminState.getSelectedStoreId();
+  try {
+    return String(localStorage.getItem(ADMIN_SELECTED_STORE_KEY) || 'store_main').trim() || 'store_main';
+  } catch {
+    return 'store_main';
+  }
+}
+function setAdminSelectedStoreId(storeId) {
+  const adminState = window.NFLClientModules?.adminState;
+  if (adminState?.setSelectedStoreId) return adminState.setSelectedStoreId(storeId);
+  const next = String(storeId || 'store_main').trim() || 'store_main';
+  try { localStorage.setItem(ADMIN_SELECTED_STORE_KEY, next); } catch {}
+  return next;
+}
+async function ensureAdminStoresContext(force = false) {
+  const stale = !_adminStoresContext || force || (Date.now() - Number(_adminStoresContextAt || 0)) > 30000;
+  if (!stale) return _adminStoresContext;
+  const r = await api('/api/admin/stores', { cache: 'no-store' });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data?.error || 'โหลดรายชื่อร้านไม่สำเร็จ');
+  const stores = Array.isArray(data.stores) ? data.stores : [];
+  if (stores.length && !stores.some((store) => store.id === adminSelectedStoreId())) {
+    setAdminSelectedStoreId(stores.find((store) => store.isDefault)?.id || stores[0].id || 'store_main');
+  }
+  _adminStoresContext = { ...data, stores };
+  _adminStoresContextAt = Date.now();
+  return _adminStoresContext;
+}
+function selectedAdminStore() {
+  const stores = Array.isArray(_adminStoresContext?.stores) ? _adminStoresContext.stores : [];
+  return stores.find((store) => store.id === adminSelectedStoreId()) || stores[0] || { id: adminSelectedStoreId(), name: adminSelectedStoreId() };
+}
+function renderAdminStoreSwitcher() {
+  if (isChatAdminClient(currentUser)) return '';
+  const stores = Array.isArray(_adminStoresContext?.stores) ? _adminStoresContext.stores : [];
+  const selected = adminSelectedStoreId();
+  if (!stores.length) return '';
+  return `<label class="admin-store-switcher">
+    <span>ร้านที่จัดการ</span>
+    <select id="adminStoreSwitcher">
+      ${stores.map((store) => `<option value="${esc(store.id)}" ${store.id === selected ? 'selected' : ''}>${esc(store.name || store.id)}</option>`).join('')}
+    </select>
+  </label>`;
 }
 async function loadMe() {
   try {
@@ -601,6 +692,17 @@ function routeHref(path = '/') {
   if (normalized.startsWith('/admin')) return adminEntryHref(normalized);
   return normalized.startsWith('/crops/') ? normalized : `/#${normalized}`;
 }
+function publicNavLinks() {
+  return [
+    { href: routeHref('/'), label: 'หน้าแรก', group: 'primary' },
+    { href: routeHref('/products'), label: 'สินค้า', group: 'primary' },
+    { href: routeHref('/community'), label: 'ชุมชน', group: 'primary' },
+    { href: routeHref('/reviews'), label: 'รีวิวลูกค้า', group: 'primary' },
+    { href: routeHref('/track'), label: 'ติดตาม', group: 'more' },
+    { href: routeHref('/calc'), label: 'คำนวณอัตรา', group: 'more' },
+    { href: routeHref('/about'), label: 'เกี่ยวกับเรา', group: 'more' },
+  ];
+}
 function adminEntryHref(path = '/admin') {
   const normalized = normalizeRoute(path);
   const adminPath = normalized.startsWith('/admin') ? normalized : '/admin';
@@ -617,6 +719,36 @@ function routePathFromHref(href = '') {
   } catch {
     return normalizeRoute(href);
   }
+}
+function navLinkHTML(link) {
+  return `<a href="${link.href}">${esc(link.label)}</a>`;
+}
+function renderPublicNavLinks(path = currentPath()) {
+  const links = publicNavLinks();
+  const primary = links.filter((link) => link.group !== 'more');
+  const secondary = links.filter((link) => link.group === 'more');
+  const moreActive = secondary.some((link) => {
+    const href = routePathFromHref(link.href);
+    return href === '/' ? path === '/' : path.startsWith(href);
+  });
+  return [
+    primary.map(navLinkHTML).join(''),
+    secondary.length
+      ? `<div class="nav-more${moreActive ? ' active' : ''}"><button class="nav-more-toggle" type="button" data-nav-more-toggle aria-expanded="false">เพิ่มเติม</button><div class="nav-more-menu">${secondary.map(navLinkHTML).join('')}</div></div>`
+      : '',
+  ].join('');
+}
+function positionNavMoreMenu(group) {
+  if (!group) return;
+  const toggle = group.querySelector('[data-nav-more-toggle]');
+  const menu = group.querySelector('.nav-more-menu');
+  if (!toggle || !menu) return;
+  const rect = toggle.getBoundingClientRect();
+  const width = Math.max(196, menu.offsetWidth || 196);
+  const left = Math.min(window.innerWidth - width - 12, Math.max(12, rect.right - width));
+  const top = Math.min(window.innerHeight - 12, rect.bottom + 10);
+  group.style.setProperty('--nav-more-left', `${Math.round(left)}px`);
+  group.style.setProperty('--nav-more-top', `${Math.round(top)}px`);
 }
 function go(path = '/') {
   const normalized = normalizeRoute(path);
@@ -932,7 +1064,7 @@ function settingPairs(key, fallback = []) {
   const items = splitPairs(S(key));
   return items.length ? items : fallback;
 }
-const DEFAULT_PRODUCT_CATEGORIES = ['สินค้าเดี่ยว', 'ชุดเซต', 'โปรโมชั่น', 'สุขภาพ', 'ความงาม'];
+const DEFAULT_PRODUCT_CATEGORIES = ['สินค้าเดี่ยว', 'ชุดเซต', 'โปรโมชั่น', 'พอต', 'สุขภาพ', 'ความงาม'];
 const CATEGORY_ALIAS_MAP = {
   เกษตร: 'สินค้าเดี่ยว',
   สินค้าเดี่ยว: 'สินค้าเดี่ยว',
@@ -944,6 +1076,10 @@ const CATEGORY_ALIAS_MAP = {
   โปรแรง: 'โปรโมชั่น',
   โปรโมชัน: 'โปรโมชั่น',
   โปรโมชั่น: 'โปรโมชั่น',
+  pod: 'พอต',
+  POD: 'พอต',
+  พอต: 'พอต',
+  บุหรี่ไฟฟ้า: 'พอต',
   สุขภาพ: 'สุขภาพ',
   ความงาม: 'ความงาม',
 };
@@ -951,17 +1087,19 @@ const CATEGORY_DISPLAY_LABELS = {
   สินค้าเดี่ยว: 'สินค้าเดี่ยว',
   ชุดเซต: 'ชุดเซต',
   โปรโมชั่น: 'โปรโมชันพิเศษ',
+  พอต: 'พอตพร้อมส่ง',
   สุขภาพ: 'สุขภาพ',
   ความงาม: 'ความงาม',
 };
 const CATEGORY_DISPLAY_HINTS = {
   ชุดเซต: 'รวมแพ็กคู่ / แพ็กโปร / แพ็กสุดคุ้ม',
   โปรโมชั่น: 'รวมดีลโปรแรงและแคมเปญพิเศษ',
+  พอต: 'รวมพอตพร้อมส่ง ดีไซน์เด่น และตัวขายง่าย',
 };
 const PROMO_TAG_LABELS = new Set(['แพ็กคู่', 'แพ็กโปร', 'แพ็กสุดคุ้ม', 'โปรแรง']);
-const STRUCTURAL_TAGS = new Set(['เกษตร', 'สินค้าเดี่ยว', 'ชุดแพ็ก', 'ชุดเซต', 'โปรโมชั่น', 'สุขภาพ', 'ความงาม']);
-const PRODUCT_BADGE_PRIORITY = ['โปรแรง', 'แพ็กสุดคุ้ม', 'แพ็กโปร', 'แพ็กคู่', 'สินค้าเดี่ยว', 'ชุดเซต', 'โปรโมชั่น', 'สุขภาพ', 'ความงาม'];
-const PRODUCT_TOP_PRIORITY = ['โปรแรง', 'แพ็กสุดคุ้ม', 'แพ็กโปร', 'แพ็กคู่', 'สินค้าเดี่ยว'];
+const STRUCTURAL_TAGS = new Set(['เกษตร', 'สินค้าเดี่ยว', 'ชุดแพ็ก', 'ชุดเซต', 'โปรโมชั่น', 'พอต', 'สุขภาพ', 'ความงาม']);
+const PRODUCT_BADGE_PRIORITY = ['โปรแรง', 'แพ็กสุดคุ้ม', 'แพ็กโปร', 'แพ็กคู่', 'พอต', 'สินค้าเดี่ยว', 'ชุดเซต', 'โปรโมชั่น', 'สุขภาพ', 'ความงาม'];
+const PRODUCT_TOP_PRIORITY = ['โปรแรง', 'แพ็กสุดคุ้ม', 'แพ็กโปร', 'แพ็กคู่', 'พอต', 'สินค้าเดี่ยว'];
 function normalizeProductCategoryLabel(value = '') {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -1012,6 +1150,70 @@ function productCategory(p) {
 function productPromoTag(p) {
   return normalizeProductTagLabel(p?.tag || '');
 }
+function productMarketingBadge(p) {
+  const extra = productExtra(p);
+  return String(extra.marketingBadge || extra.badge || '').trim();
+}
+function productIsFeatured(p) {
+  const extra = productExtra(p);
+  return extra.featured === true || extra.featured === 'true' || extra.featured === 1 || extra.featured === '1';
+}
+function productSeoTitle(p) {
+  return String(productExtra(p).seoTitle || p?.seoTitle || p?.name || '').trim();
+}
+function productSeoDescription(p) {
+  return String(productExtra(p).seoDescription || p?.seoDescription || p?.short || p?.desc || '').trim();
+}
+function productSellingPoints(p) {
+  const extra = productExtra(p);
+  const points = asArray(extra.sellingPoints).map((item) => String(item || '').trim()).filter(Boolean);
+  if (points.length) return points.slice(0, 4);
+  if (isAgriProduct(p)) return [
+    productCrops(p).length ? `ใช้กับ ${productCrops(p).slice(0, 3).join(' / ')}` : 'เหมาะกับพืชหลายชนิด',
+    extra.applicationMethod || p?.specs?.['วิธีใช้'] || 'มีคำแนะนำการใช้งาน',
+    extra.dosage || p?.specs?.['อัตรา'] || 'ดูอัตราใช้ก่อนสั่งซื้อ',
+  ];
+  return [
+    extra.highlight || p?.specs?.['จุดเด่น'] || 'เลือกซื้อง่ายจากข้อมูลชัดเจน',
+    extra.audienceShort || p?.specs?.['เหมาะกับ'] || 'เหมาะกับลูกค้าที่ต้องการตัดสินใจเร็ว',
+    extra.style || p?.specs?.['สไตล์'] || 'พร้อมสั่งซื้อออนไลน์',
+  ];
+}
+function recentlyViewedProductIds(nextId = '') {
+  const key = 'recent_products_v1';
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem(key) || '[]'); } catch { ids = []; }
+  ids = asArray(ids).map((id) => String(id || '').trim()).filter(Boolean);
+  if (nextId) {
+    ids = [String(nextId), ...ids.filter((id) => id !== String(nextId))].slice(0, 8);
+    try { localStorage.setItem(key, JSON.stringify(ids)); } catch {}
+  }
+  return ids;
+}
+function recentlyViewedProducts(excludeId = '') {
+  return recentlyViewedProductIds()
+    .filter((id) => id !== String(excludeId))
+    .map((id) => productById(id))
+    .filter(Boolean)
+    .slice(0, 4);
+}
+function productConversionPanel(p, related = []) {
+  const bundle = related.filter((item) => item.stock > 0).slice(0, 2);
+  const recent = recentlyViewedProducts(p.id);
+  return `<section class="detail-panel product-conversion-panel glass reveal">
+    <div class="panel-head"><span class="eyebrow">เลือกซื้อให้ง่ายขึ้น</span><h2>สินค้าใกล้เคียงและรายการที่ดูล่าสุด</h2></div>
+    <div class="conversion-grid">
+      <article class="conversion-card">
+        <h3>ซื้อคู่ที่น่าสนใจ</h3>
+        ${bundle.length ? `<div class="bundle-list">${bundle.map((item) => `<button type="button" data-add="${esc(item.id)}"><span>${esc(productCardName(item))}</span><b>${baht(effPrice(item))}</b></button>`).join('')}</div>` : '<p class="muted">ยังไม่มีสินค้าแนะนำในกลุ่มเดียวกัน</p>'}
+      </article>
+      <article class="conversion-card">
+        <h3>ดูล่าสุด</h3>
+        ${recent.length ? `<div class="recent-list">${recent.map((item) => `<a href="${routeHref('/product/' + item.id)}"><span>${productVisual(item, 'mini-ico')}</span><b>${esc(productCardName(item))}</b></a>`).join('')}</div>` : '<p class="muted">เมื่อเปิดดูสินค้าหลายตัว ระบบจะแสดงรายการที่ดูล่าสุดให้กลับมาเลือกง่ายขึ้น</p>'}
+      </article>
+    </div>
+  </section>`;
+}
 function productModelUrl(p) {
   const text = String(p?.model || '').trim();
   if (!text) return '';
@@ -1045,6 +1247,9 @@ function productBadgeMarkup(p, { category = true, promo = true } = {}) {
   const items = [];
   const categoryValue = productCategory(p);
   const promoValue = productPromoTag(p);
+  const marketingBadge = productMarketingBadge(p);
+  if (marketingBadge) items.push({ value: marketingBadge, html: `<span class="tag tag-featured">${esc(marketingBadge)}</span>` });
+  else if (productIsFeatured(p)) items.push({ value: 'featured', html: '<span class="tag tag-featured">แนะนำ</span>' });
   if (category && categoryValue) items.push({ value: categoryValue, html: `<span class="tag tag-category">${esc(displayProductCategoryLabel(categoryValue))}</span>` });
   if (promo && promoValue) items.push({ value: promoValue, html: `<span class="tag tag-promo">${esc(promoValue)}</span>` });
   return items.sort((a, b) => productBadgePriorityValue(a.value) - productBadgePriorityValue(b.value)).map((item) => item.html).join('');
@@ -2210,6 +2415,73 @@ function lineCTA(extraClass = '') {
   const cls = ['line-add', extraClass].filter(Boolean).join(' ');
   return url ? `<a class="${cls}" href="${esc(url)}" target="_blank" rel="noopener" data-linecta>เพิ่มเพื่อน LINE</a>` : '';
 }
+function orgTrustHTML({ compact = false } = {}) {
+  const items = [
+    ['ส่งทั่วไทย', 'แพ็กและจัดส่งพร้อมเลขติดตามออเดอร์'],
+    ['ปรึกษาก่อนซื้อ', 'ให้ทีมช่วยเลือกสินค้าให้ตรงปัญหาและงบประมาณ'],
+    ['ชำระปลอดภัย', 'รองรับ PromptPay และบัตรผ่านระบบชำระเงิน'],
+    ['ดูแลหลังสั่งซื้อ', 'ลูกค้าติดตามสถานะและทักแชทต่อได้ทันที'],
+  ];
+  return `<div class="org-trust ${compact ? 'is-compact' : ''}">
+    ${items.map(([title, desc]) => `<article><b>${esc(title)}</b><span>${esc(desc)}</span></article>`).join('')}
+  </div>`;
+}
+function buyingStepsHTML() {
+  const steps = [
+    ['เลือกสินค้า', 'ดูรายละเอียด วิธีใช้ รีวิว และชุดแนะนำ'],
+    ['กรอกข้อมูล', 'ระบุผู้รับ เบอร์โทร ที่อยู่ และช่องทางชำระเงิน'],
+    ['ชำระเงิน', 'สแกน QR หรือชำระผ่านบัตร แล้วแจ้งสลิปได้ในหน้าออเดอร์'],
+    ['ติดตามผล', 'ระบบแสดงสถานะออเดอร์ เลขพัสดุ และแชทกับทีมได้'],
+  ];
+  return `<div class="buying-steps">
+    ${steps.map(([title, desc], index) => `<article><i>${index + 1}</i><b>${esc(title)}</b><span>${esc(desc)}</span></article>`).join('')}
+  </div>`;
+}
+function storeFaqHTML({ product = null } = {}) {
+  const productName = product?.name || 'สินค้า';
+  const items = [
+    ['ต้องเลือกสูตรไหนก่อน?', product ? `ถ้ายังไม่แน่ใจ ให้ทักแชทพร้อมบอกปัญหา ทีมจะช่วยดูว่า ${productName} เหมาะกับเป้าหมายของคุณหรือควรเริ่มจากชุดไหน` : 'เริ่มจากดูหมวดสินค้า รีวิว และทักแชทให้ทีมช่วยจับคู่สินค้าให้ตรงปัญหาได้'],
+    ['ชำระเงินแล้วต้องทำอะไรต่อ?', 'หลังสั่งซื้อจะได้หน้าออเดอร์สำหรับสแกนจ่าย อัปโหลดสลิป และติดตามสถานะได้ในลิงก์เดียว'],
+    ['ติดตามพัสดุได้ไหม?', 'ได้ เมื่อแอดมินใส่เลขพัสดุ ระบบจะแสดงในหน้าติดตามออเดอร์และเก็บไว้ให้กลับมาดูภายหลัง'],
+    ['ขอคำแนะนำหลังซื้อได้ไหม?', 'ได้ ลูกค้าทักแชทต่อจากหน้าเว็บหรือ LINE ได้ ทีมจะเห็นบริบทออเดอร์และช่วยตอบต่อเนื่อง'],
+  ];
+  return `<div class="faq-grid">
+    ${items.map(([q, a]) => `<details class="faq-item"><summary>${esc(q)}</summary><p>${esc(a)}</p></details>`).join('')}
+  </div>`;
+}
+function corporateFooterHTML() {
+  const contacts = supportContacts();
+  const brand = S('SITE_BRAND') || 'นุชฟอร์ไลฟ์';
+  return `<section class="section corporate-footer reveal">
+    <div class="corp-footer-grid glass">
+      <div class="corp-footer-brand">
+        <span class="brand-dot"></span>
+        <h2>${esc(brand)}</h2>
+        <p>${esc(S('SITE_HERO_SUB') || 'ผลิตภัณฑ์และคำแนะนำจากทีมงาน พร้อมระบบสั่งซื้อและติดตามออเดอร์ออนไลน์')}</p>
+      </div>
+      <div>
+        <h3>เมนูหลัก</h3>
+        <a href="${routeHref('/products')}">สินค้า</a>
+        <a href="${routeHref('/reviews')}">รีวิวลูกค้า</a>
+        <a href="${routeHref('/community')}">ชุมชน</a>
+        <a href="${routeHref('/track')}">ติดตามออเดอร์</a>
+      </div>
+      <div>
+        <h3>บริการลูกค้า</h3>
+        <a href="${routeHref('/about')}">เกี่ยวกับเรา</a>
+        <a href="${routeHref('/checkout')}">วิธีสั่งซื้อ</a>
+        <a href="${routeHref('/track')}">ตรวจสอบสถานะ</a>
+        ${contacts.line ? `<a href="${esc(contacts.line)}" target="_blank" rel="noopener">LINE Official</a>` : ''}
+      </div>
+      <div>
+        <h3>ติดต่อ</h3>
+        <p>${esc(contacts.phone || S('SITE_PHONE') || 'ติดต่อผ่าน Live Chat')}</p>
+        <p>${esc(contacts.email || S('SMTP_FROM') || 'พร้อมตอบคำถามลูกค้า')}</p>
+        <p>เวลาตอบกลับ: ทุกวันตามคิวแอดมิน</p>
+      </div>
+    </div>
+  </section>`;
+}
 function normalizeLineContactValue(value = '') {
   return String(value || '').trim().replace(/^@+/, '');
 }
@@ -2402,23 +2674,7 @@ function renderAccountNav() {
 function renderSecureAdminNav(path = currentPath()) {
   const navLinks = document.getElementById('navLinks');
   if (!navLinks) return;
-  const links = canAccessAdminShellClient(currentUser)
-    ? (isChatAdminClient(currentUser)
-      ? [
-          { href: adminEntryHref('/admin/inbox'), label: 'Inbox แชต' },
-          { href: routeHref('/'), label: 'กลับหน้าเว็บ' },
-        ]
-      : [
-          { href: adminEntryHref('/admin'), label: 'แดชบอร์ด' },
-          { href: adminEntryHref('/admin/products'), label: 'สินค้า' },
-          { href: adminEntryHref('/admin/orders'), label: 'ออเดอร์' },
-          { href: adminEntryHref('/admin/inbox'), label: 'Inbox' },
-          { href: routeHref('/'), label: 'กลับหน้าเว็บ' },
-        ])
-    : [
-        { href: routeHref('/'), label: 'กลับหน้าเว็บ' },
-      ];
-  navLinks.innerHTML = links.map((link) => `<a href="${link.href}">${esc(link.label)}</a>`).join('');
+  navLinks.innerHTML = renderPublicNavLinks(path);
   setActiveNav(path);
 }
 
@@ -2921,8 +3177,36 @@ function addToCart(id, qty = 1) {
   cart.set(id, (Number(cart.get(id)) || 0) + qty);
   saveCart(); renderCart();
 }
+function addOrderToCart(order = {}) {
+  const items = Array.isArray(order.items) ? order.items : [];
+  let added = 0;
+  items.forEach((item) => {
+    const id = String(item.id || item.productId || '').trim();
+    const qty = Math.max(1, parseInt(item.qty, 10) || 1);
+    const p = productById(id);
+    if (!p || p.stock <= 0) return;
+    cart.set(id, (Number(cart.get(id)) || 0) + qty);
+    added += qty;
+  });
+  if (added) { saveCart(); renderCart(); }
+  return added;
+}
 function cartCount() { let c = 0; cart.forEach((q) => (c += Number(q))); return c; }
 function cartTotal() { let t = 0; cart.forEach((q, id) => { const p = productById(id); if (p) t += effPrice(p) * Number(q); }); return t; }
+function cartRecommendationProducts(limit = 3) {
+  const inCart = new Set([...cart.keys()]);
+  const cartProducts = [...cart.keys()].map((id) => productById(id)).filter(Boolean);
+  const cartCategories = new Set(cartProducts.map((p) => productCategory(p)).filter(Boolean));
+  const cartSegments = new Set(cartProducts.map((p) => productSegment(p)).filter(Boolean));
+  return sortProductsForDisplay(PRODUCTS)
+    .filter((p) => p.active !== false && p.stock !== 0 && !inCart.has(p.id))
+    .sort((a, b) => {
+      const aScore = (cartCategories.has(productCategory(a)) ? 2 : 0) + (cartSegments.has(productSegment(a)) ? 1 : 0) + (productTopPriorityValue(a) < 999 ? 1 : 0);
+      const bScore = (cartCategories.has(productCategory(b)) ? 2 : 0) + (cartSegments.has(productSegment(b)) ? 1 : 0) + (productTopPriorityValue(b) < 999 ? 1 : 0);
+      return bScore - aScore;
+    })
+    .slice(0, limit);
+}
 function calcBundlePlan(raw = '') {
   let plan = [];
   try { plan = JSON.parse(raw || '[]'); } catch {}
@@ -2999,6 +3283,18 @@ function renderCart() {
       <div class="qty"><button data-dec="${id}">−</button><span>${qty}</span><button data-inc="${id}">+</button></div>`;
     cartItemsEl.appendChild(row);
   });
+  const recs = cartRecommendationProducts(3);
+  if (recs.length) {
+    const box = document.createElement('div');
+    box.className = 'cart-recs';
+    box.innerHTML = `<div class="cart-recs-head"><b>แนะนำเพิ่มในออเดอร์นี้</b><span>เลือกตัวที่ช่วยให้ชุดสมบูรณ์ขึ้น</span></div>
+      ${recs.map((p) => `<button type="button" class="cart-rec" data-add="${esc(p.id)}">
+        ${p.image ? `<img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy">` : `<span>${productVisual(p, 'mini-ico')}</span>`}
+        <em>${esc(productCardName(p))}</em>
+        <strong>${baht(effPrice(p))}</strong>
+      </button>`).join('')}`;
+    cartItemsEl.appendChild(box);
+  }
 }
 function openCart() {
   if (!cartDrawer || !backdrop) return;
@@ -3056,14 +3352,23 @@ function productCard(p, i = 0) {
   const onSale = effPrice(p) < p.price;
   const badges = productBadgeMarkup(p);
   const modelUrl = productModelUrl(p);
-  return `<a class="card glass reveal ${out ? 'soldout' : ''}" href="${routeHref('/product/' + p.id)}" style="transition-delay:${(i % 3) * 0.07}s">
+  const category = productCategory(p);
+  const isPod = category === 'พอต';
+  const highlight = String(productExtra(p)?.highlight || '').trim();
+  const points = productSellingPoints(p).slice(0, 2);
+  const eyebrow = isPod ? 'POD COLLECTION' : '';
+  return `<a class="card glass reveal ${out ? 'soldout' : ''} ${isPod ? 'is-pod' : ''}" href="${routeHref('/product/' + p.id)}" style="transition-delay:${(i % 3) * 0.07}s">
     <div class="thumb">${onSale ? saleBadgeHTML(p) : ''}${p.video ? '<span class="vid-badge">▶</span>' : ''}${modelUrl ? '<span class="vid-badge model-badge">3D</span>' : ''}${heartBtn(p.id)}<span class="glow"></span>${media}
       ${out ? '<span class="soldout-tag">สินค้าหมด</span>' : `<button class="qv-btn" data-quick="${p.id}">ดูเร็ว</button>`}</div>
     <div class="body">
+      ${eyebrow ? `<div class="card-kicker">${esc(eyebrow)}</div>` : ''}
       ${badges ? `<div class="tag-row">${badges}</div>` : ''}
       <h3>${esc(productCardName(p))}</h3>
       ${p.reviews ? `<div class="card-rate">${stars(p.rating)}<small>(${p.reviews})</small></div>` : ''}
       <p class="desc">${p.short}</p>
+      ${highlight ? `<p class="card-note">${esc(highlight)}</p>` : ''}
+      ${points.length ? `<div class="card-points">${points.map((item) => `<span>${esc(item)}</span>`).join('')}</div>` : ''}
+      <div class="card-stock ${out ? 'out' : p.stock <= 5 ? 'low' : ''}">${out ? 'สินค้าหมด' : p.stock <= 5 ? `เหลือ ${Number(p.stock || 0)} ชิ้น` : 'พร้อมส่ง'}</div>
       <div class="row">
         ${priceHTML(p)}
         ${out ? '<button class="add" disabled>หมด</button>' : `<button class="add" data-add="${p.id}">เพิ่ม +</button>`}
@@ -3297,8 +3602,21 @@ async function viewHome() {
     </div>
   </section>
 
+  <section class="section section-tight reveal">
+    ${orgTrustHTML()}
+  </section>
+
   ${homeReviewSpotlightSection(reviewSpotlight, reviewProofCount)}
 
+  <section class="section section-tight reveal">
+    <div class="section-head"><span class="eyebrow">Customer Care</span><h2>ระบบบริการที่ออกแบบให้ลูกค้าตัดสินใจง่าย</h2></div>
+    ${orgTrustHTML()}
+    ${buyingStepsHTML()}
+  </section>
+  <section class="section section-tight reveal">
+    <div class="section-head"><span class="eyebrow">FAQ</span><h2>คำถามที่ลูกค้าถามบ่อย</h2></div>
+    ${storeFaqHTML()}
+  </section>
   <section class="section">
     ${homeReviewStickyNudge()}
     <div class="section-head reveal"><span class="eyebrow">${esc(S('SITE_HOME_FEATURED_EYEBROW'))}</span><h2>${esc(S('SITE_HOME_FEATURED_TITLE'))}</h2></div>
@@ -3571,21 +3889,28 @@ function productSupportSection(p, rev) {
   const crops = productCrops(p);
   const reviewText = rev?.stats?.count ? `${rev.stats.avg} ดาว จาก ${rev.stats.count} รีวิว` : 'ยังไม่มีรีวิว ระบบพร้อมให้ลูกค้ารีวิวหลังซื้อ';
   const points = settingLines('SITE_CHECKOUT_POINTS', DEFAULT_CHECKOUT_POINTS);
+  const podPoints = asArray(extra.sellingPoints);
   return `<section class="detail-panel glass reveal">
     <div class="panel-head"><span class="eyebrow">พร้อมขายจริง</span><h2>ช่วยให้ตัดสินใจง่ายก่อนสั่งซื้อ</h2></div>
     <div class="support-grid">
       <article class="support-card">
         <h3>เหมาะกับใคร</h3>
-        <p>${isAgriProduct(p) ? `เหมาะกับเกษตรกรที่ปลูก${esc(crops.join(' / ') || 'พืชทั่วไป')} และต้องการสูตรที่มีข้อมูลการใช้ชัดเจน` : 'เหมาะกับลูกค้าที่มองหาสินค้าเพื่อสุขภาพและความงามจากแบรนด์เดียวกัน'}</p>
+        <p>${isAgriProduct(p)
+          ? `เหมาะกับเกษตรกรที่ปลูก${esc(crops.join(' / ') || 'พืชทั่วไป')} และต้องการสูตรที่มีข้อมูลการใช้ชัดเจน`
+          : isPodProduct(p)
+            ? esc(extra.audience || 'เหมาะกับลูกค้าที่มองหาพอตพร้อมส่ง ลุคเด่น ราคาอ่านง่าย และเลือกซื้อได้ไว')
+            : 'เหมาะกับลูกค้าที่มองหาสินค้าเพื่อสุขภาพและความงามจากแบรนด์เดียวกัน'}</p>
       </article>
       <article class="support-card">
         <h3>ความน่าเชื่อถือ</h3>
         <p>${esc(reviewText)}</p>
-        <p class="muted">${extra.labelUrl ? 'มีเอกสารฉลากหรือไฟล์ประกอบให้เปิดดูได้จากหน้านี้' : 'สามารถใส่ฉลากหรือไฟล์ประกอบเพิ่มได้จากหลังบ้านเพื่อช่วยปิดการขายง่ายขึ้น'}</p>
+        <p class="muted">${isPodProduct(p)
+          ? esc(extra.sellingNote || 'หน้าสินค้าชุดนี้ถูกจัดข้อมูลไว้ให้ตอบคำถามลูกค้าเรื่องลุค การใช้งาน และจุดเด่นได้ง่ายขึ้น')
+          : (extra.labelUrl ? 'มีเอกสารฉลากหรือไฟล์ประกอบให้เปิดดูได้จากหน้านี้' : 'สามารถใส่ฉลากหรือไฟล์ประกอบเพิ่มได้จากหลังบ้านเพื่อช่วยปิดการขายง่ายขึ้น')}</p>
       </article>
       <article class="support-card">
-        <h3>ก่อนและหลังสั่งซื้อ</h3>
-        <ul class="support-list">${points.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>
+        <h3>${isPodProduct(p) ? 'จุดเด่นที่ใช้ปิดการขาย' : 'ก่อนและหลังสั่งซื้อ'}</h3>
+        <ul class="support-list">${(isPodProduct(p) && podPoints.length ? podPoints : points).map((item) => `<li>${esc(item)}</li>`).join('')}</ul>
       </article>
     </div>
     <div class="support-cta">
@@ -3595,7 +3920,7 @@ function productSupportSection(p, rev) {
   </section>`;
 }
 
-let _pf = { q: '', sort: 'default', crop: null, segment: 'all', category: 'all' };
+let _pf = { q: '', sort: 'default', crop: null, segment: 'all', category: 'all', availability: 'all' };
 function productCategoryOptions() {
   return visibleProductCategories();
 }
@@ -3608,10 +3933,27 @@ function productCrops(p) {
   if (direct.length) return direct;
   return Object.entries(cropGuideMap()).filter(([, cfg]) => cfg.ids.includes(p.id)).map(([crop]) => crop);
 }
+function isPodProduct(p) {
+  return productCategory(p) === 'พอต';
+}
+function prioritizePodProducts(list = []) {
+  return [...(Array.isArray(list) ? list : [])].sort((a, b) => {
+    const aPod = isPodProduct(a) ? 1 : 0;
+    const bPod = isPodProduct(b) ? 1 : 0;
+    if (aPod !== bPod) return bPod - aPod;
+    return 0;
+  });
+}
 function filteredProducts() {
   let list = sortProductsForDisplay(PRODUCTS);
+  if (_pf.sort === 'default' && !_pf.q && !_pf.crop && (_pf.category === 'all' || !_pf.category)) {
+    list = prioritizePodProducts(list);
+  }
   if (_pf.segment && _pf.segment !== 'all') list = list.filter((p) => productSegment(p) === _pf.segment);
   if (_pf.category && _pf.category !== 'all') list = list.filter((p) => productCategory(p) === _pf.category);
+  if (_pf.availability === 'in-stock') list = list.filter((p) => Number(p.stock || 0) > 0);
+  else if (_pf.availability === 'sale') list = list.filter((p) => productDiscountPercent(p) > 0 || productPromoTag(p));
+  else if (_pf.availability === 'featured') list = list.filter((p) => productIsFeatured(p) || productTopPriorityValue(p) < 999);
   if (_pf.crop && cropGuideMap()[_pf.crop]) { const ids = cropGuideMap()[_pf.crop].ids; list = list.filter((p) => ids.includes(p.id)); }
   if (_pf.q) {
     const q = _pf.q.toLowerCase();
@@ -3620,14 +3962,52 @@ function filteredProducts() {
   if (_pf.sort === 'price-asc') list.sort((a, b) => effPrice(a) - effPrice(b));
   else if (_pf.sort === 'price-desc') list.sort((a, b) => effPrice(b) - effPrice(a));
   else if (_pf.sort === 'rating') list.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  else if (_pf.sort === 'popular') list.sort((a, b) => ((b.reviews || 0) + (productIsFeatured(b) ? 20 : 0)) - ((a.reviews || 0) + (productIsFeatured(a) ? 20 : 0)));
   return list;
 }
 function renderProductGrid() {
   const grid = document.getElementById('productGrid'); if (!grid) return;
   const list = filteredProducts();
+  const count = document.getElementById('productResultCount');
+  if (count) count.textContent = `${list.length} รายการ`;
   grid.innerHTML = list.length ? list.map((p, i) => productCard(p, i)).join('')
     : '<p class="muted" style="grid-column:1/-1;text-align:center;padding:40px">ไม่พบสินค้าที่ค้นหา</p>';
   enhance();
+}
+function renderPodCollectionHero() {
+  const podList = prioritizePodProducts(PRODUCTS.filter((p) => p.active !== false && isPodProduct(p))).slice(0, 5);
+  if (!podList.length) return '';
+  const lead = podList[0];
+  const accents = podList.slice(1, 4);
+  return `<section class="pod-collection glass reveal">
+    <div class="pod-collection-copy">
+      <span class="eyebrow">คอลเลกชันพอต</span>
+      <h3>พอตพร้อมส่ง คัดลุคเด่นสำหรับขายหน้าร้านและออนไลน์</h3>
+      <p>${esc(lead.short || 'รวมพอตดีไซน์เด่น พร้อมส่ง ราคาอ่านง่าย ดูภาพรวมแล้วเลือกตัวที่เหมาะกับสไตล์ลูกค้าได้ทันที')}</p>
+      <div class="pod-collection-points">
+        <span>ราคาเปิดง่าย 399 บาท</span>
+        <span>คัดดีไซน์ที่ภาพจำชัด</span>
+        <span>เหมาะดันเป็นตัวเด่นในหน้าร้าน</span>
+      </div>
+      <div class="pod-collection-actions">
+        <button type="button" class="btn btn-primary" data-category="พอต">ดูเฉพาะพอต</button>
+        <a class="btn btn-glass" href="${routeHref('/product/' + lead.id)}">ดูตัวเด่นของคอลเลกชัน</a>
+      </div>
+    </div>
+    <div class="pod-collection-visual">
+      <a class="pod-collection-feature" href="${routeHref('/product/' + lead.id)}">
+        <div class="pod-collection-media"><img src="${esc(lead.image || '')}" alt="${esc(lead.name)}"></div>
+        <div class="pod-collection-meta">
+          <b>${esc(lead.name)}</b>
+          <span>${esc(productExtra(lead).highlight || lead.short || '')}</span>
+        </div>
+      </a>
+      <div class="pod-collection-list">${accents.map((item) => `<a class="pod-collection-mini" href="${routeHref('/product/' + item.id)}">
+        <img src="${esc(item.image || '')}" alt="${esc(item.name)}">
+        <div><b>${esc(item.name)}</b><span>${esc(productExtra(item).highlight || '')}</span></div>
+      </a>`).join('')}</div>
+    </div>
+  </section>`;
 }
 function viewProducts() {
   ensureProductCategoryFilterValid();
@@ -3636,23 +4016,54 @@ function viewProducts() {
     const label = item === 'all' ? 'ทั้งหมด' : displayProductCategoryLabel(item);
     return `<button type="button" class="chip-btn ${_pf.category === item ? 'on' : ''}" data-category="${esc(item)}">${esc(label)}</button>`;
   }).join('');
+  const availabilityChips = [
+    ['all', 'ทุกสถานะ'],
+    ['in-stock', 'พร้อมส่ง'],
+    ['sale', 'โปร/ลดราคา'],
+    ['featured', 'แนะนำ'],
+  ].map(([value, label]) => `<button type="button" class="chip-btn chip-soft ${_pf.availability === value ? 'on' : ''}" data-availability="${value}">${label}</button>`).join('');
+  const initialProducts = filteredProducts();
   return `
-  <section class="section page-top">
-    <div class="section-head reveal"><span class="eyebrow">คอลเลกชันทั้งหมด</span><h2>สินค้าของเรา</h2></div>
-    <div class="cat-chips reveal">${categoryChips}</div>
-    <div class="shop-toolbar reveal">
-      <div class="search-wrap">
-        <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        <input id="searchInput" placeholder="ค้นหาสินค้า…" value="${esc(_pf.q)}" autocomplete="off">
+  <section class="section page-top products-page">
+    <div class="products-hero-shell glass reveal">
+      <div class="products-hero-copy">
+        <span class="eyebrow">Premium Selection</span>
+        <h2>สินค้าของเรา</h2>
+        <p>เลือกสินค้าให้เร็วขึ้นจากหมวดหมู่ สถานะพร้อมส่ง และคำแนะนำที่จัดเรียงให้อ่านง่าย</p>
       </div>
-      <select id="sortSelect" class="sort-sel">
-        <option value="default" ${_pf.sort === 'default' ? 'selected' : ''}>แนะนำ</option>
-        <option value="price-asc" ${_pf.sort === 'price-asc' ? 'selected' : ''}>ราคาน้อย→มาก</option>
-        <option value="price-desc" ${_pf.sort === 'price-desc' ? 'selected' : ''}>ราคามาก→น้อย</option>
-        <option value="rating" ${_pf.sort === 'rating' ? 'selected' : ''}>คะแนนสูงสุด</option>
-      </select>
+      <div class="products-hero-stats">
+        <article><b>${PRODUCTS.filter((p) => p.active !== false).length}</b><span>รายการทั้งหมด</span></article>
+        <article><b>${PRODUCTS.filter((p) => Number(p.stock || 0) > 0 && p.active !== false).length}</b><span>พร้อมส่ง</span></article>
+      </div>
     </div>
-    <div class="products" id="productGrid">${filteredProducts().map((p, i) => productCard(p, i)).join('')}</div>
+    ${renderPodCollectionHero()}
+    <div class="products-control-panel glass reveal">
+      <div class="products-control-top">
+        <div class="search-wrap">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input id="searchInput" placeholder="ค้นหาชื่อสินค้า หมวดหมู่ หรือจุดเด่น…" value="${esc(_pf.q)}" autocomplete="off">
+        </div>
+        <select id="sortSelect" class="sort-sel">
+          <option value="default" ${_pf.sort === 'default' ? 'selected' : ''}>แนะนำ</option>
+          <option value="popular" ${_pf.sort === 'popular' ? 'selected' : ''}>ขายดี / ถูกพูดถึง</option>
+          <option value="price-asc" ${_pf.sort === 'price-asc' ? 'selected' : ''}>ราคาน้อย→มาก</option>
+          <option value="price-desc" ${_pf.sort === 'price-desc' ? 'selected' : ''}>ราคามาก→น้อย</option>
+          <option value="rating" ${_pf.sort === 'rating' ? 'selected' : ''}>คะแนนสูงสุด</option>
+        </select>
+      </div>
+      <div class="products-filter-strip">
+        <div class="products-filter-group">
+          <span>หมวดหมู่</span>
+          <div class="cat-chips">${categoryChips}</div>
+        </div>
+        <div class="products-filter-group">
+          <span>สถานะ</span>
+          <div class="cat-chips product-quick-filters">${availabilityChips}</div>
+        </div>
+      </div>
+    </div>
+    <div class="product-result-bar reveal"><b id="productResultCount">${initialProducts.length} รายการ</b><span>เลือกดูรายละเอียด รูป รีวิว และ FAQ ก่อนสั่งซื้อ</span></div>
+    <div class="products" id="productGrid">${initialProducts.map((p, i) => productCard(p, i)).join('')}</div>
   </section>`;
 }
 function viewCropLanding({ slug }) {
@@ -4086,6 +4497,239 @@ function updateCalcPage() {
   }
 }
 
+// ── community / learning platform ──
+let COMMUNITY_CACHE = { posts: [], stories: [], loadedAt: 0 };
+const COMMUNITY_STORY_SEEN_KEY = 'communitySeenStories:v1';
+function communitySeenStories() {
+  try {
+    const items = JSON.parse(localStorage.getItem(COMMUNITY_STORY_SEEN_KEY) || '[]');
+    return new Set(asArray(items).map((id) => String(id || '').trim()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+function markCommunityStorySeen(id = '') {
+  const key = String(id || '').trim();
+  if (!key) return;
+  const seen = communitySeenStories();
+  seen.add(key);
+  try { localStorage.setItem(COMMUNITY_STORY_SEEN_KEY, JSON.stringify([...seen].slice(-100))); } catch {}
+}
+function articleCommunityFallback(articles = []) {
+  const rows = asArray(articles).filter((article) => article?.id).slice(0, 12);
+  const now = Date.now();
+  return {
+    posts: rows.map((article, index) => ({
+      id: `article_fallback_${article.id}`,
+      userId: 'system',
+      authorName: index === 0 ? 'june_editor' : 'nuch_team',
+      authorRole: 'admin',
+      caption: [article.title, article.excerpt || String(article.body || '').split(/\n+/)[0]].filter(Boolean).join('\n\n'),
+      media: article.cover ? [{ type: 'image', url: article.cover }] : [],
+      hashtags: ['ความรู้', 'รีวิว', 'วิธีใช้'].slice(0, 2 + (index % 2)),
+      articleId: article.id,
+      status: 'approved',
+      pinned: index === 0,
+      likes: 18 + index * 7,
+      comments: 2 + index,
+      reposts: 1 + index,
+      saves: 5 + index * 2,
+      createdAt: article.createdAt || (now - index * 3600000),
+      updatedAt: article.createdAt || now,
+      fallback: true,
+    })),
+    stories: rows.filter((article) => article.cover).slice(0, 8).map((article, index) => ({
+      id: `article_story_fallback_${article.id}`,
+      postId: `article_fallback_${article.id}`,
+      authorName: index === 0 ? 'june_editor' : 'nuch_team',
+      title: article.title,
+      media: article.cover,
+      caption: article.excerpt || article.title,
+      status: 'approved',
+      createdAt: now - index * 1800000,
+      expiresAt: now + 24 * 60 * 60 * 1000,
+    })),
+  };
+}
+async function loadCommunity() {
+  const [feed, storyData] = await Promise.all([
+    fetch('/api/community', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ posts: [] })),
+    fetch('/api/community/stories', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ stories: [] })),
+  ]);
+  let posts = asArray(feed.posts);
+  let stories = asArray(storyData.stories);
+  if (!posts.length && !stories.length) {
+    const fallbackArticles = await refreshArticlesCache().catch(() => []);
+    const fallback = articleCommunityFallback(fallbackArticles);
+    posts = fallback.posts;
+    stories = fallback.stories;
+  }
+  COMMUNITY_CACHE = { posts, stories, loadedAt: Date.now() };
+  return COMMUNITY_CACHE;
+}
+function communityMediaHTML(media = [], cls = 'community-media') {
+  const items = asArray(media).filter((item) => item?.url).slice(0, 4);
+  if (!items.length) return `<div class="${cls} is-text-only"><span>Community Note</span></div>`;
+  return `<div class="${cls} ${items.length > 1 ? 'is-grid' : 'is-single'}">${items.map((item, index) => item.type === 'video'
+    ? `<video src="${esc(item.url)}" muted loop playsinline controls aria-label="Community video ${index + 1}"></video>`
+    : `<img src="${esc(item.url)}" alt="" loading="lazy">`).join('')}</div>`;
+}
+function communityTimeLabel(value = 0) {
+  const ts = Number(value || 0) || Date.now();
+  const diff = Math.max(0, Date.now() - ts);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < hour) return `${Math.max(1, Math.floor(diff / minute))} นาทีที่แล้ว`;
+  if (diff < day) return `${Math.floor(diff / hour)} ชั่วโมงที่แล้ว`;
+  return new Date(ts).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' });
+}
+function communityPostCard(post = {}) {
+  const tags = asArray(post.hashtags).slice(0, 5);
+  const firstLine = String(post.caption || '').split(/\n+/).find(Boolean) || 'แบ่งปันประสบการณ์จากชุมชน';
+  const articleLink = post.articleId ? `<a class="community-readmore" href="${routeHref('/article/' + post.articleId)}">อ่านฉบับเต็ม</a>` : '';
+  const readonly = post.fallback ? ' disabled title="เปิดใช้งานหลังเชื่อมฐาน community"' : '';
+  return `<article class="community-post reveal" data-community-post="${esc(post.id)}" data-community-fallback="${post.fallback ? '1' : '0'}">
+    <header class="community-post-head">
+      ${avatarHTML({ name: post.authorName || 'สมาชิก', avatar: post.authorAvatar || '', cls: 'community-avatar' })}
+      <div class="community-author">
+        <b>${esc(post.authorName || 'สมาชิก')}</b>
+        <span>${post.authorRole === 'admin' ? 'Editor Pick' : 'Member Story'} · ${communityTimeLabel(post.createdAt)}</span>
+      </div>
+      ${post.pinned ? '<em>PINNED</em>' : ''}
+    </header>
+    ${communityMediaHTML(post.media)}
+    <section class="community-post-body">
+      <p class="community-caption">${esc(post.caption || firstLine).replace(/\n/g, '<br>')}</p>
+      ${tags.length ? `<div class="community-tags">${tags.map((tag) => `<span>#${esc(String(tag).replace(/^#/, ''))}</span>`).join('')}</div>` : ''}
+      ${articleLink}
+    </section>
+    <footer class="community-actions">
+      <button type="button" ${post.fallback ? '' : `data-community-like="${esc(post.id)}"`} class="${post.liked ? 'is-on' : ''}" aria-label="ไลก์โพสต์"${readonly}><span>♡</span><b>ไลก์ ${Number(post.likes || 0)}</b></button>
+      <button type="button" data-community-comments="${esc(post.id)}" aria-label="เปิดคอมเมนต์"><span>◌</span><b>คอมเมนต์ ${Number(post.comments || 0)}</b></button>
+      <button type="button" data-community-repost="${esc(post.id)}" aria-label="รีโพสต์"><span>↻</span><b>รีโพสต์ ${Number(post.reposts || 0)}</b></button>
+      <button type="button" ${post.fallback ? '' : `data-community-save="${esc(post.id)}"`} class="${post.saved ? 'is-on' : ''}" aria-label="บันทึกโพสต์"${readonly}><span>⌑</span><b>บันทึก</b></button>
+    </footer>
+    <div class="community-comments" data-community-comments-wrap="${esc(post.id)}"></div>
+  </article>`;
+}
+function communityStoriesHTML(stories = []) {
+  const active = asArray(stories).filter((story) => Number(story.expiresAt || 0) > Date.now());
+  if (!active.length) return '<div class="community-story-empty">ยังไม่มีสตอรี่ใน 24 ชั่วโมงล่าสุด</div>';
+  const seen = communitySeenStories();
+  return `<div class="community-stories" aria-label="Community stories">${active.map((story) => {
+    const isSeen = seen.has(String(story.id));
+    const storyName = story.authorName || story.username || 'story';
+    return `<button type="button" class="community-story ${isSeen ? 'is-seen' : ''}" data-story-open="${esc(story.id)}" aria-label="${isSeen ? 'ดูสตอรี่แล้ว' : 'เปิดสตอรี่'} ${esc(storyName)}">
+      <span>${story.media ? `<img src="${esc(story.media)}" alt="">` : `<i>${esc((story.title || story.authorName || 'S').slice(0, 1))}</i>`}</span>
+      <b>${esc(storyName)}</b>
+      <small>${isSeen ? 'ดูแล้ว' : '24h'}</small>
+    </button>`;
+  }).join('')}</div>`;
+}
+function openCommunityStory(id = '') {
+  const story = asArray(COMMUNITY_CACHE.stories).find((item) => String(item.id) === String(id));
+  if (!story) return;
+  markCommunityStorySeen(id);
+  let modal = document.getElementById('communityStoryModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'communityStoryModal';
+    modal.className = 'community-story-modal';
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `<div class="community-story-view">
+    <button class="qv-close" type="button" data-story-close>×</button>
+    <div class="community-story-progress"><span></span></div>
+    <img src="${esc(story.media)}" alt="">
+    <div class="community-story-copy"><b>${esc(story.title || story.authorName || 'Story')}</b><p>${esc(story.caption || '')}</p><small>หมดอายุ ${new Date(story.expiresAt).toLocaleString('th-TH')}</small></div>
+  </div>`;
+  document.querySelector(`[data-story-open="${CSS.escape(String(id))}"]`)?.classList.add('is-seen');
+  const small = document.querySelector(`[data-story-open="${CSS.escape(String(id))}"] small`);
+  if (small) small.textContent = 'ดูแล้ว';
+  requestAnimationFrame(() => modal.classList.add('show'));
+}
+function closeCommunityStory() {
+  document.getElementById('communityStoryModal')?.classList.remove('show');
+}
+async function refreshCommunityPostCard(postId = '') {
+  const { posts } = await loadCommunity();
+  const post = posts.find((item) => String(item.id) === String(postId));
+  const card = document.querySelector(`[data-community-post="${CSS.escape(postId)}"]`);
+  if (post && card) {
+    card.outerHTML = communityPostCard(post);
+    enhance();
+  }
+}
+async function toggleCommunityComments(postId = '') {
+  const wrap = document.querySelector(`[data-community-comments-wrap="${CSS.escape(postId)}"]`);
+  if (!wrap) return;
+  if (wrap.dataset.open === '1') { wrap.innerHTML = ''; wrap.dataset.open = ''; return; }
+  const card = wrap.closest('[data-community-post]');
+  const post = asArray(COMMUNITY_CACHE.posts).find((item) => String(item.id) === String(postId));
+  if (card?.dataset.communityFallback === '1' || post?.fallback) {
+    wrap.dataset.open = '1';
+    const name = post?.authorName || 'สมาชิก';
+    wrap.innerHTML = `<div class="community-comment-list is-preview">
+      <div><b>${esc(name)}</b><span>โพสต์นี้มาจากบทความเดิม ใช้เป็นตัวอย่างฟีดระหว่างรอเชื่อมฐาน community จริง</span></div>
+      <div><b>ทีมแอดมิน</b><span>หลังรัน migration แล้ว สมาชิกจะคอมเมนต์ใต้โพสต์นี้ได้แบบเรียลไทม์</span></div>
+    </div>`;
+    return;
+  }
+  const data = await fetch(`/api/community/posts/${encodeURIComponent(postId)}/comments`, { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ comments: [] }));
+  wrap.dataset.open = '1';
+  const comments = asArray(data.comments);
+  wrap.innerHTML = `<div class="community-comment-list">${comments.length ? comments.map((comment) => `<div><b>${esc(comment.authorName || 'สมาชิก')}</b><span>${esc(comment.text || '')}</span></div>`).join('') : '<p class="muted">ยังไม่มีคอมเมนต์</p>'}</div>
+    ${currentUser ? `<form class="community-comment-form" data-community-comment-form="${esc(postId)}"><input name="text" placeholder="เขียนคอมเมนต์..." required><button class="btn-mini" type="submit">ส่ง</button></form>` : `<a class="btn-mini" href="${routeHref('/login')}">เข้าสู่ระบบเพื่อคอมเมนต์</a>`}`;
+}
+async function viewCommunity() {
+  setPageMeta('ชุมชนและแหล่งเรียนรู้', 'พื้นที่แบ่งปันประสบการณ์ รีวิว วิธีใช้ และความรู้จากสมาชิกจูนนุชฟอร์ไลฟ์');
+  const { posts, stories } = await loadCommunity();
+  const approved = posts.length;
+  const storyCount = asArray(stories).filter((story) => Number(story.expiresAt || 0) > Date.now()).length;
+  const composer = currentUser ? `<form id="communityPostForm" class="community-composer reveal">
+    <div class="community-post-head">${avatarHTML({ name: userDisplayName(currentUser), avatar: userAvatarUrl(currentUser), cls: 'community-avatar' })}<div class="community-author"><b>สร้างโพสต์ใหม่ในนาม @${esc(userDisplayName(currentUser))}</b><span>เล่าให้สั้น ชัด มีรูปจริง จะช่วยให้ชุมชนน่าเชื่อถือขึ้น</span></div></div>
+    <textarea name="caption" rows="3" placeholder="แชร์ประสบการณ์ วิธีใช้ ผลลัพธ์ หรือคำแนะนำให้สมาชิกคนอื่น..."></textarea>
+    <div class="community-compose-row">
+      <label class="community-upload">เพิ่มรูป/วิดีโอ<input name="media" type="file" accept="image/*,video/mp4,video/webm" multiple></label>
+      <input name="hashtags" placeholder="#รีวิว #วิธีใช้ #ประสบการณ์จริง">
+      <button class="btn btn-primary" type="submit">เผยแพร่</button>
+    </div>
+  </form>` : `<div class="community-composer reveal"><div><b>เข้าสู่ระบบเพื่อร่วมแบ่งปัน</b><p class="muted">สมาชิกสามารถสร้างโพสต์ กดไลก์ คอมเมนต์ และบันทึกโพสต์ได้</p></div><a class="btn btn-primary" href="${routeHref('/login')}">เข้าสู่ระบบ</a></div>`;
+  return `<section class="section page-top community-page">
+    <div class="community-hero reveal">
+      <div>
+        <span class="eyebrow">Community Platform</span>
+        <h1>ชุมชนประสบการณ์จริง</h1>
+        <p>ฟีดความรู้ รีวิว วิธีใช้ และ story 24 ชั่วโมงที่ทำให้ลูกค้ากลับมาอ่านซ้ำ ตัดสินใจง่าย และรู้สึกว่าแบรนด์มีชีวิต</p>
+      </div>
+      <div class="community-hero-stats">
+        <article><b>${approved}</b><span>โพสต์</span></article>
+        <article><b>${storyCount}</b><span>Story 24h</span></article>
+        <article><b>Live</b><span>Learning Feed</span></article>
+      </div>
+    </div>
+    ${communityStoriesHTML(stories)}
+    <div class="community-layout">
+      <main class="community-feed">
+        ${composer}
+        ${posts.length ? posts.map(communityPostCard).join('') : '<div class="community-empty reveal"><h2>ยังไม่มีโพสต์ในชุมชน</h2><p>หลังรัน migration/seed แล้ว บทความเดิมจะถูกนำมาเป็นโพสต์และสตอรี่ให้อัตโนมัติ</p></div>'}
+      </main>
+      <aside class="community-sidebar reveal">
+        <div class="community-side-card">
+          <span class="eyebrow">Brand Learning</span>
+          <h3>ทำให้เว็บเป็นแหล่งเรียนรู้</h3>
+          <p>รวมรีวิวจริง คำแนะนำ วิธีใช้ และเรื่องเล่าจากลูกค้าไว้ในที่เดียว เพื่อเพิ่มความเชื่อมั่นก่อนซื้อ</p>
+        </div>
+        <div class="community-side-card">
+          <h3>หัวข้อที่ควรมี</h3>
+          <div class="community-topic-list"><span>รีวิวผลลัพธ์</span><span>วิธีใช้สินค้า</span><span>คำถามยอดฮิต</span><span>Before / After</span></div>
+        </div>
+      </aside>
+    </div>
+  </section>`;
+}
+
 // ── articles (ความรู้เกษตร) ──
 async function viewArticles() {
   // ครั้งแรกรอโหลด ครั้งถัด ๆ ไปใช้แคชทันทีแล้วรีเฟรชเงียบ ๆ เบื้องหลัง
@@ -4216,29 +4860,31 @@ function standardProductBlocks(p) {
   const usageSteps = asArray(extra.usageSteps);
   const warnings = asArray(extra.warnings);
   const faqs = faqItems(extra);
+  const isPod = isPodProduct(p);
+  const sellingPoints = asArray(extra.sellingPoints);
   return `<section class="detail-panel glass reveal">
     <div class="panel-head"><span class="eyebrow">ข้อมูลสำคัญ</span><h2>ดูข้อมูลจำเป็นก่อน แล้วค่อยเปิดรายละเอียดเพิ่ม</h2></div>
     <div class="detail-summary-grid">
       ${isAgriProduct(p) ? `<div class="summary-box"><span>เลขทะเบียน</span><b>${esc(extra.registrationNo || 'รออัปเดตเลขทะเบียน')}</b></div>` : ''}
-      <div class="summary-box"><span>วิธีใช้หลัก</span><b>${esc(extra.applicationMethod || p.specs['วิธีใช้'] || '-')}</b></div>
-      <div class="summary-box"><span>อัตราแนะนำ</span><b>${esc(extra.dosage || p.specs['อัตรา'] || '-')}</b></div>
-      <div class="summary-box"><span>เหมาะกับพืช</span><b>${esc(crops.join(' / ') || 'พืชทั่วไป')}</b></div>
+      <div class="summary-box"><span>${isPod ? 'สไตล์สินค้า' : 'วิธีใช้หลัก'}</span><b>${esc(isPod ? (extra.style || p.specs['สไตล์'] || '-') : (extra.applicationMethod || p.specs['วิธีใช้'] || '-'))}</b></div>
+      <div class="summary-box"><span>${isPod ? 'เหมาะกับใคร' : 'อัตราแนะนำ'}</span><b>${esc(isPod ? (extra.audienceShort || p.specs['เหมาะกับ'] || '-') : (extra.dosage || p.specs['อัตรา'] || '-'))}</b></div>
+      <div class="summary-box"><span>${isPod ? 'จุดเด่นหลัก' : 'เหมาะกับพืช'}</span><b>${esc(isPod ? (extra.highlight || p.specs['จุดเด่น'] || '-') : (crops.join(' / ') || 'พืชทั่วไป'))}</b></div>
     </div>
     ${extra.labelUrl ? `<div class="detail-doc-link"><a class="btn btn-glass" href="${esc(extra.labelUrl)}" target="_blank" rel="noopener">เปิดฉลาก / เอกสาร</a>${extra.labelNote ? `<p class="form-note">${esc(extra.labelNote)}</p>` : ''}</div>` : ''}
     <div class="detail-folds">
       <details class="detail-fold" open>
-        <summary>วิธีใช้และขั้นตอนแนะนำ</summary>
+        <summary>${isPod ? 'รายละเอียดการใช้งานและวิธีแนะนำลูกค้า' : 'วิธีใช้และขั้นตอนแนะนำ'}</summary>
         <div class="standard-grid fold-content">
           <div class="std-card">
-            <h3>วิธีใช้</h3>
+            <h3>${isPod ? 'ภาพรวมสินค้า' : 'วิธีใช้'}</h3>
             <div class="std-list">
-              <div><span>รูปแบบการใช้</span><b>${esc(extra.applicationMethod || p.specs['วิธีใช้'] || '-')}</b></div>
-              <div><span>อัตราแนะนำ</span><b>${esc(extra.dosage || p.specs['อัตรา'] || '-')}</b></div>
+              <div><span>${isPod ? 'สไตล์' : 'รูปแบบการใช้'}</span><b>${esc(isPod ? (extra.style || p.specs['สไตล์'] || '-') : (extra.applicationMethod || p.specs['วิธีใช้'] || '-'))}</b></div>
+              <div><span>${isPod ? 'เหมาะกับ' : 'อัตราแนะนำ'}</span><b>${esc(isPod ? (extra.audienceShort || p.specs['เหมาะกับ'] || '-') : (extra.dosage || p.specs['อัตรา'] || '-'))}</b></div>
             </div>
           </div>
           <div class="std-card">
-            <h3>ขั้นตอนแนะนำ</h3>
-            <ol class="std-steps">${usageSteps.length ? usageSteps.map((step) => `<li>${esc(step)}</li>`).join('') : '<li>ศึกษาฉลากก่อนใช้ทุกครั้ง</li>'}</ol>
+            <h3>${isPod ? 'วิธีแนะนำลูกค้า / จุดขาย' : 'ขั้นตอนแนะนำ'}</h3>
+            <ol class="std-steps">${(isPod ? sellingPoints : usageSteps).length ? (isPod ? sellingPoints : usageSteps).map((step) => `<li>${esc(step)}</li>`).join('') : '<li>ศึกษาฉลากก่อนใช้ทุกครั้ง</li>'}</ol>
           </div>
         </div>
       </details>
@@ -4285,7 +4931,8 @@ async function viewProductDetail({ id }) {
     try { const fp = await (await fetch('/api/products/' + encodeURIComponent(id))).json(); if (fp && !fp.error) p = fp; } catch {}
   }
   if (!p) return viewNotFound();
-  setPageMeta(`${p.name}`, `${p.short || p.desc || ''}`);
+  setPageMeta(productSeoTitle(p), productSeoDescription(p));
+  recentlyViewedProductIds(p.id);
   _detailProduct = p; _detailMedia = buildMedia(p);
   // เรนเดอร์ทันทีด้วยรีวิวว่าง แล้วค่อยเติมรีวิวจริงหลังหน้าโชว์ (ไม่หน่วง)
   const rev = { reviews: [], stats: { avg: p.rating || 0, count: p.reviews || 0 } };
@@ -4300,7 +4947,9 @@ async function viewProductDetail({ id }) {
   const extra = productExtra(p);
   const quickPoints = isAgriProduct(p)
     ? [`ใช้กับ ${productCrops(p).join(' / ') || 'พืชทั่วไป'}`, extra.applicationMethod || p.specs['วิธีใช้'] || 'ฉีดพ่นทางใบ', extra.dosage || p.specs['อัตรา'] || 'อ่านฉลากก่อนใช้']
-    : ['สินค้าจากแบรนด์เดียวกัน', 'สั่งซื้อออนไลน์ได้ทันที', 'มีคุณจูนตอบคำถามก่อนสั่งซื้อ'];
+    : isPodProduct(p)
+      ? [extra.highlight || 'ลุคเด่นพร้อมขาย', extra.audienceShort || 'เหมาะกับลูกค้าที่อยากเลือกไว', extra.style || 'ดีไซน์พร้อมส่ง']
+      : ['สินค้าจากแบรนด์เดียวกัน', 'สั่งซื้อออนไลน์ได้ทันที', 'มีคุณจูนตอบคำถามก่อนสั่งซื้อ'];
   return `
   <section class="section page-top detail">
     <a class="back" href="${routeHref('/products')}">← กลับไปหน้าสินค้า</a>
@@ -4322,6 +4971,10 @@ async function viewProductDetail({ id }) {
           <div class="summary-box"><span>เลขทะเบียน</span><b>${esc(extra.registrationNo || 'รออัปเดตเลขทะเบียน')}</b></div>
           <div class="summary-box"><span>พืชที่เหมาะ</span><b>${esc(productCrops(p).join(' / ') || 'พืชทั่วไป')}</b></div>
           <div class="summary-box"><span>เอกสาร</span><b>${extra.labelUrl ? 'มีฉลากให้เปิดดู' : 'ยังไม่มีไฟล์ฉลาก'}</b></div>
+        </div>` : isPodProduct(p) ? `<div class="detail-summary-grid compact-top-grid">
+          <div class="summary-box"><span>คอลเลกชัน</span><b>${esc(displayProductCategoryLabel(productCategory(p)))}</b></div>
+          <div class="summary-box"><span>เหมาะกับ</span><b>${esc(extra.audienceShort || p.specs['เหมาะกับ'] || 'ลูกค้าที่อยากเลือกไว')}</b></div>
+          <div class="summary-box"><span>จุดเด่น</span><b>${esc(extra.highlight || p.specs['จุดเด่น'] || 'ดีไซน์เด่นพร้อมขาย')}</b></div>
         </div>` : ''}
         <div class="qty-row"><span>จำนวน</span><div class="qtybox"><button data-qd>−</button><span id="detailQty">1</span><button data-qi>+</button></div></div>
         <div class="d-actions">
@@ -4332,15 +4985,21 @@ async function viewProductDetail({ id }) {
         </div>
         <div class="detail-assurance">
           <div><b>จัดส่ง</b><span>ติดตามออเดอร์และเลขพัสดุได้</span></div>
-          <div><b>ปรึกษาฟรี</b><span>ให้คุณจูนช่วยเลือกสูตรหรือวิธีใช้ก่อนซื้อ</span></div>
-          <div><b>เอกสารประกอบ</b><span>${extra.labelUrl ? 'มีไฟล์ฉลาก / เอกสารเปิดดูได้' : 'เพิ่มฉลากและ FAQ ได้จากหลังบ้าน'}</span></div>
+          <div><b>ปรึกษาฟรี</b><span>${isPodProduct(p) ? 'ให้ทีมช่วยเลือกทรง ลุค และตัวที่เหมาะกับสไตล์ลูกค้า' : 'ให้คุณจูนช่วยเลือกสูตรหรือวิธีใช้ก่อนซื้อ'}</span></div>
+          <div><b>ข้อมูลประกอบ</b><span>${isPodProduct(p) ? 'มีข้อมูลจุดเด่น วิธีแนะนำลูกค้า และ FAQ พร้อมใช้ปิดการขาย' : (extra.labelUrl ? 'มีไฟล์ฉลาก / เอกสารเปิดดูได้' : 'เพิ่มฉลากและ FAQ ได้จากหลังบ้าน')}</span></div>
         </div>
         <ul class="specs">${Object.entries(p.specs).map(([k, v]) => `<li><span>${esc(k)}</span><b>${esc(v)}</b></li>`).join('')}</ul>
         ${calcWidget(p)}
       </div>
     </div>
     ${standardProductBlocks(p)}
+    ${productConversionPanel(p, related)}
     <div id="pdSupportMount" data-pid="${esc(id)}">${productSupportSection(p, rev)}</div>
+    <section class="detail-panel glass reveal">
+      <div class="panel-head"><span class="eyebrow">ก่อนตัดสินใจ</span><h2>คำถามสำคัญเกี่ยวกับสินค้านี้</h2></div>
+      ${storeFaqHTML({ product: p })}
+      ${orgTrustHTML({ compact: true })}
+    </section>
     <div id="pdReviewsMount" data-pid="${esc(id)}">${reviewsHTML(p, rev)}</div>
     <div class="section-head reveal" style="margin-top:30px"><span class="eyebrow">สินค้าที่เกี่ยวข้อง</span><h2>อาจถูกใจคุณ</h2></div>
     <div class="products">${related.map((r, i) => productCard(r, i)).join('')}</div>
@@ -4354,16 +5013,22 @@ async function viewProductDetail({ id }) {
 function viewAbout() {
   setPageMeta('เกี่ยวกับเรา', 'ข้อมูลแบรนด์นุชฟอร์ไลฟ์และแนวทางช่วยเกษตรกรไทยเพิ่มผลผลิต');
   const st = SITE.stats || {};
+  const aboutStats = {
+    farmers: Math.max(20000, parseInt(st.farmers, 10) || 0),
+    products: Math.max(10, parseInt(st.products, 10) || 0),
+    rating: Math.max(4.8, Number(st.rating) || 0),
+    ontime: Math.max(98, parseInt(st.ontime, 10) || 0),
+  };
   return `
   <section class="section page-top">
     <div class="section-head reveal"><span class="eyebrow">เกี่ยวกับเรา</span><h2>นุชฟอร์ไลฟ์ — นวัตกรรมเพื่อเกษตรกรไทย</h2></div>
     <p class="about-lead reveal">เราพัฒนาและจำหน่ายอาหารเสริมพืช ฮอร์โมน และสารจับใบคุณภาพสูง รวมถึงผลิตภัณฑ์สมุนไพรเพื่อสุขภาพ มุ่งช่วยเกษตรกรไทยเพิ่มผลผลิต ลดต้นทุน และทำเกษตรอย่างยั่งยืน พร้อมทีมนักวิชาการให้คำปรึกษาอย่างใกล้ชิด</p>
   </section>
   <section class="section stats reveal">
-    <div class="stat"><b data-count="${st.farmers ?? 20000}">0</b><span>เกษตรกรไว้วางใจ</span></div>
-    <div class="stat"><b data-count="${st.products ?? 10}">0</b><span>ผลิตภัณฑ์</span></div>
-    <div class="stat"><b data-count="${st.rating ?? 4.9}" data-decimals="1">0</b><span>คะแนนเฉลี่ย</span></div>
-    <div class="stat"><b data-count="${st.ontime ?? 99}" data-suffix="%">0</b><span>ส่งตรงเวลา</span></div>
+    <div class="stat"><b data-count="${aboutStats.farmers}">0</b><span>เกษตรกรไว้วางใจ</span></div>
+    <div class="stat"><b data-count="${aboutStats.products}">0</b><span>ผลิตภัณฑ์</span></div>
+    <div class="stat"><b data-count="${aboutStats.rating}" data-decimals="1">0</b><span>คะแนนเฉลี่ย</span></div>
+    <div class="stat"><b data-count="${aboutStats.ontime}" data-suffix="%">0</b><span>ส่งตรงเวลา</span></div>
   </section>
   <section class="section">
     <div class="features">
@@ -4376,7 +5041,17 @@ function viewAbout() {
     <h2>พร้อมเพิ่มผลผลิตกับนุชฟอร์ไลฟ์แล้วหรือยัง?</h2>
     <p>เลือกชมสินค้าหรือทักแชทปรึกษานักวิชาการได้เลย</p>
     <a href="${routeHref('/products')}" class="btn btn-primary">เลือกซื้อสินค้า</a>
-  </section>`;
+  </section>
+  <section class="section section-tight reveal">
+    <div class="section-head"><span class="eyebrow">Service Standard</span><h2>มาตรฐานบริการสำหรับลูกค้าทุกออเดอร์</h2></div>
+    ${orgTrustHTML()}
+    ${buyingStepsHTML()}
+  </section>
+  <section class="section section-tight reveal">
+    <div class="section-head"><span class="eyebrow">FAQ</span><h2>คำถามก่อนสั่งซื้อ</h2></div>
+    ${storeFaqHTML()}
+  </section>
+  ${corporateFooterHTML()}`;
 }
 
 function checkoutTotalsHTML() {
@@ -4391,6 +5066,36 @@ function checkoutTotalsHTML() {
     <div class="sum-row"><span>ค่าจัดส่ง${ship === 0 ? ' · ฟรี' : ''}</span><b>${baht(ship)}</b></div>
     <div class="sum-total"><span>รวมทั้งหมด</span><b>${baht(total)}</b></div>`;
 }
+function checkoutProgressHTML(active = 1) {
+  const steps = [
+    ['ข้อมูลผู้รับ', 'ชื่อ เบอร์โทร และที่อยู่จัดส่ง'],
+    ['จัดส่ง', 'ตรวจค่าส่งและหมายเหตุ'],
+    ['ชำระเงิน', 'PromptPay หรือบัตร'],
+    ['ติดตาม', 'ดูสถานะได้ทันที'],
+  ];
+  return `<div class="checkout-progress">${steps.map((step, index) => `<div class="checkout-progress-step ${index + 1 <= active ? 'is-on' : ''}">
+    <span>${index + 1}</span><b>${step[0]}</b><small>${step[1]}</small>
+  </div>`).join('')}</div>`;
+}
+function checkoutSectionTitle(step, title, desc = '') {
+  return `<div class="checkout-section-title"><span>${step}</span><div><b>${esc(title)}</b>${desc ? `<small>${esc(desc)}</small>` : ''}</div></div>`;
+}
+function orderTimelineHTML(status = '') {
+  const cancelled = status === 'cancelled';
+  if (cancelled) return `<div class="timeline order-timeline is-cancelled"><div class="tl-step done cur"><span class="tl-dot">!</span><span class="tl-label">ยกเลิกออเดอร์</span></div></div>`;
+  const stepIndex = Math.max(0, STATUS_STEPS.findIndex((s) => s.key === status));
+  return `<div class="timeline order-timeline">${STATUS_STEPS.map((s, i) => `
+    <div class="tl-step ${i <= stepIndex ? 'done' : ''} ${i === stepIndex ? 'cur' : ''}">
+      <span class="tl-dot">${i < stepIndex ? '✓' : s.icon}</span><span class="tl-label">${s.label}</span></div>`).join('')}</div>`;
+}
+function orderPriority(o = {}) {
+  if (o.status === 'awaiting_payment' && o.payment_claimed && !o.paid) return { key: 'verify', label: 'รอตรวจสลิป', tone: 'warn', action: 'paid' };
+  if (o.status === 'paid') return { key: 'prepare', label: 'รอเตรียมสินค้า', tone: 'info', action: 'preparing' };
+  if (o.status === 'preparing') return { key: 'ship', label: 'รอจัดส่ง', tone: 'info', action: 'shipped' };
+  if (o.status === 'shipped') return { key: 'deliver', label: 'รอปิดงาน', tone: 'ok', action: 'delivered' };
+  if (o.status === 'awaiting_payment') return { key: 'pay', label: 'รอลูกค้าชำระ', tone: 'muted', action: '' };
+  return { key: 'done', label: o.statusLabel || 'เสร็จสิ้น', tone: 'muted', action: '' };
+}
 function viewCheckout() {
   setPageMeta('ชำระเงิน', 'กรอกข้อมูลสั่งซื้อและชำระเงินอย่างปลอดภัย');
   if (cart.size === 0) {
@@ -4404,20 +5109,34 @@ function viewCheckout() {
     const p = productById(id); if (!p) return;
     rows += `<div class="sum-row"><span>${p.name} <em>×${qty}</em></span><b>${baht(effPrice(p) * qty)}</b></div>`;
   });
+  const recs = cartRecommendationProducts(3);
   return `
   <section class="section page-top">
     <div class="section-head reveal"><span class="eyebrow">ขั้นตอนสุดท้าย</span><h2>กรอกข้อมูลสั่งซื้อ</h2></div>
+    ${checkoutProgressHTML(1)}
+    <div class="checkout-steps reveal">${buyingStepsHTML()}</div>
     <div class="checkout-grid">
       <form id="checkoutForm" class="checkout-form glass reveal">
-        <label>ชื่อผู้รับ <input name="name" required autocomplete="name" placeholder="ชื่อ–นามสกุล" /></label>
-        <label>เบอร์โทร <input name="phone" required inputmode="tel" autocomplete="tel" placeholder="08x-xxx-xxxx" /></label>
-        <label>อีเมล (รับใบยืนยันออเดอร์) <input name="email" type="email" autocomplete="email" placeholder="you@email.com" /></label>
-        <label>ที่อยู่จัดส่ง <textarea name="address" required autocomplete="street-address" rows="3" placeholder="บ้านเลขที่ ถนน แขวง/ตำบล เขต/อำเภอ จังหวัด รหัสไปรษณีย์"></textarea></label>
-        <label>ประเทศจัดส่ง <select name="country" id="coCountry">
-          <option>ไทย</option><option>สิงคโปร์</option><option>มาเลเซีย</option><option>ลาว</option><option>กัมพูชา</option><option>เวียดนาม</option><option>อื่นๆ (ต่างประเทศ)</option>
-        </select></label>
-        <label>หมายเหตุ (ถ้ามี) <input name="note" placeholder="เช่น สี/รุ่นที่ต้องการ, เวลาสะดวกรับของ" /></label>
+        <div class="checkout-form-section">
+          ${checkoutSectionTitle('01', 'ข้อมูลผู้รับ', 'ใช้สำหรับจัดส่งและแจ้งสถานะออเดอร์')}
+          <div class="checkout-field-grid">
+            <label>ชื่อผู้รับ <input name="name" required autocomplete="name" placeholder="ชื่อ–นามสกุล" /></label>
+            <label>เบอร์โทร <input name="phone" required inputmode="tel" autocomplete="tel" placeholder="08x-xxx-xxxx" /></label>
+          </div>
+          <label>อีเมล (รับใบยืนยันออเดอร์) <input name="email" type="email" autocomplete="email" placeholder="you@email.com" /></label>
+        </div>
+        <div class="checkout-form-section">
+          ${checkoutSectionTitle('02', 'ข้อมูลจัดส่ง', 'กรอกที่อยู่ให้ครบเพื่อลดการตีกลับ')}
+          <label>ที่อยู่จัดส่ง <textarea name="address" required autocomplete="street-address" rows="3" placeholder="บ้านเลขที่ ถนน แขวง/ตำบล เขต/อำเภอ จังหวัด รหัสไปรษณีย์"></textarea></label>
+          <div class="checkout-field-grid">
+            <label>ประเทศจัดส่ง <select name="country" id="coCountry">
+              <option>ไทย</option><option>สิงคโปร์</option><option>มาเลเซีย</option><option>ลาว</option><option>กัมพูชา</option><option>เวียดนาม</option><option>อื่นๆ (ต่างประเทศ)</option>
+            </select></label>
+            <label>หมายเหตุ (ถ้ามี) <input name="note" placeholder="เช่น สี/รุ่นที่ต้องการ, เวลาสะดวกรับของ" /></label>
+          </div>
+        </div>
         <div class="pay-options">
+          ${checkoutSectionTitle('03', 'วิธีชำระเงิน', 'เลือกวิธีที่สะดวกที่สุด')}
           <span class="pay-label">วิธีชำระเงิน</span>
           <label class="pay"><input type="radio" name="payment" value="promptpay" checked /><span><b>PromptPay QR</b><small>สแกนจ่ายด้วยแอปธนาคาร</small></span></label>
           <label class="pay"><input type="radio" name="payment" value="card" /><span><b>บัตรเครดิต / เดบิต</b><small>ชำระผ่าน Stripe ปลอดภัย</small></span></label>
@@ -4439,8 +5158,13 @@ function viewCheckout() {
           <ul class="support-list">${checkoutPoints.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>
           ${lineCTA('line-inline')}
         </div>
+        ${recs.length ? `<div class="checkout-recs"><h4>เพิ่มสินค้าแนะนำ</h4>${recs.map((p) => `<button type="button" data-add="${esc(p.id)}"><span>${esc(productCardName(p))}</span><b>${baht(effPrice(p))}</b></button>`).join('')}</div>` : ''}
         <a href="${routeHref('/products')}" class="back" style="margin-top:14px;display:inline-block">← เลือกซื้อเพิ่ม</a>
       </aside>
+    </div>
+    <div class="checkout-mobile-bar">
+      <div><span>ยอดชำระ</span><b>${baht(Math.max(0, cartTotal() - (appliedCoupon?.discount || 0)) + shipFee(S('SHIP_HOME') || 'ไทย', Math.max(0, cartTotal() - (appliedCoupon?.discount || 0))))}</b></div>
+      <button class="btn btn-primary" type="button" data-submit-checkout>ชำระเงิน</button>
     </div>
   </section>`;
 }
@@ -4470,6 +5194,7 @@ async function viewOrder({ id }) {
     order = (await fetchOrder(id)) || order;
   }
   setPageMeta(`ออเดอร์ ${id}`, 'ติดตามสถานะคำสั่งซื้อและการชำระเงิน');
+  clientOrders.set(order.id, order);
   startOrderPoll(id, order);
   return renderOrderHTML(order);
 }
@@ -4477,10 +5202,12 @@ async function viewOrder({ id }) {
 function renderOrderHTML(o) {
   const cancelled = o.status === 'cancelled';
   const expired = o.status === 'expired';
-  const stepIndex = cancelled ? -1 : STATUS_STEPS.findIndex((s) => s.key === o.status);
-  const timeline = cancelled ? '' : `<div class="timeline">${STATUS_STEPS.map((s, i) => `
-    <div class="tl-step ${i <= stepIndex ? 'done' : ''} ${i === stepIndex ? 'cur' : ''}">
-      <span class="tl-dot">${i < stepIndex ? '✓' : s.icon}</span><span class="tl-label">${s.label}</span></div>`).join('')}</div>`;
+  const timeline = orderTimelineHTML(o.status);
+  const nextCopy = o.paid
+    ? 'ชำระเงินเรียบร้อยแล้ว ระบบจะอัปเดตการเตรียมสินค้าและเลขพัสดุในหน้านี้'
+    : o.payment_claimed
+      ? 'แจ้งชำระเงินแล้ว รอแอดมินตรวจสอบหรือระบบตรวจสลิป'
+      : 'สแกนจ่ายหรืออัปโหลดสลิป จากนั้นกดแจ้งชำระเงินเพื่อให้ทีมตรวจสอบเร็วขึ้น';
 
   let pay;
   if (cancelled) {
@@ -4498,6 +5225,11 @@ function renderOrderHTML(o) {
         <img class="qr" src="${pp.qr}" alt="PromptPay QR" />
         <div class="pay-amt">${baht(o.total)}</div>
         <div class="pay-id">${pp.name ? pp.name + ' · ' : ''}${pp.promptpayId}</div>
+        <div class="pay-copy-actions">
+          <button class="btn-mini" type="button" data-copy="${esc(String(o.total || ''))}">คัดลอกยอด</button>
+          <button class="btn-mini" type="button" data-copy="${esc(pp.promptpayId || '')}">คัดลอก PromptPay</button>
+          <button class="btn-mini" type="button" data-copy="${esc(o.id)}">คัดลอกเลขออเดอร์</button>
+        </div>
         ${o.payment_claimed
           ? `<div class="claimed">⏳ แจ้งชำระแล้ว — รอแอดมินยืนยัน</div>`
           : `<button class="btn btn-primary" data-notifypay="${o.id}">แจ้งว่าชำระเงินแล้ว</button>`}
@@ -4522,8 +5254,13 @@ function renderOrderHTML(o) {
         <h2>ออเดอร์ ${o.id}</h2>
         <p class="muted">${new Date(o.createdAt).toLocaleString('th-TH')}</p>
         ${expiresText ? `<p class="muted">ชำระภายใน ${expiresText}</p>` : ''}
+        <div class="order-head-actions"><button class="btn-mini" type="button" data-copy="${esc(o.id)}">คัดลอกเลขออเดอร์</button><button class="btn-mini" type="button" data-copy="${esc(location.origin + routeHref('/order/' + o.id))}">คัดลอกลิงก์ติดตาม</button></div>
       </div>
       ${timeline}
+      <div class="order-guidance glass reveal">
+        <div><span>สถานะตอนนี้</span><b>${esc(o.statusLabel || o.status)}</b></div>
+        <p>${esc(nextCopy)}</p>
+      </div>
       <div class="order-cols">
         <div class="reveal">${pay}</div>
         <aside class="summary glass reveal">
@@ -4542,17 +5279,41 @@ function renderOrderHTML(o) {
         <a href="${routeHref('/products')}" class="btn btn-glass">เลือกซื้อต่อ</a>
       </div>
     </div>
+      <div class="order-next glass reveal">
+        <b>กลับมาง่ายในครั้งถัดไป</b>
+        <span>บันทึกลิงก์หน้านี้ไว้เพื่อติดตามออเดอร์ ทักแชทต่อ หรือเลือกซื้อสินค้าที่ใช้คู่กัน</span>
+        <div>
+          <button class="btn btn-primary" type="button" data-reorder="${esc(o.id)}">สั่งซ้ำจากออเดอร์นี้</button>
+          <a class="btn btn-primary" href="${routeHref('/products')}">สั่งซื้อเพิ่ม</a>
+          <a class="btn btn-glass" href="${routeHref('/reviews')}">ดูรีวิวลูกค้า</a>
+        </div>
+      </div>
   </section>`;
 }
 
 function viewTrack() {
-  return `<section class="section page-top"><div class="track-box glass reveal">
-    <div class="es-ico">🔎</div><h2>ติดตามคำสั่งซื้อ</h2><p>กรอกหมายเลขออเดอร์เพื่อดูสถานะ</p>
-    <form id="trackForm" class="track-form">
-      <input name="oid" placeholder="VYU-XXXXXXX" autocomplete="off" required />
-      <button class="btn btn-primary" type="submit">ติดตาม</button>
-    </form>
-  </div></section>`;
+  const recent = [...clientOrders.values()].slice(-3).reverse();
+  return `<section class="section page-top">
+    <div class="track-center glass reveal">
+      <div class="es-ico">🔎</div>
+      <span class="eyebrow">Order Tracking</span>
+      <h2>ติดตามคำสั่งซื้อ</h2>
+      <p>กรอกหมายเลขออเดอร์เพื่อดูสถานะชำระเงิน การเตรียมสินค้า และเลขพัสดุในหน้าเดียว</p>
+      <form id="trackForm" class="track-form track-form-premium">
+        <input name="oid" placeholder="VYU-XXXXXXX" autocomplete="off" required />
+        <button class="btn btn-primary" type="submit">ติดตาม</button>
+      </form>
+      ${recent.length ? `<div class="track-recent"><b>ออเดอร์ล่าสุดในเครื่องนี้</b>${recent.map((order) => `<a href="${routeHref('/order/' + order.id)}"><span>${esc(order.id)}</span><small>${esc(order.statusLabel || order.status || '')}</small></a>`).join('')}</div>` : ''}
+      <div class="track-help-grid">
+        <div><b>หาเลขออเดอร์ไม่เจอ?</b><span>ดูจากหน้าออเดอร์หลังสั่งซื้อ หรือทักแชทพร้อมเบอร์โทรที่ใช้สั่งซื้อ</span></div>
+        <div><b>ชำระเงินแล้ว?</b><span>เปิดหน้าออเดอร์เพื่ออัปโหลดสลิปหรือกดแจ้งชำระเงิน</span></div>
+      </div>
+      <div class="d-actions">
+        <button class="btn btn-glass" type="button" id="confirmChat">ถามแอดมิน</button>
+        <a class="btn btn-glass" href="${routeHref('/products')}">เลือกซื้อสินค้า</a>
+      </div>
+    </div>
+  </section>`;
 }
 
 function viewNotFound() {
@@ -4625,12 +5386,54 @@ async function viewAccount() {
   if (!currentUser) { setTimeout(() => go('/login'), 0); return loadingView(); }
   let orders = [];
   try { orders = await (await api('/api/my/orders')).json(); } catch {}
+  orders.forEach((order) => clientOrders.set(order.id, order));
+  const displayName = userDisplayName(currentUser);
+  const avatar = userAvatarUrl(currentUser);
+  const profileUsername = String(currentUser.username || displayName || '').replace(/^@+/, '');
+  const bio = String(currentUser.bio || '').trim();
+  const lineId = String(currentUser.lineId || currentUser.line_id || '').trim();
+  const phone = String(currentUser.phone || '').trim();
+  const locationText = String(currentUser.location || '').trim();
   const rows = orders.length
-    ? orders.map((o) => `<a class="acc-order" href="${routeHref('/order/' + o.id)}"><div><b>${o.id}</b> <span class="muted">· ${new Date(o.createdAt).toLocaleDateString('th-TH')}</span></div><div><span class="status-badge s-${o.status}">${o.statusLabel}</span> <b>${baht(o.total)}</b></div></a>`).join('')
+    ? orders.map((o) => `<div class="acc-order"><a href="${routeHref('/order/' + o.id)}"><div><b>${o.id}</b> <span class="muted">· ${new Date(o.createdAt).toLocaleDateString('th-TH')}</span></div><div><span class="status-badge s-${o.status}">${o.statusLabel}</span> <b>${baht(o.total)}</b></div></a><div class="acc-order-actions"><button class="btn-mini" type="button" data-reorder="${esc(o.id)}">สั่งซ้ำ</button><a class="btn-mini" href="${routeHref('/reviews')}">ดู/ส่งรีวิว</a></div></div>`).join('')
     : '<p class="muted" style="padding:18px">ยังไม่มีคำสั่งซื้อ</p>';
   return `<section class="section page-top"><div class="account">
-    <div class="section-head reveal" style="text-align:left;margin-bottom:20px"><span class="eyebrow">บัญชีของฉัน</span><h2>${currentUser.name}</h2><p class="muted">${currentUser.email}${accountRoleDescription(currentUser)}</p></div>
-    <div class="acc-actions reveal">${canAccessAdminShellClient(currentUser) ? `<a class="btn btn-primary" href="${adminEntryHref(adminDefaultRoute(currentUser))}">${isChatAdminClient(currentUser) ? 'เปิดหน้าตอบแชท' : 'เข้าสู่หลังบ้าน'}</a>` : ''}<button class="btn btn-glass" type="button" id="logoutBtn">ออกจากระบบ</button></div>
+    <div class="account-profile-card reveal">
+      <div class="account-profile-cover"></div>
+      <form id="accountProfileForm" class="account-profile-form">
+        <div class="account-profile-avatar-wrap">
+          <div class="account-profile-avatar" data-account-avatar-preview>${avatar ? `<img src="${esc(avatar)}" alt="${esc(displayName)}">` : `<span>${esc(displayName.slice(0, 1) || 'ส')}</span>`}</div>
+          <label class="community-upload account-avatar-upload">เปลี่ยนรูป<input name="avatarFile" type="file" accept="image/*" data-account-avatar-file></label>
+        </div>
+        <div class="account-profile-main">
+          <span class="eyebrow">บัญชีของฉัน</span>
+          <h2>${esc(displayName)}</h2>
+          <p class="muted">${esc(currentUser.email)}${accountRoleDescription(currentUser)}</p>
+          <div class="account-profile-summary">
+            <span>@${esc(profileUsername || displayName)}</span>
+            <span>${esc(locationText || 'ยังไม่ได้ระบุพื้นที่')}</span>
+            <span>${orders.length} คำสั่งซื้อ</span>
+          </div>
+          <div class="account-profile-fields">
+            <label>ชื่อที่แสดง<input name="name" value="${esc(currentUser.name || '')}" placeholder="ชื่อของคุณ"></label>
+            <label>Username<input name="username" value="${esc(profileUsername)}" placeholder="เช่น june_garden"></label>
+            <label class="account-field-wide">Bio / แนะนำตัว<textarea name="bio" maxlength="180" placeholder="เล่าให้คนในชุมชนรู้จักคุณ เช่น สนใจสินค้าแบบไหน หรือชอบแชร์ประสบการณ์เรื่องอะไร">${esc(bio)}</textarea></label>
+            <label>LINE ID<input name="lineId" value="${esc(lineId)}" placeholder="เช่น june_garden"></label>
+            <label>เบอร์โทร<input name="phone" value="${esc(phone)}" placeholder="ใช้สำหรับติดต่อเรื่องคำสั่งซื้อ"></label>
+            <label class="account-field-wide">จังหวัด / พื้นที่<input name="location" value="${esc(locationText)}" placeholder="เช่น กรุงเทพฯ, เชียงใหม่"></label>
+          </div>
+          <div class="account-profile-actions">
+            <input type="hidden" name="avatar" value="${esc(avatar)}">
+            <button class="btn btn-primary" type="submit">บันทึกโปรไฟล์</button>
+            <button class="btn btn-glass" type="button" id="logoutBtn">ออกจากระบบ</button>
+          </div>
+          <div class="account-community-preview">
+            ${avatarHTML({ name: displayName, avatar, cls: 'community-avatar' })}
+            <div><b>@${esc(profileUsername || displayName)}</b><span>${esc(bio || 'ชื่อ รูป และ bio นี้จะแสดงเวลาโพสต์หรือคอมเมนต์ในชุมชน')}</span></div>
+          </div>
+        </div>
+      </form>
+    </div>
     <h3 style="margin:30px 0 14px">ประวัติคำสั่งซื้อ</h3>
     <div class="acc-orders glass reveal">${rows}</div>
   </div></section>`;
@@ -4641,22 +5444,37 @@ function adminGuard(options = {}) {
   const allowChatAdmin = options?.allowChatAdmin === true;
   if (!currentUser) { toast('กรุณาเข้าสู่ระบบก่อน', 'err'); setTimeout(() => go('/login'), 0); return false; }
   if (isFullAdminClient(currentUser)) return true;
+  if (hasStoreConsoleClient(currentUser)) {
+    const role = currentStoreRoleClient(currentUser);
+    if (role === 'chat_admin' && !allowChatAdmin) {
+      toast('บัญชีนี้เข้าได้เฉพาะหน้า Inbox แชต', 'err');
+      setTimeout(() => go('/admin/inbox'), 0);
+      return false;
+    }
+    return true;
+  }
   if (allowChatAdmin && canAccessAdminShellClient(currentUser)) return true;
   if (isChatAdminClient(currentUser)) { toast('บัญชีนี้เข้าได้เฉพาะหน้า Inbox แชต', 'err'); setTimeout(() => go('/admin/inbox'), 0); return false; }
   toast('เฉพาะผู้ดูแลระบบเท่านั้น', 'err'); setTimeout(() => go('/'), 0); return false;
   return true;
 }
 function adminLayout(active, content) {
-  const tabs = isChatAdminClient(currentUser)
+  const storeRole = currentStoreRoleClient(currentUser);
+  const storeScopedTabs = [['', 'แดชบอร์ด', '◴'], ['products', 'จัดการสินค้า', '❑'], ['community', 'ชุมชน', '◎'], ['articles', 'บทความเดิม', '✐'], ['inbox', 'Inbox แชต', '✉'], ['leads', 'ลีดลูกค้า', '◎'], ['orders', 'ออเดอร์', '❯'], ['coupons', 'คูปองส่วนลด', '٪'], ['site', 'ข้อมูลร้าน', '✎']];
+  const tabs = isChatAdminClient(currentUser) || (!isFullAdminClient(currentUser) && storeRole === 'chat_admin')
     ? [['inbox', 'Inbox แชต', '✉']]
-    : [['', 'แดชบอร์ด', '◴'], ['products', 'จัดการสินค้า', '❑'], ['articles', 'บทความ', '✐'], ['inbox', 'Inbox แชต', '✉'], ['leads', 'ลีดลูกค้า', '◎'], ['orders', 'ออเดอร์', '❯'], ['coupons', 'คูปองส่วนลด', '٪'], ['users', 'ผู้ใช้', '◇'], ['site', 'ข้อมูลร้าน', '✎'], ['diagnostics', 'Diagnostics', '◫'], ['settings', 'ตั้งค่า API', '⚙']];
+    : (isFullAdminClient(currentUser)
+      ? [['', 'แดชบอร์ด', '◴'], ['products', 'จัดการสินค้า', '❑'], ['community', 'ชุมชน', '◎'], ['articles', 'บทความเดิม', '✐'], ['inbox', 'Inbox แชต', '✉'], ['leads', 'ลีดลูกค้า', '◎'], ['orders', 'ออเดอร์', '❯'], ['coupons', 'คูปองส่วนลด', '٪'], ['users', 'ผู้ใช้', '◇'], ['stores', 'หลายเว็บไซต์', '◪'], ['site', 'ข้อมูลร้าน', '✎'], ['diagnostics', 'Diagnostics', '◫'], ['settings', 'ตั้งค่า API', '⚙']]
+      : storeScopedTabs);
   const nav = tabs.map(([k, l, ic]) => {
     const isInbox = k === 'inbox';
     const badge = isInbox && _adminInboxUnreadTotal ? `<span class="admin-nav-badge">${_adminInboxUnreadTotal > 99 ? '99+' : _adminInboxUnreadTotal}</span>` : '';
     return `<a href="${routeHref('/admin' + (k ? '/' + k : ''))}" data-admin-nav="${esc(k || 'dashboard')}" class="${active === k ? 'on' : ''}"><span>${ic}</span>${l}${badge}</a>`;
   }).join('');
+  const storeSwitcher = renderAdminStoreSwitcher();
+  const currentStore = selectedAdminStore();
   return `<section class="section page-top"><div class="admin">
-    <aside class="admin-side glass"><div class="admin-brand"><span class="brand-dot"></span>${isChatAdminClient(currentUser) ? 'Admin chat' : 'หลังบ้าน'} ${esc(S('SITE_NAME'))}</div>${nav}<a href="${routeHref('/')}" class="admin-exit">← กลับหน้าเว็บ</a></aside>
+    <aside class="admin-side glass"><div class="admin-brand"><span class="brand-dot"></span>${isChatAdminClient(currentUser) || storeRole === 'chat_admin' ? 'Admin chat' : 'หลังบ้าน'} ${esc(currentStore?.name || S('SITE_NAME'))}</div>${storeSwitcher}${nav}<a href="${routeHref('/')}" class="admin-exit">← กลับหน้าเว็บ</a></aside>
     <div class="admin-main">${content}</div>
   </div></section>`;
 }
@@ -4801,6 +5619,55 @@ async function fetchAdminPage(key) {
     hasPrev: Boolean(data?.hasPrev ?? page > 1),
     hasMore: Boolean(data?.hasMore ?? page < totalPages),
   };
+}
+function csvCell(value = '') {
+  const text = String(value ?? '').replace(/\r?\n/g, ' ').trim();
+  return `"${text.replace(/"/g, '""')}"`;
+}
+function downloadCsv(filename, headers = [], rows = []) {
+  const lines = [headers.map(csvCell).join(',')];
+  rows.forEach((row) => lines.push(headers.map((key) => csvCell(row[key])).join(',')));
+  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function exportAdminListCsv(key) {
+  const config = ADMIN_LIST_CONFIG[key];
+  if (!config) return;
+  const state = getAdminListState(key);
+  const qs = new URLSearchParams({ page: '1', limit: '100' });
+  if (state.q) qs.set('q', state.q);
+  if (config.filterKey && state.filter && state.filter !== 'all') qs.set(config.filterKey, state.filter);
+  const res = await api(`${config.endpoint}?${qs.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || 'export failed');
+  const items = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+  if (key === 'orders') {
+    downloadCsv(`orders-${Date.now()}.csv`, ['id', 'customerName', 'customerPhone', 'status', 'total', 'payment_method', 'tracking', 'itemSummary'], items);
+  } else if (key === 'leads') {
+    downloadCsv(`leads-${Date.now()}.csv`, ['id', 'name', 'phone', 'lineId', 'crop', 'province', 'stage', 'status', 'source', 'problem', 'note'], items);
+  } else if (key === 'users') {
+    downloadCsv(`users-${Date.now()}.csv`, ['id', 'email', 'name', 'role'], items);
+  }
+}
+function exportProductsCsv(products = _adminProducts) {
+  const rows = (Array.isArray(products) ? products : []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    category: displayProductCategoryLabel(productCategory(p)),
+    price: productCurrentPriceValue(p),
+    comparePrice: productComparePriceValue(p),
+    stock: p.stock,
+    active: p.active === false ? 'no' : 'yes',
+    sort: productSortValue(p),
+  }));
+  downloadCsv(`products-${Date.now()}.csv`, ['id', 'name', 'category', 'price', 'comparePrice', 'stock', 'active', 'sort'], rows);
 }
 function adminFilters(key) {
   const config = ADMIN_LIST_CONFIG[key];
@@ -5288,8 +6155,11 @@ function barRows(items, labelKey, valKey, fmt = (v) => v) {
 }
 async function viewAdminDash() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   const a = await (await api('/api/admin/analytics?days=30')).json();
   const s = await (await api('/api/admin/stats')).json();
+  const dashProducts = await (await api('/api/admin/products')).json().catch(() => []);
+  const dashOrdersData = await (await api('/api/admin/orders?limit=8')).json().catch(() => ({ items: [] }));
   const t = a.totals;
   const tiles = `<div class="stat-cards">
     <div class="stat-card"><span>ยอดขายรวม</span><b>${baht(t.revenue)}</b></div>
@@ -5300,8 +6170,39 @@ async function viewAdminDash() {
   const payItems = [{ label: 'PromptPay', n: a.payment.promptpay }, { label: 'บัตรเครดิต', n: a.payment.card }];
   const status = Object.entries(a.statusBreakdown).map(([k, v]) => `<span class="chip">${a.statusLabels[k] || k} · ${v}</span>`).join('') || '<span class="muted">—</span>';
   const top = a.topProducts.length ? barRows(a.topProducts, 'name', 'qty', (v) => v + ' ชิ้น') : '<p class="muted">ยังไม่มีข้อมูล</p>';
+  const growthItems = [
+    t.orders ? 'ติดตามออเดอร์รอชำระและหมดเวลาชำระ เพื่อกู้ยอดขายกลับมา' : 'เพิ่มสินค้าเด่นและทดสอบสั่งซื้อจริง 1 ออเดอร์',
+    s.leads ? `มีลีด ${s.leads} รายการ ควร follow-up ผ่าน Inbox/LINE ภายในวันนี้` : 'เพิ่ม CTA ขอคำปรึกษาในหน้าแรกเพื่อเก็บลีดเพิ่ม',
+    a.topProducts.length ? `ดันสินค้าขายดี "${a.topProducts[0].name}" เป็นสินค้าแนะนำหน้าแรก` : 'ยังไม่มีสินค้าขายดีชัดเจน ให้จัดชุดโปรโมชันเริ่มต้น',
+    t.aov ? `AOV ปัจจุบัน ${baht(t.aov)} ใช้ bundle/recommendation เพื่อเพิ่มมูลค่าต่อออเดอร์` : 'เปิดคูปองหรือชุดเซตเพื่อเริ่มเก็บข้อมูล AOV',
+  ];
+  const lowStockProducts = (Array.isArray(dashProducts) ? dashProducts : [])
+    .filter((p) => p.active !== false && Number(p.stock || 0) <= 5)
+    .sort((a, b) => Number(a.stock || 0) - Number(b.stock || 0))
+    .slice(0, 6);
+  const lowStock = lowStockProducts.length
+    ? `<div class="stock-watch-list">${lowStockProducts.map((p) => `<a href="${routeHref('/admin/products')}" class="stock-watch-item"><b>${esc(productCardName(p))}</b><span>${Number(p.stock || 0) <= 0 ? 'หมดสต็อก' : `เหลือ ${Number(p.stock || 0)} ชิ้น`}</span></a>`).join('')}</div>`
+    : '<p class="muted">ยังไม่มีสินค้าที่ต้องเตือนสต็อกต่ำ</p>';
+  const workOrders = asArray(dashOrdersData.items).filter((order) => ['awaiting_payment', 'paid', 'preparing', 'shipped'].includes(order.status)).slice(0, 5);
+  const todayWork = workOrders.length
+    ? `<div class="today-work-list">${workOrders.map((order) => {
+      const priority = orderPriority(order);
+      return `<a href="${routeHref('/admin/order/' + order.id)}"><span class="priority-pill ${priority.tone}">${esc(priority.label)}</span><b>${esc(order.id)}</b><small>${esc(order.customerName || '-')} · ${baht(order.total)}</small></a>`;
+    }).join('')}</div>`
+    : '<p class="muted">ยังไม่มีออเดอร์ที่ต้องจัดการเร่งด่วน</p>';
   return adminLayout('', `<h2>แดชบอร์ด</h2>${tiles}
     <div class="dash-card"><div class="dash-head"><h3>ยอดขาย 30 วันล่าสุด</h3><span class="muted">รวม ${baht(t.revenue)} · ${t.paidOrders} ออเดอร์ที่ชำระแล้ว</span></div>${areaChart(a.series)}</div>
+    <div class="dash-card growth-card"><div class="dash-head"><h3>Growth checklist</h3><span class="muted">สิ่งที่ควรทำต่อเพื่อเพิ่มยอดขาย</span></div><div class="growth-list">${growthItems.map((item) => `<label><input type="checkbox"> <span>${esc(item)}</span></label>`).join('')}</div></div>
+    <div class="dash-card today-work"><div class="dash-head"><h3>วันนี้ต้องทำอะไร</h3><span class="muted">คิวงานออเดอร์ที่ควรเคลียร์ก่อน</span></div>${todayWork}</div>
+    <div class="dash-grid">
+      <div class="dash-card stock-watch"><div class="dash-head"><h3>Low stock watch</h3><span class="muted">สินค้าที่ควรเติมหรือซ่อนก่อนลูกค้าสั่ง</span></div>${lowStock}</div>
+      <div class="dash-card admin-quick-actions"><div class="dash-head"><h3>Quick actions</h3><span class="muted">ทางลัดสำหรับทำให้ร้านพร้อมขาย</span></div>
+        <a href="${routeHref('/admin/products')}">จัดการสินค้า / เติมสต็อก</a>
+        <a href="${routeHref('/admin/site')}">แก้ Hero และข้อมูลร้าน</a>
+        <a href="${routeHref('/admin/coupons')}">สร้างคูปองกระตุ้นยอด</a>
+        <a href="${routeHref('/admin/inbox')}">ตอบ Inbox ลูกค้า</a>
+      </div>
+    </div>
     <div class="dash-grid">
       <div class="dash-card"><h3>ช่องทางชำระเงิน</h3>${barRows(payItems, 'label', 'n')}</div>
       <div class="dash-card"><h3>สินค้าขายดี</h3>${top}</div>
@@ -5338,16 +6239,24 @@ function productForm(p) {
       <label>กลุ่มแบรนด์<select name="segment"><option value="agri" ${productSegment(e) === 'agri' ? 'selected' : ''}>สินค้าเกษตร</option><option value="lifestyle" ${productSegment(e) === 'lifestyle' ? 'selected' : ''}>สุขภาพ/ความงาม</option></select></label>
       <label>หมวดหมู่<select name="category">${categoryOptions}</select></label>
       <label>ป้ายโปรโมชัน (tag)<input name="tag" value="${e.tag || ''}" placeholder="เช่น แพ็กคู่ / แพ็กสุดคุ้ม / โปรแรง"></label>
+      <label>ป้ายหน้าเว็บ<input name="marketingBadge" value="${esc(productMarketingBadge(e))}" placeholder="เช่น ขายดี / แนะนำ / พร้อมส่ง"></label>
+      <label>ชื่อสั้นบนการ์ด<input name="cardName" value="${esc(extra.cardName || '')}" placeholder="เว้นว่างเพื่อใช้ชื่อสินค้าหลัก"></label>
       <label>ราคาหลัก (บาท)<input name="price" type="number" required value="${e.price || ''}"></label>
       <label>ราคาเทียบอีกฝั่ง (บาท)<input name="salePrice" type="number" min="0" value="${parseInt(e?.salePrice ?? extra.salePrice ?? extra.comparePrice ?? 0, 10) || ''}" placeholder="ใส่อีกราคาเพื่อให้ระบบคำนวณก่อนลด/หลังลดอัตโนมัติ"></label>
       <label>สต็อก<input name="stock" type="number" value="${e.stock ?? 0}"></label>
       <label>ลำดับขึ้นก่อน<input name="sort" type="number" value="${productSortValue(e)}" placeholder="0"></label>
       <label>ไอคอน (ถ้าไม่อัปโหลดรูป)<select name="icon">${icons.map((i) => `<option value="${i}" ${e.icon === i ? 'selected' : ''}>${i}</option>`).join('')}</select></label>
       <label class="pf-check"><input type="checkbox" name="active" ${e.active === false ? '' : 'checked'}> เปิดขาย</label>
+      <label class="pf-check"><input type="checkbox" name="featured" ${productIsFeatured(e) ? 'checked' : ''}> สินค้าแนะนำ</label>
     </div>
     <p class="form-note">ใส่ราคา 2 ช่องเมื่อมีการลดราคา ระบบจะจับเองว่าเลขไหนเป็นราคาก่อนลดและเลขไหนเป็นราคาที่ขายจริง จากนั้นคำนวณ % ลดให้อัตโนมัติ พร้อมใช้ลำดับขึ้นก่อนภายในกลุ่มสินค้า</p>
     <label>คำโปรย (สั้น)<input name="short" value="${e.short || ''}"></label>
     <label>รายละเอียด<textarea name="desc" rows="3">${e.desc || ''}</textarea></label>
+    <label>จุดขายบนหน้าเว็บ (บรรทัดละ 1 ข้อ)<textarea name="sellingPoints" rows="3" placeholder="เช่น พร้อมส่ง / เหมาะกับลูกค้าใหม่ / ทีมช่วยแนะนำก่อนซื้อ">${esc(asArray(extra.sellingPoints).join('\n'))}</textarea></label>
+    <div class="pf-grid">
+      <label>SEO Title<input name="seoTitle" value="${esc(extra.seoTitle || '')}" placeholder="เว้นว่างเพื่อใช้ชื่อสินค้า"></label>
+      <label>SEO Description<input name="seoDescription" value="${esc(extra.seoDescription || '')}" placeholder="เว้นว่างเพื่อใช้คำโปรยสินค้า"></label>
+    </div>
     <label>สเปก (บรรทัดละ "หัวข้อ: ค่า")<textarea name="specs" rows="4" placeholder="กำลังไฟ: 80W">${specsText}</textarea></label>
     <label>รูปสินค้า (อัปโหลดรูปจริงได้)<input name="image" type="file" accept="image/*"></label>
     <input type="hidden" name="existingImage" value="${esc(e.image || '')}">
@@ -5375,6 +6284,7 @@ function productForm(p) {
 }
 async function viewAdminProducts() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   _adminProducts = await (await api('/api/admin/products')).json();
   _adminSelectedProductIds = new Set([..._adminSelectedProductIds].filter((id) => _adminProducts.some((item) => item.id === id)));
   const activeCount = _adminProducts.filter((p) => p.active !== false).length;
@@ -5443,7 +6353,7 @@ async function viewAdminProducts() {
   const rows = _adminProducts.map((p, index) => `<div class="adm-prod ${_adminSelectedProductIds.has(p.id) ? 'is-selected' : ''}">
     <label class="adm-prod-select"><input type="checkbox" data-selectprod="${p.id}" ${_adminSelectedProductIds.has(p.id) ? 'checked' : ''}><span></span></label>
     <div class="adm-prod-img">${p.image ? `<img src="${p.image}">` : icon(p.icon || 'pod')}</div>
-    <div class="adm-prod-info"><b>${p.name}</b><span class="muted">ลำดับ ${productSortValue(p)} · ${SEGMENT_INFO[productSegment(p)]?.label || '-'}${productCategory(p) ? ' · หมวด ' + esc(displayProductCategoryLabel(productCategory(p))) : ''}${productPromoTag(p) ? ' · ป้าย ' + esc(productPromoTag(p)) : ''} · ${adminProductPriceSummary(p)} · สต็อก ${p.stock}${p.active ? '' : ' · <span style="color:#ff7ab3">ปิดขาย</span>'}</span></div>
+    <div class="adm-prod-info"><b>${p.name}</b><span class="muted">ลำดับ ${productSortValue(p)} · ${SEGMENT_INFO[productSegment(p)]?.label || '-'}${productCategory(p) ? ' · หมวด ' + esc(displayProductCategoryLabel(productCategory(p))) : ''}${productPromoTag(p) ? ' · ป้าย ' + esc(productPromoTag(p)) : ''}${productMarketingBadge(p) ? ' · Badge ' + esc(productMarketingBadge(p)) : ''}${productIsFeatured(p) ? ' · แนะนำ' : ''}${asArray(p.images).length ? ' · Gallery ' + asArray(p.images).length : ''} · ${adminProductPriceSummary(p)} · สต็อก ${p.stock}${p.active ? '' : ' · <span style="color:#ff7ab3">ปิดขาย</span>'}</span></div>
     <div class="adm-prod-act"><button class="btn-mini" type="button" data-moveprod="${p.id}" data-direction="up" ${index === 0 ? 'disabled' : ''}>เลื่อนขึ้น</button><button class="btn-mini" type="button" data-moveprod="${p.id}" data-direction="down" ${index === _adminProducts.length - 1 ? 'disabled' : ''}>เลื่อนลง</button><button class="btn-mini ${p.active === false ? 'is-confirm' : ''}" type="button" data-toggleprodactive="${p.id}">${p.active === false ? 'เปิดขาย' : 'ซ่อน'}</button><button class="btn-mini" type="button" data-editprod="${p.id}">แก้ไข</button><button class="btn-mini danger" type="button" data-delprod="${p.id}">ลบ</button></div>
   </div>`).join('');
   const visibilitySummary = `<div class="stat-cards">
@@ -5452,12 +6362,12 @@ async function viewAdminProducts() {
     <div class="stat-card"><span>ซ่อนอยู่</span><b>${hiddenCount}</b></div>
   </div>
   <div class="form-note" style="margin:-8px 0 18px">หน้าสินค้าในเว็บแสดงเฉพาะรายการที่เปิดขายเท่านั้น ถ้าสินค้าหายจากหน้าสินค้า ให้ตรวจปุ่ม "ซ่อน / เปิดขาย" ในรายการนี้ได้ทันที</div>`;
-  return adminLayout('products', `<div class="adm-head"><h2>จัดการสินค้า</h2><div class="admin-inline-actions"><button class="btn btn-primary" id="addProdBtn">+ เพิ่มสินค้า</button></div></div>
+  return adminLayout('products', `<div class="admin-workspace admin-products-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Product Command</span><h2>จัดการสินค้า</h2><p class="muted">จัดลำดับ เพิ่ม/แก้ไขสินค้า ย้ายหมวด และควบคุมการแสดงผลของร้านที่เลือกไว้</p></div><div class="admin-inline-actions"><button class="btn btn-glass" type="button" data-export-products>Export CSV</button><button class="btn btn-primary" id="addProdBtn">+ เพิ่มสินค้า</button></div></div>
     ${visibilitySummary}
     ${bulkManager}
     ${categoryManager}
     <div id="prodFormWrap"></div>
-    <div class="adm-list">${rows}</div>`);
+    <div class="adm-list admin-product-list">${rows}</div></div>`);
 }
 function currentProductCategories() {
   const hidden = document.getElementById('adminProductCategoriesData');
@@ -5636,6 +6546,7 @@ function articleForm(a) {
 }
 async function viewAdminArticles() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   _adminArticles = await (await api('/api/admin/articles')).json();
   const rows = _adminArticles.length ? _adminArticles.map((a) => `<div class="adm-prod">
     <div class="adm-prod-info"><b>${esc(a.title)} ${a.published ? '' : '<span style="color:#c99">· ซ่อน</span>'}</b><span class="muted">${new Date(a.createdAt).toLocaleDateString('th-TH')} · ${esc(a.excerpt || '')}</span></div>
@@ -5645,8 +6556,39 @@ async function viewAdminArticles() {
     <div id="articleFormWrap"></div>
     <div class="adm-list">${rows}</div>`);
 }
+async function viewAdminCommunity() {
+  if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
+  const data = await (await api('/api/admin/community')).json().catch(() => ({ posts: [], stories: [] }));
+  const posts = asArray(data.posts);
+  const stories = asArray(data.stories);
+  const postRows = posts.length ? posts.map((post) => `<div class="adm-prod community-admin-row ${post.status !== 'approved' ? 'is-pending' : ''}">
+    <div class="adm-prod-img">${post.media?.[0]?.url ? `<img src="${esc(post.media[0].url)}">` : '<span>โพสต์</span>'}</div>
+    <div class="adm-prod-info"><b>${esc(post.authorName || 'สมาชิก')} · ${post.status}${post.pinned ? ' · ปักหมุด' : ''}</b><span class="muted">${esc(String(post.caption || '').slice(0, 160))}</span><span class="muted">ไลก์ ${post.likes || 0} · คอมเมนต์ ${post.comments || 0}</span></div>
+    <div class="adm-prod-act">
+      <button class="btn-mini" type="button" data-community-admin-post="${esc(post.id)}" data-status="approved" data-pinned="${post.pinned ? '1' : '0'}">อนุมัติ</button>
+      <button class="btn-mini" type="button" data-community-admin-post="${esc(post.id)}" data-status="hidden" data-pinned="${post.pinned ? '1' : '0'}">ซ่อน</button>
+      <button class="btn-mini" type="button" data-community-admin-post="${esc(post.id)}" data-status="${esc(post.status)}" data-pinned="${post.pinned ? '0' : '1'}">${post.pinned ? 'เลิกปักหมุด' : 'ปักหมุด'}</button>
+      <button class="btn-mini danger" type="button" data-community-delete-post="${esc(post.id)}">ลบ</button>
+    </div>
+  </div>`).join('') : '<p class="muted">ยังไม่มีโพสต์ชุมชน</p>';
+  const storyRows = stories.length ? stories.map((story) => `<div class="adm-prod community-admin-story">
+    <div class="adm-prod-img">${story.media ? `<img src="${esc(story.media)}">` : '<span>Story</span>'}</div>
+    <div class="adm-prod-info"><b>${esc(story.title || 'Story')}</b><span class="muted">หมดอายุ ${new Date(story.expiresAt).toLocaleString('th-TH')} · ${esc(story.caption || '')}</span></div>
+    <div class="adm-prod-act"><button class="btn-mini danger" type="button" data-community-delete-story="${esc(story.id)}">ลบ</button></div>
+  </div>`).join('') : '<p class="muted">ยังไม่มี story</p>';
+  return adminLayout('community', `<div class="adm-head"><div><h2>ชุมชน / Learning Platform</h2><span class="muted">จัดการโพสต์สมาชิก, seed จากบทความ และ story 24 ชั่วโมง</span></div><button class="btn btn-primary" type="button" data-community-seed>Seed จากบทความเดิม</button></div>
+    <div class="dash-grid">
+      <div class="stat-card"><span>โพสต์ทั้งหมด</span><b>${posts.length}</b></div>
+      <div class="stat-card"><span>รออนุมัติ</span><b>${posts.filter((p) => p.status === 'pending').length}</b></div>
+      <div class="stat-card"><span>Story</span><b>${stories.length}</b></div>
+    </div>
+    <div class="dash-card"><div class="dash-head"><h3>โพสต์ชุมชน</h3><span class="muted">อนุมัติก่อนแสดงหน้าเว็บ</span></div><div class="adm-list">${postRows}</div></div>
+    <div class="dash-card"><div class="dash-head"><h3>Story 24 ชั่วโมง</h3><span class="muted">Story จะหายจากหน้าลูกค้าเมื่อครบ 24 ชั่วโมง</span></div><div class="adm-list">${storyRows}</div></div>`);
+}
 async function viewAdminLeads() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   const data = await fetchAdminPage('leads');
   const leads = data.items || [];
   const statusLabel = { new: 'ใหม่', contacted: 'ติดต่อแล้ว', qualified: 'มีโอกาสซื้อ', won: 'ปิดการขายได้', lost: 'ยังไม่สำเร็จ' };
@@ -5675,17 +6617,34 @@ async function viewAdminLeads() {
       <button class="btn-mini" type="button" data-savelead="${l.id}">บันทึก</button>
     </div>
   </div>`).join('') : '<p class="muted">ไม่พบลีดตามเงื่อนไขนี้</p>';
-  return adminLayout('leads', `<div class="adm-head"><h2>ลีดลูกค้า</h2><span class="muted">ติดตามลูกค้าที่มาจากเว็บไซต์ แชต และแคมเปญโฆษณา</span></div>${adminFilters('leads')}${adminPagination('leads', data)}<div class="adm-list">${rows}</div>`);
+  return adminLayout('leads', `<div class="adm-head"><div><h2>ลีดลูกค้า</h2><span class="muted">ติดตามลูกค้าที่มาจากเว็บไซต์ แชต และแคมเปญโฆษณา</span></div><button class="btn btn-glass" type="button" data-admin-export="leads">Export CSV</button></div>${adminFilters('leads')}${adminPagination('leads', data)}<div class="adm-list">${rows}</div>`);
 }
 async function viewAdminOrders() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   const data = await fetchAdminPage('orders');
   const orders = data.items || [];
-  const rows = orders.length ? orders.map((o) => `<div class="adm-order glass">
+  const ops = orders.reduce((acc, order) => {
+    const priority = orderPriority(order);
+    acc[priority.key] = (acc[priority.key] || 0) + 1;
+    return acc;
+  }, {});
+  const opsSummary = `<div class="order-ops-board glass">
+    <div><span>รอตรวจสลิป</span><b>${ops.verify || 0}</b></div>
+    <div><span>รอเตรียมสินค้า</span><b>${ops.prepare || 0}</b></div>
+    <div><span>รอจัดส่ง</span><b>${ops.ship || 0}</b></div>
+    <div><span>รอปิดงาน</span><b>${ops.deliver || 0}</b></div>
+  </div>`;
+  const rows = orders.length ? orders.map((o) => {
+    const priority = orderPriority(o);
+    const nextAction = priority.action ? `<button class="btn-mini is-confirm" type="button" data-oaction="${priority.action}" data-oid="${o.id}">Next: ${esc(priority.label)}</button>` : '';
+    return `<div class="adm-order glass priority-${priority.tone}">
     <div class="ao-top"><a href="${routeHref('/admin/order/' + o.id)}"><b>${o.id}</b> <span class="ao-view">ดูรายละเอียด →</span></a><span class="status-badge s-${o.status}">${o.statusLabel}</span></div>
     <div class="ao-info muted">${o.customerName || '-'} · ${o.customerPhone || '-'} · ${baht(o.total)} · ${o.payment_method === 'card' ? 'บัตร' : 'PromptPay'}${o.payment_claimed && !o.paid ? ' · ⚠️แจ้งโอนแล้ว' : ''}</div>
     <div class="ao-items muted">${o.itemSummary || 'ไม่มีรายการสินค้า'}${o.itemCount ? ` · รวม ${o.itemCount} ชิ้น` : ''}</div>
+    <div class="ao-priority"><span class="priority-pill ${priority.tone}">${esc(priority.label)}</span><button class="btn-mini" type="button" data-copy="${esc(o.id)}">คัดลอกออเดอร์</button>${o.customerPhone ? `<button class="btn-mini" type="button" data-copy="${esc(o.customerPhone)}">คัดลอกเบอร์</button>` : ''}</div>
     <div class="ao-act">
+      ${nextAction}
       <button class="btn-mini" type="button" data-oaction="paid" data-oid="${o.id}">ยืนยันจ่าย</button>
       <button class="btn-mini" type="button" data-oaction="preparing" data-oid="${o.id}">เตรียม</button>
       <input class="track-in" data-track="${o.id}" placeholder="เลขพัสดุ" value="${o.tracking || ''}">
@@ -5693,11 +6652,13 @@ async function viewAdminOrders() {
       <button class="btn-mini" type="button" data-oaction="delivered" data-oid="${o.id}">สำเร็จ</button>
       <button class="btn-mini danger" type="button" data-oaction="cancelled" data-oid="${o.id}">ยกเลิก</button>
     </div>
-  </div>`).join('') : '<p class="muted">ไม่พบออเดอร์ตามเงื่อนไขนี้</p>';
-  return adminLayout('orders', `<div class="adm-head"><h2>ออเดอร์ทั้งหมด</h2><span class="muted">เปิดดูเป็นหน้า ๆ เพื่อให้หลังบ้านเบาและลื่นขึ้น</span></div>${adminFilters('orders')}${adminPagination('orders', data)}<div class="adm-list">${rows}</div>`);
+  </div>`;
+  }).join('') : '<p class="muted">ไม่พบออเดอร์ตามเงื่อนไขนี้</p>';
+  return adminLayout('orders', `<div class="adm-head"><div><h2>ออเดอร์ทั้งหมด</h2><span class="muted">เปิดดูเป็นหน้า ๆ เพื่อให้หลังบ้านเบาและลื่นขึ้น</span></div><button class="btn btn-glass" type="button" data-admin-export="orders">Export CSV</button></div>${opsSummary}${adminFilters('orders')}${adminPagination('orders', data)}<div class="adm-list">${rows}</div>`);
 }
 async function viewAdminInbox() {
   if (!adminGuard({ allowChatAdmin: true })) return loadingView();
+  await ensureAdminStoresContext();
   try {
     const data = await loadAdminInboxViewData();
     return adminInboxShell(data.listData, data.threadData);
@@ -5707,6 +6668,7 @@ async function viewAdminInbox() {
 }
 async function viewAdminUsers() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   const data = await fetchAdminPage('users');
   const users = data.items || [];
   const createForm = `<form id="adminCreateUserForm" class="prod-form admin-user-create glass">
@@ -5757,6 +6719,7 @@ function couponForm(c) {
 }
 async function viewAdminCoupons() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   _coupons = await (await api('/api/admin/coupons')).json();
   const rows = _coupons.length ? _coupons.map((c) => `<div class="adm-prod">
     <div class="adm-prod-info"><b>${c.code} <span class="role-badge">${c.type === 'percent' ? c.value + '%' : baht(c.value)}</span> ${c.active ? '' : '<span style="color:#c99">· ปิด</span>'}</b>
@@ -5767,9 +6730,16 @@ async function viewAdminCoupons() {
 }
 async function viewAdminSettings() {
   if (!adminGuard()) return loadingView();
-  const settings = await (await api('/api/admin/settings')).json();
-  const health = await (await api('/api/health')).json();
-  const lineSenders = await (await api('/api/admin/line/recent-senders')).json().catch(() => ({ senders: [] }));
+  await ensureAdminStoresContext();
+  const [settings, statusData] = await Promise.all([
+    (await api('/api/admin/settings')).json(),
+    (await api('/api/admin/settings/status')).json(),
+  ]);
+  const health = statusData.health || {};
+  const lastApply = statusData.lastApply || null;
+  const history = Array.isArray(statusData.history) ? statusData.history : [];
+  const revisions = Array.isArray(statusData.revisions) ? statusData.revisions : [];
+  const lineAdmin = statusData.lineAdmin || {};
   const settingMap = Object.fromEntries(settings.map((item) => [item.key, item]));
   const labels = {
     LINE_CHANNEL_ACCESS_TOKEN: 'LINE Channel Access Token', LINE_CHANNEL_SECRET: 'LINE Channel Secret',
@@ -5790,6 +6760,8 @@ async function viewAdminSettings() {
   const webChatPath = String(settingMap.LINE_WEB_CHAT_PATH?.display || '/line-room').trim() || '/line-room';
   const badge = (ok) => ok ? '<span class="status-badge s-paid">เชื่อมแล้ว</span>' : '<span class="status-badge s-awaiting_payment">ยังไม่เชื่อม</span>';
   const lineRoomBadge = badge(Boolean(health.lineWebRoomReady));
+  const configCenter = renderConfigCenterStatus(lastApply, history, revisions);
+  const lineAdminManager = renderLineAdminBindingManager(lineAdmin);
   const cheatSheet = `
     <div class="glass" style="padding:18px;margin-top:16px">
       <h3 style="margin:0 0 10px">LINE OA Cheat Sheet</h3>
@@ -5800,23 +6772,12 @@ async function viewAdminSettings() {
       <div class="form-note" style="margin:0 0 12px"><b>Customer commands:</b> <code>menuddd</code>, <code>productsddd</code>, <code>setsddd</code>, <code>packsddd</code>, <code>smallddd</code>, <code>largeddd</code>, <code>promoddd</code>, <code>reviewsddd</code>, <code>trackddd</code>, <code>articlesddd</code>, <code>aboutddd</code>, <code>chatddd</code>, <code>webroomddd</code>, <code>supportddd</code>, <code>accountddd</code>, <code>memberddd</code></div>
       <div class="form-note" style="margin:0 0 12px"><b>Product sync:</b> ปุ่มสินค้าใน LINE OA จะดึงราคา รายละเอียด รูปภาพ และลิงก์จากข้อมูลสินค้า active บนเว็บไซต์โดยตรง แก้ในหลังบ้านแล้ว LINE OA อัปเดตตามทันที</div>
       <div class="form-note" style="margin:0 0 12px"><b>Admin commands:</b> <code>listddd</code>, <code>ordersddd</code>, <code>orderddd ORDER_ID</code>, <code>paidddd ORDER_ID</code>, <code>prepareddd ORDER_ID</code>, <code>shipddd ORDER_ID TRACKING</code>, <code>doneddd ORDER_ID</code>, <code>cancelddd ORDER_ID</code></div>
+      <div class="form-note" style="margin:0 0 12px"><b>Bind admin:</b> สร้างรหัสจากหลังบ้าน แล้วให้คนที่จะเป็นแอดมินส่ง <code>bindadminddd CODE</code> ใน LINE OA ภายใน 10 นาที</div>
       <div class="form-note" style="margin:0">การตอบห้องแชตยังใช้รูปแบบเดิม: <code>#SESSION_ID ข้อความ</code></div>
-    </div>`;
-  const senderRows = (Array.isArray(lineSenders.senders) ? lineSenders.senders : []).map((s) => `<div class="adm-prod">
-    <div class="adm-prod-info"><b>${esc(s.name)} ${s.isCurrentAdmin ? '<span class="status-badge s-paid">แอดมินปัจจุบัน</span>' : ''}</b>
-    <span class="muted"><code>${esc(s.lineUserId)}</code>${s.lastActiveAt ? ' · ทักล่าสุด ' + new Date(s.lastActiveAt).toLocaleString('th-TH') : ''}</span></div>
-    <div class="adm-prod-act">${s.isCurrentAdmin ? '' : `<button class="btn-mini" type="button" data-setlineadmin="${esc(s.lineUserId)}">ตั้งเป็นแอดมิน</button>`}</div>
-  </div>`).join('');
-  const adminCapture = `
-    <div class="glass" style="padding:18px;margin-top:16px">
-      <h3 style="margin:0 0 10px">ผูกแอดมินรับแจ้งเตือน LINE ${lineSenders.currentAdminUserId ? '' : '<span class="status-badge s-awaiting_payment">ยังไม่ได้ตั้ง</span>'}</h3>
-      <p class="muted" style="margin:0 0 12px">แจ้งเตือน (ลูกค้าทักแชต/ออเดอร์ใหม่/แจ้งโอน) จะ push ไปหา userId นี้ — <b>ต้องเป็น userId ของบัญชีที่เป็นเพื่อนกับ OA นี้เท่านั้น</b> ไม่งั้นระบบส่งไม่ได้ (LINE ตอบ 400)</p>
-      <p class="muted" style="margin:0 0 12px">วิธีผูก: ① มือถือแอดมินแอดเพื่อน OA ② ส่งข้อความอะไรก็ได้หา OA ③ กดรีเฟรชรายชื่อด้านล่าง ④ กด "ตั้งเป็นแอดมิน" แล้วระบบจะส่งข้อความทดสอบให้ทันที</p>
-      <div class="pf-actions" style="margin:0 0 12px"><button class="btn btn-glass" type="button" id="refreshLineSendersBtn">รีเฟรชรายชื่อ</button></div>
-      <div class="adm-list">${senderRows || '<p class="muted">ยังไม่มีใครทักเข้ามาทาง LINE OA — ให้แอดมินส่งข้อความหา OA ก่อนแล้วกดรีเฟรช</p>'}</div>
     </div>`;
   return adminLayout('settings', `<h2>ตั้งค่า API / LINE OA</h2>
     <div class="conn-status">LINE OA ${badge(health.lineConfigured)} · Stripe ${badge(health.stripeConfigured)} · PromptPay ${badge(health.promptpayConfigured)} · SlipOK ${badge(health.slipokConfigured)} · อีเมล ${badge(health.mailConfigured)}</div>
+    ${configCenter}
     <form id="settingsForm" class="set-form glass">
       <label class="set-field">
         <span>LINE Chat Mode <em class="ok">เลือกได้ 2 โหมด โดย flow เดิมยังอยู่</em></span>
@@ -5830,11 +6791,353 @@ async function viewAdminSettings() {
         <input name="LINE_WEB_CHAT_PATH" value="${esc(webChatPath)}" placeholder="/line-room">
       </label>
       ${fields}
-      <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึกการตั้งค่า</button><button class="btn btn-glass" type="button" id="testLineBtn">ทดสอบส่ง LINE</button><button class="btn btn-glass" type="button" id="testLineRoomBtn">ทดสอบลิงก์ห้องแชต</button><button class="btn btn-glass" type="button" id="testMailBtn">ทดสอบส่งอีเมล</button><a class="btn btn-glass" href="${routeHref('/admin/diagnostics')}">เปิด Diagnostics</a></div>
+      <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึกและตรวจสอบอัตโนมัติ</button><button class="btn btn-glass" type="button" id="testLineBtn">ทดสอบส่ง LINE</button><button class="btn btn-glass" type="button" id="testLineRoomBtn">ทดสอบลิงก์ห้องแชต</button><button class="btn btn-glass" type="button" id="testMailBtn">ทดสอบส่งอีเมล</button><a class="btn btn-glass" href="${routeHref('/admin/diagnostics')}">เปิด Diagnostics</a></div>
     </form>
-    <p class="form-note">ค่า secret จะแสดงแบบปิดบัง เว้นว่างไว้ = ใช้ค่าเดิม · บันทึกแล้วมีผลทันทีไม่ต้องรีสตาร์ท</p>
-    ${adminCapture}
+    <p class="form-note">ค่า secret จะแสดงแบบปิดบัง เว้นว่างไว้ = ใช้ค่าเดิม · บันทึกแล้วระบบจะเช็ก config, LINE token, line-room และ health ให้อัตโนมัติ พร้อมเก็บ revision สำหรับ rollback และเข้ารหัส secret ก่อนบันทึกลง settings</p>
+    ${lineAdminManager}
     ${cheatSheet}`);
+}
+function normalizeStoreSubdomainDraft(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+}
+function storeStatusBadge(store = {}) {
+  if (store?.isDefault) return '<span class="status-badge s-paid">Default</span>';
+  const status = String(store?.status || 'active').trim().toLowerCase();
+  if (status === 'active') return '<span class="status-badge s-paid">Active</span>';
+  if (status === 'draft') return '<span class="status-badge s-awaiting_payment">Draft</span>';
+  if (status === 'disabled') return '<span class="status-badge s-cancelled">Disabled</span>';
+  return `<span class="status-badge">${esc(status || 'unknown')}</span>`;
+}
+function renderStoreSubdomainCheck(state = {}) {
+  const subdomain = String(state?.subdomain || '').trim();
+  if (!subdomain) return '<div class="form-note">พิมพ์ชื่อร้านหรือ subdomain แล้วกดเช็กก่อนสร้าง เพื่อดู URL ปลายทางและลดความผิดพลาด</div>';
+  if (state?.loading) return `<div class="form-note">กำลังตรวจ subdomain <code>${esc(subdomain)}</code> ...</div>`;
+  if (state?.error) return `<div class="form-note" style="color:#b42318">${esc(state.error)}</div>`;
+  if (state?.valid && state?.available) {
+    const previewUrl = String(state?.previewUrl || '').trim();
+    return `<div class="form-note"><b>พร้อมใช้งาน:</b> <code>${esc(subdomain)}</code> ยังว่างอยู่${previewUrl ? ` · URL: <a href="${esc(previewUrl)}" target="_blank" rel="noopener">${esc(previewUrl)}</a>` : ''}</div>`;
+  }
+  if (!state?.valid) return `<div class="form-note" style="color:#b42318">Subdomain <code>${esc(subdomain)}</code> ใช้ไม่ได้ ต้องเป็น a-z, 0-9, ขีดกลาง และต้องไม่ชนคำสงวนของระบบ</div>`;
+  return `<div class="form-note" style="color:#b42318">Subdomain <code>${esc(subdomain)}</code> ถูกใช้งานแล้ว ลองเปลี่ยนชื่ออีกเล็กน้อย</div>`;
+}
+function renderSelectedStoreSettingsPanel(data = {}) {
+  const store = data.store || selectedAdminStore();
+  const settings = Object.fromEntries((Array.isArray(data.settings) ? data.settings : []).map((item) => [item.key, item]));
+  const value = (key) => String(settings[key]?.value ?? data.site?.[key] ?? '').trim();
+  const field = (key, label, type = 'text', rows = 2) => {
+    const secret = settings[key]?.secret === true;
+    const inherited = settings[key]?.inherited === true;
+    const display = String(settings[key]?.display || '').trim();
+    const help = inherited ? '<em class="ok">ใช้ค่า global อยู่</em>' : '<em class="ok">ตั้งค่าแยกร้านแล้ว</em>';
+    if (type === 'area') {
+      return `<label class="set-field"><span>${esc(label)} ${help}</span><textarea name="${esc(key)}" rows="${rows}">${esc(value(key))}</textarea></label>`;
+    }
+    return `<label class="set-field"><span>${esc(label)} ${help}</span><input name="${esc(key)}" ${secret ? 'type="password"' : ''} value="${secret ? '' : esc(value(key))}" placeholder="${secret && display ? esc(display + ' (เว้นว่างไว้ = คงเดิม)') : ''}"></label>`;
+  };
+  return `<section class="glass" style="padding:18px;margin-top:18px">
+    <div class="adm-head" style="margin:0 0 10px"><h3>ตั้งค่าร้านที่เลือก: ${esc(store?.name || store?.id || '-')}</h3><span class="muted">ค่าชุดนี้ใช้เฉพาะร้านใน Store Switcher</span></div>
+    <form id="adminStoreSettingsForm" class="set-form" style="padding:0;background:transparent;border:0">
+      <input type="hidden" name="storeId" value="${esc(store?.id || adminSelectedStoreId())}">
+      <div class="pf-grid">
+        ${field('SITE_NAME', 'ชื่อเว็บ / ชื่อร้าน')}
+        ${field('SITE_LOGO_TEXT', 'ชื่อโลโก้')}
+        ${field('SITE_HERO_TITLE', 'Hero title')}
+        ${field('SITE_HERO_SUBTITLE', 'Hero subtitle', 'area', 3)}
+        ${field('SITE_HERO_IMAGE', 'Hero image URL')}
+        ${field('SITE_CONTACT_PHONE', 'เบอร์ติดต่อ')}
+        ${field('SITE_CONTACT_LINE', 'LINE ID / LINE OA')}
+        ${field('SITE_CONTACT_EMAIL', 'อีเมลติดต่อ')}
+        ${field('PROMPTPAY_ID', 'PromptPay ID')}
+        ${field('PROMPTPAY_NAME', 'ชื่อบัญชี PromptPay')}
+        ${field('PUBLIC_URL', 'Public URL ของร้าน')}
+        ${field('LINE_CHANNEL_ACCESS_TOKEN', 'LINE Channel Access Token')}
+        ${field('LINE_CHANNEL_SECRET', 'LINE Channel Secret')}
+        ${field('LINE_ADMIN_USER_ID', 'LINE Admin userId')}
+        ${field('SMTP_HOST', 'SMTP Host')}
+        ${field('SMTP_PORT', 'SMTP Port')}
+        ${field('SMTP_USER', 'SMTP User')}
+        ${field('SMTP_PASS', 'SMTP Password')}
+        ${field('SMTP_FROM', 'SMTP From')}
+      </div>
+      <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึก settings ร้านนี้</button></div>
+    </form>
+  </section>`;
+}
+function renderStoreOnboardingPanel(store = {}, settingsData = {}) {
+  const settings = Object.fromEntries((Array.isArray(settingsData.settings) ? settingsData.settings : []).map((item) => [item.key, item]));
+  const hasValue = (key) => String(settings[key]?.value || settingsData.site?.[key] || '').trim().length > 0;
+  const items = [
+    ['ตั้งชื่อเว็บ', hasValue('SITE_NAME'), 'SITE_NAME'],
+    ['Logo / ชื่อแบรนด์', hasValue('SITE_LOGO_TEXT'), 'SITE_LOGO_TEXT'],
+    ['Hero หน้าแรก', hasValue('SITE_HERO_TITLE') && hasValue('SITE_HERO_SUBTITLE'), 'SITE_HERO_TITLE'],
+    ['LINE สำหรับติดต่อ', hasValue('SITE_CONTACT_LINE') || hasValue('LINE_CHANNEL_ACCESS_TOKEN'), 'SITE_CONTACT_LINE'],
+    ['PromptPay', hasValue('PROMPTPAY_ID'), 'PROMPTPAY_ID'],
+    ['SMTP อีเมล', hasValue('SMTP_HOST') && hasValue('SMTP_USER'), 'SMTP_HOST'],
+    ['เพิ่มสินค้าแรก', false, 'products'],
+    ['ทดสอบสั่งซื้อ', false, 'checkout'],
+  ];
+  const done = items.filter((item) => item[1]).length;
+  return `<section class="glass store-onboarding" style="padding:18px;margin-top:18px">
+    <div class="adm-head" style="margin:0 0 12px"><h3>Store Onboarding Wizard: ${esc(store?.name || store?.id || '-')}</h3><span class="status-badge ${done >= 6 ? 's-paid' : 's-awaiting_payment'}">${done}/${items.length} พร้อมใช้งาน</span></div>
+    <div class="store-checklist">
+      ${items.map(([label, ok, key]) => `<div class="store-check-item ${ok ? 'done' : ''}">
+        <span>${ok ? '✓' : '○'}</span>
+        <b>${esc(label)}</b>
+        <small>${ok ? 'เสร็จแล้ว' : key === 'products' ? 'ไปที่จัดการสินค้าแล้วเพิ่มสินค้าแรก' : key === 'checkout' ? 'เปิดหน้าร้านแล้วลองสั่งซื้อทดสอบ' : 'กรอกใน settings ร้านด้านล่าง'}</small>
+      </div>`).join('')}
+    </div>
+  </section>`;
+}
+function renderDomainHealthPanel(store = {}, health = {}) {
+  const dnsReady = health?.dns?.ready === true;
+  const sslReady = health?.ssl?.ready === true;
+  return `<section class="glass" style="padding:18px;margin-top:18px">
+    <div class="adm-head" style="margin:0 0 12px"><h3>Domain Health</h3><span class="muted">${esc(health.host || store.primaryDomain || store.publicUrl || '-')}</span></div>
+    <div class="adm-list">
+      ${diagnosticsMetricCard('DNS / Vercel', diagnosticsStateBadge(dnsReady ? 'ok' : 'warn'), dnsReady ? 'พร้อมใช้งาน' : 'ยังรอ DNS หรือ verification', health?.dns?.message || health?.wildcardRecommended || '')}
+      ${diagnosticsMetricCard('SSL', diagnosticsStateBadge(sslReady ? 'ok' : 'warn'), sslReady ? 'พร้อมใช้งาน' : 'รอ Vercel ออก certificate', health?.ssl?.message || '')}
+      ${diagnosticsMetricCard('Automation', diagnosticsStateBadge(health.domainAutomationConfigured ? 'ok' : 'warn'), health.domainAutomationConfigured ? 'ตั้งค่า Vercel API แล้ว' : 'ยังไม่ได้ตั้งค่า Vercel API', health.publicUrl || '')}
+    </div>
+    <div class="pf-actions" style="margin-top:12px">
+      ${store?.id && store?.subdomain ? `<button class="btn btn-glass" type="button" data-provisionstore="${esc(store.id)}">Retry Provision</button>` : ''}
+      ${health.publicUrl ? `<a class="btn btn-glass" href="${esc(health.publicUrl)}" target="_blank" rel="noopener">เปิดหน้าร้าน</a>` : ''}
+    </div>
+  </section>`;
+}
+function renderStoreBackupPanel(store = {}) {
+  return `<section class="glass" style="padding:18px;margin-top:18px">
+    <div class="adm-head" style="margin:0 0 12px"><h3>Backup / Export ร้าน</h3><span class="muted">สินค้า ออเดอร์ ลูกค้า settings และ domain เฉพาะร้าน</span></div>
+    <div class="pf-actions">
+      <a class="btn btn-primary" href="/api/admin/stores/${encodeURIComponent(store?.id || adminSelectedStoreId())}/export" target="_blank" rel="noopener">Export JSON Backup</a>
+    </div>
+    <form id="adminStoreImportForm" class="set-form" style="padding:0;background:transparent;border:0;margin-top:14px">
+      <input type="hidden" name="storeId" value="${esc(store?.id || adminSelectedStoreId())}">
+      <label class="set-field"><span>Safe Import / Restore JSON</span><textarea name="backupJson" rows="5" placeholder="วาง JSON backup จาก Export ที่นี่"></textarea></label>
+      <div class="pf-actions">
+        <button class="btn btn-glass" type="submit" data-import-dryrun="1">Dry-run ก่อนเขียนจริง</button>
+        <button class="btn btn-primary" type="submit" data-import-apply="1">Apply Restore</button>
+      </div>
+    </form>
+    <p class="form-note" style="margin-top:10px">Restore จะ upsert เฉพาะ settings, products, articles และ coupons ของร้านที่เลือก ไม่แตะ orders/leads/customers เพื่อกันข้อมูลลูกค้าถูกทับ</p>
+  </section>`;
+}
+function renderStoreRolesPanel(store = {}, rolesData = {}) {
+  const roles = Array.isArray(rolesData.roles) ? rolesData.roles : [];
+  return `<section class="glass" style="padding:18px;margin-top:18px">
+    <div class="adm-head" style="margin:0 0 12px"><h3>Permission รายร้าน</h3><span class="muted">owner / admin / staff / chat_admin</span></div>
+    <form id="adminStoreRoleForm" class="set-form" style="padding:0;background:transparent;border:0">
+      <input type="hidden" name="storeId" value="${esc(store?.id || adminSelectedStoreId())}">
+      <div class="pf-grid">
+        <label class="set-field"><span>อีเมลผู้ใช้</span><input name="email" type="email" placeholder="staff@example.com"></label>
+        <label class="set-field"><span>Role</span><select name="role"><option value="staff">staff</option><option value="chat_admin">chat_admin</option><option value="admin">admin</option><option value="owner">owner</option></select></label>
+      </div>
+      <div class="pf-actions"><button class="btn btn-primary" type="submit">เพิ่ม/อัปเดตสิทธิ์ร้าน</button></div>
+    </form>
+    <div class="adm-list" style="margin-top:12px">${roles.length ? roles.map((role) => `<article class="adm-prod glass"><div class="adm-prod-top"><b>${esc(role.user?.email || role.userId)}</b><span class="status-badge s-paid">${esc(role.role)}</span></div><div class="muted">${esc(role.user?.name || '')}</div></article>`).join('') : '<div class="form-note">ยังไม่มี role รายร้านเพิ่มเติม</div>'}</div>
+  </section>`;
+}
+async function viewAdminStores() {
+  if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext(true).catch(() => null);
+  const r = await api('/api/admin/stores');
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    return adminLayout('stores', `<div class="adm-head"><h2>หลายเว็บไซต์</h2></div><div class="glass" style="padding:18px">โหลดข้อมูลร้านไม่สำเร็จ: ${esc(data?.error || 'unknown error')}</div>`);
+  }
+  const rootDomain = String(data?.rootDomain || '').trim();
+  const currentHost = String(data?.currentHost || '').trim();
+  const domainAutomationConfigured = data?.domainAutomationConfigured === true;
+  const stores = (Array.isArray(data?.stores) ? data.stores : [])
+    .slice()
+    .sort((a, b) => {
+      const defaultWeight = Number(Boolean(b?.isDefault)) - Number(Boolean(a?.isDefault));
+      if (defaultWeight) return defaultWeight;
+      return Number(b?.createdAt || 0) - Number(a?.createdAt || 0);
+    });
+  const defaultStore = stores.find((item) => item?.isDefault) || null;
+  const isLocalRoot = /(^|\.)localhost$|127\.0\.0\.1|:\d+$/.test(rootDomain) || /localhost|127\.0\.0\.1/.test(currentHost);
+  const setupCards = `<div class="adm-list">
+    ${diagnosticsMetricCard('Root Domain', diagnosticsStateBadge(rootDomain ? 'ok' : 'warn'), rootDomain || 'ยังจับ root domain ไม่ได้', currentHost ? `host ปัจจุบัน ${currentHost}` : '')}
+    ${diagnosticsMetricCard('Store Count', diagnosticsStateBadge(stores.length ? 'ok' : 'info'), stores.length ? `มีร้านทั้งหมด ${stores.length} ร้าน` : 'ยังไม่มีร้านที่สร้างเพิ่ม', defaultStore?.name ? `default คือ ${defaultStore.name}` : 'ยังไม่มี default store')}
+    ${diagnosticsMetricCard('Store Database', diagnosticsStateBadge('ok'), 'สร้าง database namespace อัตโนมัติต่อเว็บไซต์', 'แยกข้อมูลด้วย store_id ใน Supabase')}
+    ${diagnosticsMetricCard('Vercel Domain', diagnosticsStateBadge(domainAutomationConfigured && !isLocalRoot ? 'ok' : 'warn'), domainAutomationConfigured ? 'พร้อมผูก subdomain เข้า Vercel อัตโนมัติ' : 'ยังไม่ได้ตั้ง VERCEL_API_TOKEN สำหรับ automation', isLocalRoot ? 'กำลังดูใน local/preview อยู่' : 'สร้างร้านแล้วจะ clone theme/settings และผูก domain')}
+  </div>`;
+  const storesHtml = stores.length
+    ? `<div class="adm-list">${stores.map((store) => {
+      const publicUrl = String(store?.publicUrl || '').trim();
+      const domains = Array.isArray(store?.domains) ? store.domains : [];
+      const primaryDomain = domains.find((item) => item?.isPrimary) || domains[0] || null;
+      const domainVerified = store?.isDefault || primaryDomain?.verified === true;
+      const database = store?.database || null;
+      const databaseReady = store?.isDefault || String(database?.status || '').toLowerCase() === 'ready';
+      const domainLabel = store?.subdomain && rootDomain ? `${store.subdomain}.${rootDomain}` : (store?.primaryDomain || publicUrl || '-');
+      return `<article class="adm-prod glass">
+        <div class="adm-prod-top"><b>${esc(store?.name || 'ร้านใหม่')}</b><span>${storeStatusBadge(store)} ${databaseReady ? '<span class="status-badge s-paid">Database Ready</span>' : '<span class="status-badge s-awaiting_payment">Database Pending</span>'} ${domainVerified ? '<span class="status-badge s-paid">Domain Ready</span>' : '<span class="status-badge s-awaiting_payment">Domain Pending</span>'}</span></div>
+        <div class="muted" style="margin:8px 0">${esc(domainLabel)}</div>
+        <div class="meta-row">
+          <small>storeId: ${esc(store?.id || '-')}</small>
+          ${database?.databaseKey ? `<small>database: ${esc(database.databaseKey)}</small>` : ''}
+          ${database?.namespace ? `<small>namespace: ${esc(database.namespace)}</small>` : ''}
+          ${store?.subdomain ? `<small>subdomain: ${esc(store.subdomain)}</small>` : '<small>main store</small>'}
+          ${primaryDomain?.host ? `<small>domain: ${esc(primaryDomain.host)}${primaryDomain.verified ? ' ready' : ' pending'}</small>` : ''}
+          <small>${store?.createdAt ? esc(adminInboxTimeLabel(store.createdAt)) : '-'}</small>
+        </div>
+        <div class="pf-actions" style="margin-top:12px">
+          ${publicUrl ? `<a class="btn btn-glass" href="${esc(publicUrl)}" target="_blank" rel="noopener">เปิดหน้าเว็บร้านนี้</a>` : ''}
+          ${publicUrl ? `<button class="btn btn-glass" type="button" data-copystoreurl="${esc(publicUrl)}">คัดลอก URL</button>` : ''}
+          ${store?.subdomain && !domainVerified ? `<button class="btn btn-glass" type="button" data-provisionstore="${esc(store.id || '')}">Retry Vercel Domain</button>` : ''}
+        </div>
+      </article>`;
+    }).join('')}</div>`
+    : '<div class="glass" style="padding:18px">ยังไม่มีร้านที่สร้างเพิ่มจากหลังบ้าน</div>';
+  const selectedStoreId = adminSelectedStoreId();
+  const selectedSettingsRes = await api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/settings`).catch(() => null);
+  const selectedSettingsData = selectedSettingsRes ? await selectedSettingsRes.json().catch(() => ({})) : {};
+  const selectedStore = stores.find((store) => store.id === selectedStoreId) || selectedSettingsData.store || selectedAdminStore();
+  const [selectedHealthData, selectedRolesData] = await Promise.all([
+    api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/domain-health`).then((res) => res.json()).catch(() => ({})),
+    api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/roles`).then((res) => res.json()).catch(() => ({})),
+  ]);
+  const selectedStoreSettingsPanel = selectedSettingsRes?.ok ? renderSelectedStoreSettingsPanel(selectedSettingsData) : `<section class="glass" style="padding:18px;margin-top:18px"><b>ตั้งค่าร้านที่เลือก</b><p class="muted">โหลด settings ร้าน ${esc(selectedStoreId)} ไม่สำเร็จ</p></section>`;
+  return adminLayout('stores', `<div class="admin-workspace admin-stores-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Multi-store Center</span><h2>Store Manager</h2><p class="muted">เปิดร้านใหม่ ตรวจโดเมน จัดสิทธิ์ และตั้งค่าร้านที่เลือกจากจุดเดียว</p></div><div class="admin-inline-actions"><button class="btn btn-glass" type="button" id="refreshStoresBtn">รีเฟรชรายการร้าน</button></div></div>
+    <p class="form-note" style="margin:0 0 16px">ส่วนนี้ใช้สำหรับเปิดเว็บไซต์ใหม่จาก template เดิม โดย clone theme และ site settings เริ่มต้นจากเว็บหลัก แต่ให้ข้อมูลร้านใหม่เริ่มต้นว่าง พร้อมผูก subdomain ให้ทันทีในระดับ foundation</p>
+    ${diagnosticsSection('ภาพรวมการเปิดร้าน', 'เช็กความพร้อมเรื่องโดเมนและจำนวนร้านก่อนกดสร้าง', setupCards)}
+    <section class="glass" style="padding:18px;margin-top:18px">
+      <div class="adm-head" style="margin:0 0 10px"><h3>สร้างร้านใหม่</h3><span class="muted">สร้างเสร็จจะได้ public URL ทันที</span></div>
+      <form id="adminStoreCreateForm" class="set-form" style="padding:0;background:transparent;border:0">
+        <label class="set-field">
+          <span>ชื่อร้าน</span>
+          <input id="storeNameInput" name="name" placeholder="เช่น June Glow Atelier" maxlength="80" required>
+        </label>
+        <label class="set-field">
+          <span>Subdomain <em class="ok">ระบบจะช่วยแปลงจากชื่อร้านให้ แต่คุณแก้เองได้</em></span>
+          <input id="storeSubdomainInput" name="subdomain" placeholder="june-glow" maxlength="32" autocomplete="off" required>
+        </label>
+        <label class="set-field">
+          <span>Template / Clone</span>
+          <select name="templateKey">
+            <option value="blank">ร้านว่าง</option>
+            <option value="agri">อาหารเสริมพืช</option>
+            <option value="pod">พอต</option>
+            <option value="course">คอร์สเรียน / แหล่งเรียนรู้</option>
+          </select>
+        </label>
+        <label class="set-field">
+          <span>Clone settings จากร้าน</span>
+          <select name="cloneFromStoreId">
+            <option value="">ไม่ clone</option>
+            ${stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name || store.id)}</option>`).join('')}
+          </select>
+        </label>
+        <div id="storeSubdomainCheckResult">${renderStoreSubdomainCheck()}</div>
+        <div class="pf-actions">
+          <button class="btn btn-glass" type="button" id="checkStoreSubdomainBtn">เช็ก subdomain</button>
+          <button class="btn btn-primary" type="submit">สร้างร้านใหม่</button>
+        </div>
+      </form>
+      <div class="form-note" style="margin-top:12px">หลังสร้างแล้ว ร้านใหม่จะได้ค่าเริ่มต้นเช่นชื่อเว็บ, copy หน้าแรก, public URL และ database namespace ใหม่อัตโนมัติ ส่วนสินค้า/ออเดอร์/แชตของร้านใหม่จะเริ่มแยกว่างตาม <code>store_id</code></div>
+    </section>
+    ${renderStoreOnboardingPanel(selectedStore, selectedSettingsData)}
+    ${renderDomainHealthPanel(selectedStore, selectedHealthData)}
+    ${selectedStoreSettingsPanel}
+    ${renderStoreRolesPanel(selectedStore, selectedRolesData)}
+    ${renderStoreBackupPanel(selectedStore)}
+    ${diagnosticsSection('รายการร้าน', 'ดูร้านหลักและร้านที่สร้างเพิ่ม พร้อมเปิด URL ได้ทันที', storesHtml)}
+    <section class="glass" style="padding:18px;margin-top:18px">
+      <div class="adm-head" style="margin:0 0 10px"><h3>หมายเหตุ rollout</h3><span class="muted">สถานะของเฟส multi-tenant ตอนนี้</span></div>
+      <div class="form-note" style="margin:0 0 10px">พร้อมแล้ว: registry ร้าน, domain mapping, per-store settings, public API ฝั่ง <code>site/products</code> และ API สร้างร้านจากหลังบ้าน</div>
+      <div class="form-note" style="margin:0 0 10px">กำลังต่อในเฟสถัดไป: store switcher, scope หลังบ้านสินค้า/ออเดอร์/Inbox ต่อร้าน, และการแยก LINE OA / Payment / SMTP ต่อร้าน</div>
+      <div class="form-note" style="margin:0">ถ้าใช้ production จริง ควรเปิด wildcard subdomain บน Vercel และ apply migration <code>003_multi_tenant_foundation.sql</code> ลง Supabase ก่อน</div>
+    </section></div>`);
+}
+function renderConfigCenterStatus(lastApply = null, history = [], revisions = []) {
+  const changedKeys = Array.isArray(lastApply?.changedKeys) ? lastApply.changedKeys : [];
+  const checks = Array.isArray(lastApply?.checks) ? lastApply.checks : [];
+  const actor = lastApply?.actor || {};
+  const summary = lastApply
+    ? `<div class="adm-head" style="margin:0 0 10px"><h3>Config Center</h3>${diagnosticsStateBadge(lastApply.status || 'info')}</div>
+      <div class="muted" style="margin-bottom:12px">
+        ${lastApply.checkedAt ? `ตรวจล่าสุด ${esc(adminInboxTimeLabel(lastApply.checkedAt))}` : 'ยังไม่มีผลตรวจล่าสุด'}
+        ${actor?.email || actor?.name ? ` · โดย ${esc(actor.email || actor.name)}` : ''}
+        ${lastApply.revisionId ? ` · revision ${esc(lastApply.revisionId)}` : ''}
+      </div>
+      <div class="meta-row" style="margin-bottom:12px">
+        <small>Config Guard: ${lastApply?.validation?.ok ? 'ผ่าน' : 'พบจุดเสี่ยง'}</small>
+        <small>${Math.max(0, Number(lastApply?.validation?.errorCount || 0))} error</small>
+        <small>${Math.max(0, Number(lastApply?.validation?.warningCount || 0))} warning</small>
+        ${changedKeys.length ? `<small>เปลี่ยน ${esc(changedKeys.join(', '))}</small>` : '<small>ไม่มี key ที่เปลี่ยน</small>'}
+      </div>
+      ${checks.length ? `<div class="adm-list">${checks.map((item) => `<article class="adm-prod glass">
+        <div class="adm-prod-top"><b>${esc(item.label || item.key || 'check')}</b>${diagnosticsStateBadge(item.status || 'info')}</div>
+        <div class="muted" style="margin-top:8px">${esc(item.note || '-')}</div>
+      </article>`).join('')}</div>` : '<div class="glass" style="padding:18px">ยังไม่มีผลตรวจหลังการบันทึก</div>'}`
+    : `<div class="adm-head" style="margin:0 0 10px"><h3>Config Center</h3>${diagnosticsStateBadge('warn')}</div>
+      <div class="glass" style="padding:18px">ยังไม่มีประวัติการบันทึกและตรวจสอบล่าสุดจากหลังบ้าน</div>`;
+  const compactHistory = Array.isArray(history) && history.length
+    ? `<div class="form-note" style="margin-top:12px"><b>ประวัติล่าสุด:</b> ${history.slice(0, 3).map((item) => `${item?.revisionId || '-'} (${item?.status || 'info'})`).join(' · ')}</div>`
+    : '';
+  const revisionRows = Array.isArray(revisions) && revisions.length
+    ? `<div class="adm-list" style="margin-top:14px">${revisions.slice(0, 6).map((item) => `<article class="adm-prod glass">
+      <div class="adm-prod-top"><b>${esc(item.revisionId || '-')}</b>${item.rolledBackAt ? '<span class="status-badge">ย้อนกลับแล้ว</span>' : diagnosticsStateBadge('info')}</div>
+      <div class="muted" style="margin:8px 0">${item.changedKeys?.length ? `เปลี่ยน ${esc(item.changedKeys.join(', '))}` : 'ไม่มี key ที่บันทึกไว้'}</div>
+      <div class="meta-row"><small>${item.createdAt ? esc(adminInboxTimeLabel(item.createdAt)) : '-'}</small>${item.actor?.email || item.actor?.name ? `<small>${esc(item.actor.email || item.actor.name)}</small>` : ''}${item.reason ? `<small>${esc(item.reason)}</small>` : ''}</div>
+      <div class="pf-actions" style="margin-top:12px">
+        ${item.rolledBackAt ? `<span class="status-badge">rollback ${esc(adminInboxTimeLabel(item.rolledBackAt))}</span>` : `<button class="btn btn-glass" type="button" data-configrollback="${esc(item.revisionId || '')}">ย้อนกลับ revision นี้</button>`}
+      </div>
+    </article>`).join('')}</div>`
+    : '<div class="glass" style="padding:18px;margin-top:14px">ยังไม่มี revision สำหรับ rollback</div>';
+  return `<section class="glass" style="padding:18px;margin:16px 0">${summary}${compactHistory}
+    <div class="adm-head" style="margin:18px 0 10px"><h3>Rollback Revision</h3><span class="muted">ย้อนค่าที่เพิ่งเปลี่ยนกลับได้ทันทีจาก revision ล่าสุด</span></div>
+    ${revisionRows}
+  </section>`;
+}
+function renderLineAdminBindingManager(lineAdmin = {}) {
+  const primaryUserId = String(lineAdmin?.primaryUserId || '').trim();
+  const bindings = Array.isArray(lineAdmin?.bindings) ? lineAdmin.bindings : [];
+  const pendingCodes = Array.isArray(lineAdmin?.pendingCodes) ? lineAdmin.pendingCodes : [];
+  const bindingRows = bindings.length
+    ? `<div class="adm-list">${bindings.map((item) => `<article class="adm-prod glass">
+      <div class="adm-prod-top"><b>${esc(item.name || `LINE-${String(item.lineUserId || '').slice(-6)}`)}</b>${item.lineUserId === primaryUserId ? '<span class="status-badge s-paid">Primary</span>' : diagnosticsStateBadge('ok')}</div>
+      <div class="muted" style="margin:8px 0">${esc(item.lineUserId || '-')}</div>
+      <div class="meta-row"><small>ผูกเมื่อ ${esc(adminInboxTimeLabel(item.lastBoundAt || item.grantedAt || 0))}</small>${item.label ? `<small>${esc(item.label)}</small>` : ''}${item.grantedBy ? `<small>โดย ${esc(item.grantedBy)}</small>` : ''}</div>
+      <div class="pf-actions" style="margin-top:12px">
+        ${item.lineUserId === primaryUserId ? '' : `<button class="btn btn-glass" type="button" data-lineadminprimary="${esc(item.lineUserId)}">ตั้งเป็น Primary</button>`}
+        <button class="btn btn-glass" type="button" data-lineadminrevoke="${esc(item.lineUserId)}">ถอดสิทธิ์</button>
+      </div>
+    </article>`).join('')}</div>`
+    : '<div class="glass" style="padding:18px">ยังไม่มีบัญชี LINE ที่ผูกเป็นแอดมิน</div>';
+  const codeRows = pendingCodes.length
+    ? `<div class="adm-list">${pendingCodes.map((item) => `<article class="adm-prod glass">
+      <div class="adm-prod-top"><b>${esc(item.code || '-')}</b><span>${esc(adminInboxTimeLabel(item.expiresAt || 0))}</span></div>
+      <div class="muted" style="margin:8px 0">ส่งคำสั่ง <code>bindadminddd ${esc(item.code || '')}</code> ใน LINE OA ภายใน 10 นาที</div>
+      <div class="meta-row">${item.label ? `<small>${esc(item.label)}</small>` : ''}${item.createdBy ? `<small>สร้างโดย ${esc(item.createdBy)}</small>` : ''}</div>
+      <div class="pf-actions" style="margin-top:12px">
+        <button class="btn btn-glass" type="button" data-copybindcommand="${esc(item.code || '')}">คัดลอกคำสั่ง</button>
+        <button class="btn btn-glass" type="button" data-revokebindcode="${esc(item.code || '')}">ยกเลิกรหัสนี้</button>
+      </div>
+    </article>`).join('')}</div>`
+    : '<div class="glass" style="padding:18px">ยังไม่มีรหัสผูกแอดมินที่รอใช้งาน</div>';
+  return `<section class="glass" style="padding:18px;margin:16px 0">
+    <div class="adm-head" style="margin:0 0 10px"><h3>LINE Admin Manager</h3>${bindings.length ? diagnosticsStateBadge('ok') : diagnosticsStateBadge('warn')}</div>
+    <p class="form-note" style="margin:0 0 12px">ใช้สำหรับผูกแอดมิน LINE OA แบบปลอดภัย ไม่ต้องแจก token หรือ secret ให้ทีมงาน</p>
+    <div class="set-field" style="margin-bottom:12px">
+      <span>Label สำหรับรหัสผูกแอดมิน</span>
+      <input id="lineAdminBindLabel" placeholder="เช่น แอดมินหลัก / ผู้ช่วยดูระบบ">
+    </div>
+    <div class="pf-actions" style="margin-bottom:16px">
+      <button class="btn btn-primary" type="button" id="generateLineAdminBindCodeBtn">สร้างรหัสผูกแอดมิน</button>
+    </div>
+    <div class="adm-head" style="margin-top:0"><h3>บัญชีที่ผูกแล้ว</h3><span class="muted">${bindings.length ? `ทั้งหมด ${bindings.length} บัญชี` : 'ยังไม่มีบัญชีที่ผูก'}</span></div>
+    ${bindingRows}
+    <div class="adm-head" style="margin-top:18px"><h3>รหัสที่รอใช้งาน</h3><span class="muted">${pendingCodes.length ? 'หมดอายุอัตโนมัติภายใน 10 นาที' : 'สร้างได้จากปุ่มด้านบน'}</span></div>
+    ${codeRows}
+  </section>`;
 }
 function diagnosticsStateBadge(status = 'info') {
   const key = String(status || 'info').trim().toLowerCase();
@@ -5847,6 +7150,19 @@ function diagnosticsHealthBadge(ok = false, okLabel = 'พร้อม', badLabe
   return ok
     ? `<span class="status-badge s-paid">${okLabel}</span>`
     : `<span class="status-badge s-awaiting_payment">${badLabel}</span>`;
+}
+function diagnosticsMetricCard(title, badge, desc = '', foot = '') {
+  return `<article class="glass" style="padding:18px">
+    <div class="adm-prod-top"><b>${esc(title)}</b>${badge}</div>
+    <div class="muted" style="margin-top:8px">${esc(desc || '-')}</div>
+    ${foot ? `<div class="meta-row" style="margin-top:10px"><small>${esc(foot)}</small></div>` : ''}
+  </article>`;
+}
+function diagnosticsSection(title = '', desc = '', body = '') {
+  return `<section style="margin-top:22px">
+    <div class="adm-head"><h3>${esc(title)}</h3><span class="muted">${esc(desc || '')}</span></div>
+    ${body}
+  </section>`;
 }
 function diagnosticsEventRows(items = [], emptyText = 'ยังไม่มีข้อมูลล่าสุด') {
   if (!Array.isArray(items) || !items.length) return `<div class="glass" style="padding:18px">${esc(emptyText)}</div>`;
@@ -5874,31 +7190,65 @@ function diagnosticsAuditRows(items = []) {
 }
 async function viewAdminDiagnostics() {
   if (!adminGuard()) return loadingView();
-  const data = await (await api('/api/admin/diagnostics')).json();
+  await ensureAdminStoresContext();
+  const [data, richMenu] = await Promise.all([
+    (await api('/api/admin/diagnostics')).json(),
+    api('/api/admin/line/rich-menu/status').then((r) => r.json()).catch(() => ({ ok: false, error: 'load rich menu failed' })),
+  ]);
   const health = data.health || {};
   const startup = data.startupValidation || {};
   const current = data.currentValidation || {};
   const runtime = data.runtime || {};
   const counters = runtime.webhook?.counters || {};
-  const summaryCards = [
-    ['Config Guard', diagnosticsHealthBadge(Boolean(health.configGuardOk), 'พร้อม', 'พบจุดเสี่ยง'), `${Math.max(0, Number(health.configGuardErrorCount || 0))} error · ${Math.max(0, Number(health.configGuardWarningCount || 0))} warning`],
-    ['LINE OA', diagnosticsHealthBadge(Boolean(health.lineConfigured), 'เชื่อมแล้ว', 'ยังไม่พร้อม'), `line-room ${health.lineWebRoomReady ? 'พร้อม' : 'ยังไม่พร้อม'}`],
-    ['Realtime', diagnosticsHealthBadge(String(health.chatRealtimeMode || '') !== 'polling', 'Realtime', 'Polling'), String(health.chatRealtimeMode || '-')],
-    ['Webhook Audit', diagnosticsHealthBadge(Math.max(0, Number(counters.failed || 0)) === 0, 'นิ่ง', 'มี fail ล่าสุด'), `recv ${Math.max(0, Number(counters.received || 0))} · dup ${Math.max(0, Number(counters.duplicate || 0))} · ok ${Math.max(0, Number(counters.success || 0))}`],
-  ].map(([title, badge, desc]) => `<article class="glass" style="padding:18px"><div class="adm-prod-top"><b>${title}</b>${badge}</div><div class="muted" style="margin-top:8px">${esc(desc)}</div></article>`).join('');
-  return adminLayout('diagnostics', `<div class="adm-head"><h2>System Diagnostics</h2><span class="muted">ตรวจสุขภาพระบบ, config guard, alert ล่าสุด และ LINE webhook audit จากหลังบ้าน</span></div>
+  const overviewCards = [
+    diagnosticsMetricCard('Config Guard', diagnosticsHealthBadge(Boolean(health.configGuardOk), 'พร้อม', 'พบจุดเสี่ยง'), 'ตรวจ config ตอนบูตและหลังอัปเดต', `${Math.max(0, Number(health.configGuardErrorCount || 0))} error · ${Math.max(0, Number(health.configGuardWarningCount || 0))} warning`),
+    diagnosticsMetricCard('LINE OA', diagnosticsHealthBadge(Boolean(health.lineConfigured), 'เชื่อมแล้ว', 'ยังไม่พร้อม'), 'สถานะ token/secret สำหรับ LINE OA', `line-room ${health.lineWebRoomReady ? 'พร้อม' : 'ยังไม่พร้อม'}`),
+    diagnosticsMetricCard('Realtime', diagnosticsHealthBadge(String(health.chatRealtimeMode || '') !== 'polling', 'Realtime', 'Polling'), 'โหมดส่งข้อมูล live chat/inbox ปัจจุบัน', String(health.chatRealtimeMode || '-')),
+    diagnosticsMetricCard('Webhook Audit', diagnosticsHealthBadge(Math.max(0, Number(counters.failed || 0)) === 0, 'นิ่ง', 'มี fail ล่าสุด'), 'ภาพรวม event ล่าสุดจาก LINE webhook', `recv ${Math.max(0, Number(counters.received || 0))} · dup ${Math.max(0, Number(counters.duplicate || 0))} · ok ${Math.max(0, Number(counters.success || 0))}`),
+    diagnosticsMetricCard('Payments', diagnosticsHealthBadge(Boolean(health.promptpayConfigured || health.stripeConfigured), 'มีพร้อมใช้งาน', 'ต้องตรวจเพิ่ม'), 'PromptPay / Stripe / SlipOK', `promptpay ${health.promptpayConfigured ? 'on' : 'off'} · stripe ${health.stripeConfigured ? 'on' : 'off'} · slipok ${health.slipokConfigured ? 'on' : 'off'}`),
+    diagnosticsMetricCard('Infrastructure', diagnosticsHealthBadge(Boolean(health.supabaseConfigured), 'พร้อม', 'ต้องตรวจ'), 'ฐานข้อมูลและ runtime ปัจจุบัน', `${health.dbProvider || '-'} · ${health.supabaseConfigured ? 'supabase ready' : 'supabase missing'}`),
+  ].join('');
+  const validationGrid = `<div class="adm-list">
+    <article class="glass" style="padding:18px">
+      <div class="adm-head" style="margin:0 0 12px"><h3>Startup Validation</h3><span class="muted">${startup.checkedAt ? `เช็ก ${adminInboxTimeLabel(startup.checkedAt)}` : 'ยังไม่มี snapshot ตอนบูต'}</span></div>
+      ${diagnosticsValidationRows(startup.items || [])}
+    </article>
+    <article class="glass" style="padding:18px">
+      <div class="adm-head" style="margin:0 0 12px"><h3>Current Validation</h3><span class="muted">${current.checkedAt ? `อัปเดต ${adminInboxTimeLabel(current.checkedAt)}` : 'ยังไม่มีข้อมูลล่าสุด'}</span></div>
+      ${diagnosticsValidationRows(current.items || [])}
+    </article>
+  </div>`;
+  const webhookSummary = `<div class="adm-list">
+    ${diagnosticsMetricCard('Received', diagnosticsStateBadge('info'), 'จำนวน event ที่เข้ามาในช่วง audit ล่าสุด', String(Math.max(0, Number(counters.received || 0))))}
+    ${diagnosticsMetricCard('Success', diagnosticsStateBadge('ok'), 'จำนวน event ที่ประมวลผลสำเร็จ', String(Math.max(0, Number(counters.success || 0))))}
+    ${diagnosticsMetricCard('Duplicate', diagnosticsStateBadge('warn'), 'จำนวน event ซ้ำที่ระบบกันไว้แล้ว', String(Math.max(0, Number(counters.duplicate || 0))))}
+    ${diagnosticsMetricCard('Failed', diagnosticsStateBadge(Math.max(0, Number(counters.failed || 0)) > 0 ? 'error' : 'ok'), 'จำนวน event ที่ fail จริง', String(Math.max(0, Number(counters.failed || 0))))}
+  </div>`;
+  const richAssets = Array.isArray(richMenu.assets) ? richMenu.assets : [];
+  const richAliases = Array.isArray(richMenu.aliases) ? richMenu.aliases : [];
+  const richMenuBody = `<div class="adm-list">
+    ${diagnosticsMetricCard('LINE Token', diagnosticsHealthBadge(Boolean(richMenu.configured), 'Ready', 'Missing'), 'Token for creating and uploading LINE rich menu', richMenu.configured ? 'configured' : 'missing token')}
+    ${diagnosticsMetricCard('Assets', diagnosticsHealthBadge(richAssets.every((item) => item.jsonReady && item.imageReady), 'Ready', 'Missing'), 'Home/Catalog JSON and PNG assets', `${richAssets.filter((item) => item.jsonReady && item.imageReady).length}/${richAssets.length || 2} ready`)}
+    ${diagnosticsMetricCard('Aliases', diagnosticsHealthBadge(richAliases.length >= 2, 'Ready', 'Pending'), 'line-home / line-catalog aliases', richAliases.map((item) => item.richMenuAliasId).join(', ') || richMenu.error || 'not deployed')}
+  </div>
+  <div class="pf-actions" style="margin-top:14px"><button class="btn btn-primary" type="button" id="deployLineRichMenuBtn">Deploy LINE Rich Menu</button></div>`;
+  return adminLayout('diagnostics', `<div class="admin-workspace admin-diagnostics-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Health Center</span><h2>System Diagnostics</h2><p class="muted">ตรวจสุขภาพระบบ, config guard, alert ล่าสุด และ LINE webhook audit จากหลังบ้าน</p></div></div>
     <div class="pf-actions" style="margin-bottom:16px"><button class="btn btn-primary" type="button" id="runDiagnosticsRecheckBtn">Re-check Config</button><button class="btn btn-glass" type="button" id="refreshDiagnosticsBtn">รีเฟรชหน้านี้</button><a class="btn btn-glass" href="${routeHref('/admin/settings')}">ไปหน้าตั้งค่า</a></div>
-    <div class="adm-list">${summaryCards}</div>
-    <div class="adm-head" style="margin-top:22px"><h3>Startup Validation</h3><span class="muted">${startup.checkedAt ? `เช็กครั้งล่าสุด ${adminInboxTimeLabel(startup.checkedAt)}` : 'ยังไม่มี snapshot ตอนบูต'}</span></div>
-    ${diagnosticsValidationRows(startup.items || [])}
-    <div class="adm-head" style="margin-top:22px"><h3>Current Validation</h3><span class="muted">${current.checkedAt ? `อัปเดต ${adminInboxTimeLabel(current.checkedAt)}` : 'ยังไม่มีข้อมูลล่าสุด'}</span></div>
-    ${diagnosticsValidationRows(current.items || [])}
-    <div class="adm-head" style="margin-top:22px"><h3>Recent Alerts</h3><span class="muted">แจ้งเตือนที่ระบบมองว่าเสี่ยงและอาจส่งหาแอดมินทาง LINE</span></div>
-    ${diagnosticsEventRows(runtime.recentAlerts || [], 'ยังไม่มี alert ล่าสุด')}
-    <div class="adm-head" style="margin-top:22px"><h3>Recent Events</h3><span class="muted">event ระดับระบบที่บันทึกไว้สำหรับ debug production</span></div>
-    ${diagnosticsEventRows(runtime.recentEvents || [], 'ยังไม่มี event ล่าสุด')}
-    <div class="adm-head" style="margin-top:22px"><h3>LINE Webhook Audit</h3><span class="muted">received / duplicate / success / failed / signature reject / parse fail</span></div>
-    ${diagnosticsAuditRows(runtime.webhook?.audits || [])}`);
+    ${diagnosticsSection('ภาพรวมระบบ', 'สรุปสถานะหลักที่ต้องดูทุกวัน', `<div class="adm-list">${overviewCards}</div>`)}
+    ${diagnosticsSection('การตรวจตั้งค่า', 'แยกผลตอนบูตกับผลตรวจล่าสุด เพื่อดูว่า config เสถียรหรือไม่', validationGrid)}
+    ${diagnosticsSection('LINE Rich Menu', 'Check assets and deploy Home/Catalog rich menus directly from admin', richMenuBody)}
+    ${diagnosticsSection('LINE Webhook', 'ดูปริมาณ event, duplicate และรายการล่าสุดที่เกิดขึ้น', `${webhookSummary}${diagnosticsAuditRows(runtime.webhook?.audits || [])}`)}
+    ${diagnosticsSection('Alerts และ Events', 'alerts ใช้ดูเหตุเสี่ยงล่าสุด ส่วน events ใช้ trace ระบบย้อนหลัง', `<div class="adm-list">
+      <article class="glass" style="padding:18px">
+        <div class="adm-head" style="margin:0 0 12px"><h3>Recent Alerts</h3><span class="muted">แจ้งเตือนที่เสี่ยงต่อ production</span></div>
+        ${diagnosticsEventRows(runtime.recentAlerts || [], 'ยังไม่มี alert ล่าสุด')}
+      </article>
+      <article class="glass" style="padding:18px">
+        <div class="adm-head" style="margin:0 0 12px"><h3>Recent Events</h3><span class="muted">event ระดับระบบสำหรับ debug</span></div>
+        ${diagnosticsEventRows(runtime.recentEvents || [], 'ยังไม่มี event ล่าสุด')}
+      </article>
+    </div>`)}
+  </div>`);
 }
 function cropStageLines(stages) {
   return asArray(stages).map((stage) => `${stage.title} :: ${stage.detail} :: ${asArray(stage.ids).join(', ')}`).join('\n');
@@ -6311,6 +7661,7 @@ function collectAdminReviewGalleryItems() {
 }
 async function viewAdminSite() {
   if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
   const [s, reviewData] = await Promise.all([
     (await api('/api/admin/site')).json(),
     (await api('/api/admin/reviews')).json().catch(() => ({ items: [] })),
@@ -6444,7 +7795,7 @@ async function viewAdminSite() {
     ['dock', 'Dock ลอยมุมจอ', 'หัวข้อ คำอธิบาย และชื่อปุ่ม LIVECHAT / LINE'],
     ['reviews', 'รีวิวลูกค้า', 'แก้ caption ใต้ภาพและเลือก spotlight รีวิวเด่น'],
   ].map(([id, title, desc]) => `<button class="site-admin-card glass" type="button" data-sitejump="site-section-${id}"><b>${title}</b><span>${desc}</span></button>`).join('');
-  return adminLayout('site', `<h2>ข้อมูลร้าน / เว็บไซต์</h2>
+  return adminLayout('site', `<div class="admin-workspace admin-site-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Brand Settings</span><h2>ข้อมูลร้าน / เว็บไซต์</h2><p class="muted">ปรับชื่อเว็บ Hero ติดต่อ LINE รีวิว และข้อความสำคัญของร้านแบบเป็นหมวด</p></div></div>
     <form id="settingsForm" class="set-form glass">
       <div class="site-admin-overview">${overviewCards}</div>
       <div class="site-admin-toolbar glass">
@@ -6490,7 +7841,7 @@ async function viewAdminSite() {
       </div>`)}
       <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึกทั้งหมด</button></div>
     </form>
-    <p class="form-note" style="margin-top:12px">บันทึกแล้วมีผลทันทีทุกหน้า · Flash Sale จะลดราคาทุกสินค้า + ขึ้นแบนเนอร์นับถอยหลัง</p>`);
+    <p class="form-note" style="margin-top:12px">บันทึกแล้วมีผลทันทีทุกหน้า · Flash Sale จะลดราคาทุกสินค้า + ขึ้นแบนเนอร์นับถอยหลัง</p></div>`);
 }
 async function viewAdminOrderDetail({ id }) {
   if (!adminGuard()) return loadingView();
@@ -6502,6 +7853,12 @@ async function viewAdminOrderDetail({ id }) {
   return adminLayout('orders', `
     <a class="back" href="${routeHref('/admin/orders')}">← กลับไปรายการออเดอร์</a>
     <div class="adm-head"><h2>ออเดอร์ ${o.id}</h2><span class="status-badge s-${o.status}">${o.statusLabel}</span></div>
+    <div class="admin-order-toolbar glass">
+      <button class="btn-mini" type="button" data-copy="${esc(o.id)}">คัดลอกเลขออเดอร์</button>
+      <button class="btn-mini" type="button" data-copy="${esc(o.customer.phone || '')}">คัดลอกเบอร์ลูกค้า</button>
+      <button class="btn-mini" type="button" data-copy="${esc(o.customer.address || '')}">คัดลอกที่อยู่</button>
+    </div>
+    ${orderTimelineHTML(o.status)}
     <div class="od-grid">
       <div class="dash-card">
         <h3>รายการสินค้า</h3>${items}
@@ -6624,7 +7981,8 @@ const routes = [
   { re: /^\/products\/?$/, view: viewProducts },
   { re: /^\/reviews\/?$/, view: viewReviews },
   { re: /^\/wishlist\/?$/, view: viewWishlist },
-  { re: /^\/articles\/?$/, view: viewArticles },
+  { re: /^\/community\/?$/, view: viewCommunity },
+  { re: /^\/articles\/?$/, view: viewCommunity },
   { re: /^\/article\/([^/]+)$/, view: viewArticle, keys: ['id'] },
   { re: /^\/calc\/?$/, view: viewCalc },
   { re: /^\/product\/([^/]+)$/, view: viewProductDetail, keys: ['id'] },
@@ -6637,6 +7995,7 @@ const routes = [
   { re: /^\/account\/?$/, view: viewAccount },
   { re: /^\/admin\/?$/, view: viewAdminDash },
   { re: /^\/admin\/products\/?$/, view: viewAdminProducts },
+  { re: /^\/admin\/community\/?$/, view: viewAdminCommunity },
   { re: /^\/admin\/articles\/?$/, view: viewAdminArticles },
   { re: /^\/admin\/inbox\/?$/, view: viewAdminInbox },
   { re: /^\/admin\/leads\/?$/, view: viewAdminLeads },
@@ -6644,6 +8003,7 @@ const routes = [
   { re: /^\/admin\/order\/([^/]+)$/, view: viewAdminOrderDetail, keys: ['id'] },
   { re: /^\/admin\/coupons\/?$/, view: viewAdminCoupons },
   { re: /^\/admin\/users\/?$/, view: viewAdminUsers },
+  { re: /^\/admin\/stores\/?$/, view: viewAdminStores },
   { re: /^\/admin\/site\/?$/, view: viewAdminSite },
   { re: /^\/admin\/diagnostics\/?$/, view: viewAdminDiagnostics },
   { re: /^\/admin\/settings\/?$/, view: viewAdminSettings },
@@ -6663,6 +8023,15 @@ function isLineRoomPath(path = currentPath()) {
 function syncLineRoomChrome(path = currentPath()) {
   if (typeof document === 'undefined') return;
   document.body.classList.toggle('line-room-mode', isLineRoomPath(path));
+}
+function routeNeedsProductsData(path = currentPath()) {
+  return path === '/'
+    || /^\/products\/?$/.test(path)
+    || /^\/product\/[^/]+\/?$/.test(path)
+    || /^\/crops\/[^/]+\/?$/.test(path)
+    || path === '/wishlist'
+    || path === '/checkout'
+    || path === '/calc';
 }
 
 // polling สถานะออเดอร์
@@ -6694,6 +8063,7 @@ async function render() {
     _adminInboxUnreadTotal = 0;
   }
   if (routeNeedsHeavySiteData(path)) await loadSiteHeavy();
+  if (routeNeedsProductsData(path)) await ensureProductsCache();
   let match = { view: viewNotFound, params: {} };
   for (const r of routes) {
     const m = path.match(r.re);
@@ -6711,8 +8081,7 @@ async function render() {
   app.innerHTML = html;
   if (hadPrepaint) app.removeAttribute('data-prepaint');
   window.scrollTo({ top: 0 });
-  if (location.pathname.startsWith('/secure-admin')) renderSecureAdminNav(path);
-  else setActiveNav(path);
+  renderSecureAdminNav(path);
   closeMobileNav();
   syncMobileNav();
   syncAdminInboxChrome(path);
@@ -6745,6 +8114,9 @@ function setActiveNav(path) {
     const on = href === '/' ? path === '/' : path.startsWith(href);
     a.classList.toggle('active', on);
   });
+  document.querySelectorAll('#navLinks .nav-more').forEach((group) => {
+    group.classList.toggle('active', !!group.querySelector('a.active'));
+  });
 }
 
 window.addEventListener('hashchange', () => {
@@ -6763,7 +8135,15 @@ window.addEventListener('keydown', (event) => {
   setAdminInboxFullscreen(false);
   render();
 });
-window.addEventListener('resize', () => { syncMobileNav(); applyChatLayout(); renderFloatingContactDock(); });
+window.addEventListener('resize', () => {
+  syncMobileNav();
+  document.querySelectorAll('.nav-more.open').forEach(positionNavMoreMenu);
+  applyChatLayout();
+  renderFloatingContactDock();
+});
+window.addEventListener('scroll', () => {
+  document.querySelectorAll('.nav-more.open').forEach(positionNavMoreMenu);
+}, { passive: true });
 window.addEventListener('storage', async (e) => {
   if (e.key !== SITE_SYNC_KEY) return;
   await loadSite(routeNeedsHeavySiteData() || _siteHeavyLoaded);
@@ -6781,8 +8161,50 @@ siteSyncChannel?.addEventListener('message', async (e) => {
 
 // ════════════════════════ Delegated interactions ════════════════════════
 document.body.addEventListener('click', (e) => {
+  const navMoreToggle = e.target.closest('[data-nav-more-toggle]');
+  if (navMoreToggle) {
+    e.preventDefault();
+    e.stopPropagation();
+    const group = navMoreToggle.closest('.nav-more');
+    const nextOpen = !group?.classList.contains('open');
+    document.querySelectorAll('.nav-more.open').forEach((el) => {
+      if (el !== group) {
+        el.classList.remove('open');
+        el.querySelector('[data-nav-more-toggle]')?.setAttribute('aria-expanded', 'false');
+      }
+    });
+    if (group) {
+      group.classList.toggle('open', nextOpen);
+      navMoreToggle.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+      if (nextOpen) positionNavMoreMenu(group);
+    }
+    return;
+  }
+  if (!e.target.closest('.nav-more')) {
+    document.querySelectorAll('.nav-more.open').forEach((el) => {
+      el.classList.remove('open');
+      el.querySelector('[data-nav-more-toggle]')?.setAttribute('aria-expanded', 'false');
+    });
+  }
   if (e.target.closest('[data-confirmcancel]')) { e.preventDefault(); e.stopPropagation(); closeConfirmDialog(false); return; }
   if (e.target.closest('[data-confirmok]')) { e.preventDefault(); e.stopPropagation(); closeConfirmDialog(true); return; }
+  const copyBtn = e.target.closest('[data-copy]');
+  if (copyBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const text = String(copyBtn.dataset.copy || '').trim();
+    if (text) {
+      navigator.clipboard?.writeText(text).then(() => toast('คัดลอกแล้ว', 'ok')).catch(() => toast('คัดลอกไม่สำเร็จ', 'err'));
+    }
+    return;
+  }
+  if (e.target.closest('[data-submit-checkout]')) {
+    e.preventDefault();
+    e.stopPropagation();
+    const form = document.getElementById('checkoutForm');
+    if (form) form.requestSubmit();
+    return;
+  }
   if (e.target.closest('[data-open-line-room-chat]')) {
     e.preventDefault();
     e.stopPropagation();
@@ -6890,6 +8312,79 @@ document.body.addEventListener('click', (e) => {
 
 // checkout submit (delegated)
 document.body.addEventListener('submit', async (e) => {
+  if (e.target.id === 'accountProfileForm') {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    const btn = form.querySelector('button[type=submit]');
+    if (btn) { btn.disabled = true; btn.textContent = 'กำลังบันทึก...'; }
+    try {
+      const file = form.querySelector('[data-account-avatar-file]')?.files?.[0];
+      const avatar = file ? await fileToDataUrl(file) : String(fd.get('avatar') || '').trim();
+      const r = await api('/api/account/profile', {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: fd.get('name'),
+          username: fd.get('username'),
+          avatar,
+          bio: fd.get('bio'),
+          lineId: fd.get('lineId'),
+          phone: fd.get('phone'),
+          location: fd.get('location'),
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'บันทึกโปรไฟล์ไม่สำเร็จ');
+      currentUser = data.user || currentUser;
+      toast('บันทึกโปรไฟล์แล้ว', 'ok');
+      renderAccountNav();
+      render();
+    } catch (err) {
+      toast(err.message || 'บันทึกโปรไฟล์ไม่สำเร็จ', 'err');
+      if (btn) { btn.disabled = false; btn.textContent = 'บันทึกโปรไฟล์'; }
+    }
+    return;
+  }
+  if (e.target.id === 'communityPostForm') {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    const files = [...(form.querySelector('input[name=media]')?.files || [])].slice(0, 4);
+    const btn = form.querySelector('button[type=submit]');
+    if (btn) { btn.disabled = true; btn.textContent = 'กำลังโพสต์...'; }
+    try {
+      const media = [];
+      for (const file of files) {
+        media.push({ type: file.type.startsWith('video/') ? 'video' : 'image', url: await fileToDataUrl(file) });
+      }
+      const r = await api('/api/community/posts', {
+        method: 'POST',
+        body: JSON.stringify({ caption: fd.get('caption'), hashtags: fd.get('hashtags'), media }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'โพสต์ไม่สำเร็จ');
+      toast(data.pending ? 'ส่งโพสต์แล้ว รอแอดมินอนุมัติ' : 'โพสต์แล้ว', 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message, 'err');
+      if (btn) { btn.disabled = false; btn.textContent = 'โพสต์'; }
+    }
+    return;
+  }
+  const communityCommentForm = e.target.closest('[data-community-comment-form]');
+  if (communityCommentForm) {
+    e.preventDefault();
+    const postId = communityCommentForm.dataset.communityCommentForm;
+    const text = new FormData(communityCommentForm).get('text');
+    const r = await api(`/api/community/posts/${encodeURIComponent(postId)}/comments`, { method: 'POST', body: JSON.stringify({ text }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return toast(data.error || 'ส่งคอมเมนต์ไม่สำเร็จ', 'err');
+    toast('ส่งคอมเมนต์แล้ว', 'ok');
+    const wrap = document.querySelector(`[data-community-comments-wrap="${CSS.escape(postId)}"]`);
+    if (wrap) { wrap.dataset.open = ''; await toggleCommunityComments(postId); }
+    await refreshCommunityPostCard(postId);
+    return;
+  }
   // ติดตามออเดอร์
   if (e.target.id === 'trackForm') {
     e.preventDefault();
@@ -6972,6 +8467,12 @@ async function submitProductForm(form) {
   body.extra = {
     ...prevExtra,
     category: (fd.get('category') || '').trim(),
+    marketingBadge: (fd.get('marketingBadge') || '').trim(),
+    cardName: (fd.get('cardName') || '').trim(),
+    featured: fd.get('featured') === 'on',
+    sellingPoints: splitLines(fd.get('sellingPoints')),
+    seoTitle: (fd.get('seoTitle') || '').trim(),
+    seoDescription: (fd.get('seoDescription') || '').trim(),
     salePrice: parseInt(fd.get('salePrice') || '0', 10) || 0,
     registrationNo: (fd.get('registrationNo') || '').trim(),
     cropTargets: splitCsv(fd.get('cropTargets')),
@@ -7097,8 +8598,12 @@ document.body.addEventListener('submit', async (e) => {
       const settings = {};
       for (const [k, v] of fd.entries()) if (v !== '') settings[k] = v;
       const r = await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) });
-      if (!r.ok) throw new Error((await r.json()).error || 'ผิดพลาด');
-      toast('บันทึกแล้ว', 'ok');
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'ผิดพลาด');
+      const verifyStatus = String(d?.verification?.status || 'ok').trim();
+      if (verifyStatus === 'error') toast('บันทึกแล้ว แต่ระบบยังพบจุดผิดพลาดที่ต้องแก้', 'err');
+      else if (verifyStatus === 'warn') toast('บันทึกแล้ว พร้อมคำเตือนที่ควรตรวจต่อ', 'ok');
+      else toast('บันทึกและตรวจสอบผ่านแล้ว', 'ok');
       localStorage.removeItem('cropLandingPreviewDraft');
       localStorage.removeItem(ADMIN_CROP_DRAFT_KEY);
       setCropDraftStatus('บันทึกขึ้นระบบแล้ว');
@@ -7108,6 +8613,131 @@ document.body.addEventListener('submit', async (e) => {
       if (currentPath() !== '/admin/site') render();
     } catch (err) { toast(err.message, 'err'); btn.disabled = false; }
     btn.disabled = false;
+    return;
+  }
+  if (form.id === 'adminStoreCreateForm') {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const name = String(fd.get('name') || '').trim();
+    const subdomain = normalizeStoreSubdomainDraft(fd.get('subdomain') || '');
+    const templateKey = String(fd.get('templateKey') || 'blank').trim();
+    const cloneFromStoreId = String(fd.get('cloneFromStoreId') || '').trim();
+    const btn = form.querySelector('button[type=submit]');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api('/api/admin/stores', {
+        method: 'POST',
+        body: JSON.stringify({ name, subdomain, templateKey, cloneFromStoreId }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || 'สร้างร้านไม่สำเร็จ');
+      const publicUrl = String(d?.store?.publicUrl || '').trim();
+      if (d?.store?.id) setAdminSelectedStoreId(d.store.id);
+      _adminStoresContext = null;
+      _adminStoresContextAt = 0;
+      form.reset();
+      const subdomainInput = document.getElementById('storeSubdomainInput');
+      if (subdomainInput) delete subdomainInput.dataset.touched;
+      const resultEl = document.getElementById('storeSubdomainCheckResult');
+      if (resultEl) resultEl.innerHTML = renderStoreSubdomainCheck();
+      if (publicUrl && navigator?.clipboard?.writeText) {
+        try { await navigator.clipboard.writeText(publicUrl); } catch {}
+      }
+      const databaseStatus = String(d?.store?.database?.status || '').trim();
+      const provisionStatus = String(d?.store?.domainProvision?.status || '').trim();
+      const statusParts = [databaseStatus && databaseStatus !== 'ready' ? `database ${databaseStatus}` : '', provisionStatus && provisionStatus !== 'ready' ? `domain ${provisionStatus}` : ''].filter(Boolean);
+      toast(publicUrl ? `สร้างร้านแล้ว: ${publicUrl}${statusParts.length ? ` (${statusParts.join(', ')})` : ''}` : 'สร้างร้านใหม่แล้ว', statusParts.length ? 'err' : 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message || 'สร้างร้านไม่สำเร็จ', 'err');
+      if (btn) btn.disabled = false;
+    }
+    return;
+  }
+  if (form.id === 'adminStoreRoleForm') {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const storeId = String(fd.get('storeId') || adminSelectedStoreId()).trim();
+    const body = {
+      email: String(fd.get('email') || '').trim(),
+      role: String(fd.get('role') || 'staff').trim(),
+    };
+    const btn = form.querySelector('button[type=submit]');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api(`/api/admin/stores/${encodeURIComponent(storeId)}/roles`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || 'บันทึกสิทธิ์ร้านไม่สำเร็จ');
+      toast('บันทึก permission รายร้านแล้ว', 'ok');
+      render();
+    } catch (err) {
+      toast(err.message || 'บันทึกสิทธิ์ร้านไม่สำเร็จ', 'err');
+      if (btn) btn.disabled = false;
+    }
+    return;
+  }
+  if (form.id === 'adminStoreImportForm') {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const storeId = String(fd.get('storeId') || adminSelectedStoreId()).trim();
+    const raw = String(fd.get('backupJson') || '').trim();
+    const apply = Boolean(e.submitter?.dataset?.importApply);
+    if (!raw) { toast('วาง JSON backup ก่อน', 'err'); return; }
+    let backup = null;
+    try { backup = JSON.parse(raw); }
+    catch { toast('JSON backup ไม่ถูกต้อง', 'err'); return; }
+    const btn = e.submitter;
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api(`/api/admin/stores/${encodeURIComponent(storeId)}/import`, {
+        method: 'POST',
+        body: JSON.stringify({ dryRun: !apply, backup }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || 'restore ไม่สำเร็จ');
+      const s = d.summary || {};
+      toast(`${apply ? 'Restore สำเร็จ' : 'Dry-run ผ่าน'}: products ${s.products || 0}, articles ${s.articles || 0}, coupons ${s.coupons || 0}, settings ${s.settings || 0}`, apply ? 'ok' : 'ok');
+      if (apply) {
+        _adminStoresContext = null;
+        await render();
+      }
+    } catch (err) {
+      toast(err.message || 'restore ไม่สำเร็จ', 'err');
+      if (btn) btn.disabled = false;
+    }
+    return;
+  }
+  if (form.id === 'adminStoreSettingsForm') {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const storeId = String(fd.get('storeId') || adminSelectedStoreId()).trim();
+    const settings = {};
+    for (const [key, value] of fd.entries()) {
+      if (key === 'storeId') continue;
+      settings[key] = String(value || '').trim();
+    }
+    const btn = form.querySelector('button[type=submit]');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api(`/api/admin/stores/${encodeURIComponent(storeId)}/settings`, {
+        method: 'PUT',
+        body: JSON.stringify({ settings }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || 'บันทึก settings ร้านไม่สำเร็จ');
+      toast('บันทึก settings ร้านที่เลือกแล้ว', 'ok');
+      _adminStoresContextAt = 0;
+      localStorage.setItem(SITE_SYNC_KEY, String(Date.now()));
+      siteSyncChannel?.postMessage({ type: 'site-updated', at: Date.now(), storeId });
+      await loadSite(); applySite(); renderSaleBanner();
+      render();
+    } catch (err) {
+      toast(err.message || 'บันทึก settings ร้านไม่สำเร็จ', 'err');
+      if (btn) btn.disabled = false;
+    }
     return;
   }
   if (form.id === 'adminCreateUserForm') {
@@ -7136,6 +8766,20 @@ document.body.addEventListener('submit', async (e) => {
   }
 });
 document.body.addEventListener('input', (e) => {
+  if (e.target?.id === 'storeNameInput') {
+    const subdomainInput = document.getElementById('storeSubdomainInput');
+    if (!subdomainInput || subdomainInput.dataset.touched === '1') return;
+    subdomainInput.value = normalizeStoreSubdomainDraft(e.target.value || '');
+    const resultEl = document.getElementById('storeSubdomainCheckResult');
+    if (resultEl) resultEl.innerHTML = renderStoreSubdomainCheck({ subdomain: subdomainInput.value });
+  }
+  if (e.target?.id === 'storeSubdomainInput') {
+    const normalized = normalizeStoreSubdomainDraft(e.target.value || '');
+    if (e.target.value !== normalized) e.target.value = normalized;
+    e.target.dataset.touched = normalized ? '1' : '';
+    const resultEl = document.getElementById('storeSubdomainCheckResult');
+    if (resultEl) resultEl.innerHTML = renderStoreSubdomainCheck({ subdomain: normalized });
+  }
   const search = e.target.closest('[data-reviewgallerysearch]');
   if (search) {
     filterAdminReviewGallery(search.value || '');
@@ -7353,6 +8997,181 @@ async function syncCropLandingSettings(form) {
 // ───────── admin/account click actions ─────────
 document.body.addEventListener('click', async (e) => {
   const id = e.target.id;
+  const storyClose = e.target.closest('[data-story-close]');
+  if (storyClose || (e.target.id === 'communityStoryModal')) {
+    e.preventDefault();
+    closeCommunityStory();
+    return;
+  }
+  const storyOpen = e.target.closest('[data-story-open]');
+  if (storyOpen) {
+    e.preventDefault();
+    openCommunityStory(storyOpen.dataset.storyOpen || '');
+    return;
+  }
+  const communityCommentsBtn = e.target.closest('[data-community-comments]');
+  if (communityCommentsBtn) {
+    e.preventDefault();
+    await toggleCommunityComments(communityCommentsBtn.dataset.communityComments || '');
+    return;
+  }
+  const communityRepostBtn = e.target.closest('[data-community-repost]');
+  if (communityRepostBtn) {
+    e.preventDefault();
+    const postId = communityRepostBtn.dataset.communityRepost || '';
+    const post = asArray(COMMUNITY_CACHE.posts).find((item) => String(item.id) === String(postId));
+    const url = new URL(location.href);
+    url.hash = post?.articleId ? `/article/${post.articleId}` : '/community';
+    const title = post?.caption ? String(post.caption).split(/\n+/)[0].slice(0, 80) : 'ชุมชนจูนุชฟอร์ไลฟ์';
+    try {
+      if (navigator.share) await navigator.share({ title, text: title, url: url.toString() });
+      else {
+        await navigator.clipboard?.writeText(url.toString());
+        toast('คัดลอกลิงก์สำหรับรีโพสต์แล้ว', 'ok');
+      }
+    } catch {
+      toast('ยกเลิกการรีโพสต์', 'info');
+    }
+    return;
+  }
+  const communityLikeBtn = e.target.closest('[data-community-like]');
+  if (communityLikeBtn) {
+    e.preventDefault();
+    if (!currentUser) { go('/login'); return; }
+    const postId = communityLikeBtn.dataset.communityLike || '';
+    communityLikeBtn.disabled = true;
+    try {
+      const active = !communityLikeBtn.classList.contains('is-on');
+      const r = await api(`/api/community/posts/${encodeURIComponent(postId)}/reaction`, { method: 'POST', body: JSON.stringify({ active }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'อัปเดตไลก์ไม่สำเร็จ');
+      await refreshCommunityPostCard(postId);
+    } catch (err) {
+      toast(err.message || 'อัปเดตไลก์ไม่สำเร็จ', 'err');
+      communityLikeBtn.disabled = false;
+    }
+    return;
+  }
+  const communitySaveBtn = e.target.closest('[data-community-save]');
+  if (communitySaveBtn) {
+    e.preventDefault();
+    if (!currentUser) { go('/login'); return; }
+    const postId = communitySaveBtn.dataset.communitySave || '';
+    communitySaveBtn.disabled = true;
+    try {
+      const active = !communitySaveBtn.classList.contains('is-on');
+      const r = await api(`/api/community/posts/${encodeURIComponent(postId)}/save`, { method: 'POST', body: JSON.stringify({ active }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'บันทึกโพสต์ไม่สำเร็จ');
+      await refreshCommunityPostCard(postId);
+    } catch (err) {
+      toast(err.message || 'บันทึกโพสต์ไม่สำเร็จ', 'err');
+      communitySaveBtn.disabled = false;
+    }
+    return;
+  }
+  const communitySeedBtn = e.target.closest('[data-community-seed]');
+  if (communitySeedBtn) {
+    e.preventDefault();
+    communitySeedBtn.disabled = true;
+    try {
+      const r = await api('/api/admin/community/seed', { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'Seed ชุมชนไม่สำเร็จ');
+      toast(`สร้างโพสต์ ${d.posts || 0} รายการ และสตอรี่ ${d.stories || 0} รายการ`, 'ok');
+      render();
+    } catch (err) {
+      toast(err.message || 'Seed ชุมชนไม่สำเร็จ', 'err');
+      communitySeedBtn.disabled = false;
+    }
+    return;
+  }
+  const communityAdminPostBtn = e.target.closest('[data-community-admin-post]');
+  if (communityAdminPostBtn) {
+    e.preventDefault();
+    communityAdminPostBtn.disabled = true;
+    try {
+      const r = await api(`/api/admin/community/posts/${encodeURIComponent(communityAdminPostBtn.dataset.communityAdminPost || '')}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: communityAdminPostBtn.dataset.status || 'approved', pinned: communityAdminPostBtn.dataset.pinned === '1' }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'อัปเดตโพสต์ไม่สำเร็จ');
+      toast('อัปเดตโพสต์แล้ว', 'ok');
+      render();
+    } catch (err) {
+      toast(err.message || 'อัปเดตโพสต์ไม่สำเร็จ', 'err');
+      communityAdminPostBtn.disabled = false;
+    }
+    return;
+  }
+  const communityDeletePostBtn = e.target.closest('[data-community-delete-post]');
+  if (communityDeletePostBtn) {
+    e.preventDefault();
+    if (!confirm('ลบโพสต์นี้ออกจากชุมชน?')) return;
+    communityDeletePostBtn.disabled = true;
+    try {
+      const r = await api(`/api/admin/community/posts/${encodeURIComponent(communityDeletePostBtn.dataset.communityDeletePost || '')}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'ลบโพสต์ไม่สำเร็จ');
+      toast('ลบโพสต์แล้ว', 'ok');
+      render();
+    } catch (err) {
+      toast(err.message || 'ลบโพสต์ไม่สำเร็จ', 'err');
+      communityDeletePostBtn.disabled = false;
+    }
+    return;
+  }
+  const communityDeleteStoryBtn = e.target.closest('[data-community-delete-story]');
+  if (communityDeleteStoryBtn) {
+    e.preventDefault();
+    if (!confirm('ลบสตอรี่นี้?')) return;
+    communityDeleteStoryBtn.disabled = true;
+    try {
+      const r = await api(`/api/admin/community/stories/${encodeURIComponent(communityDeleteStoryBtn.dataset.communityDeleteStory || '')}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'ลบสตอรี่ไม่สำเร็จ');
+      toast('ลบสตอรี่แล้ว', 'ok');
+      render();
+    } catch (err) {
+      toast(err.message || 'ลบสตอรี่ไม่สำเร็จ', 'err');
+      communityDeleteStoryBtn.disabled = false;
+    }
+    return;
+  }
+  const exportBtn = e.target.closest('[data-admin-export]');
+  if (exportBtn) {
+    e.preventDefault();
+    exportBtn.disabled = true;
+    try {
+      await exportAdminListCsv(exportBtn.dataset.adminExport || '');
+      toast('Export CSV สำเร็จ', 'ok');
+    } catch (err) {
+      toast(err.message || 'Export CSV ไม่สำเร็จ', 'err');
+    } finally {
+      exportBtn.disabled = false;
+    }
+    return;
+  }
+  if (e.target.closest('[data-export-products]')) {
+    e.preventDefault();
+    exportProductsCsv(_adminProducts);
+    toast('Export สินค้าเป็น CSV แล้ว', 'ok');
+    return;
+  }
+  const reorderBtn = e.target.closest('[data-reorder]');
+  if (reorderBtn) {
+    e.preventDefault();
+    const order = clientOrders.get(reorderBtn.dataset.reorder || '');
+    const added = addOrderToCart(order || {});
+    if (!added) {
+      toast('ยังสั่งซ้ำไม่ได้ เพราะสินค้าเดิมอาจหมดหรือไม่พบในร้าน', 'err');
+      return;
+    }
+    toast('เพิ่มสินค้าจากออเดอร์เดิมลงตะกร้าแล้ว', 'ok');
+    go('/checkout');
+    return;
+  }
   const cropperOverlay = e.target.closest('#imageCropper');
   if (cropperOverlay && !e.target.closest('.imgcrop-card')) { closeImageCropper(null); return; }
   if (e.target.closest('[data-cropcancel]')) { e.preventDefault(); e.stopPropagation(); closeImageCropper(null); return; }
@@ -7799,32 +9618,6 @@ document.body.addEventListener('click', async (e) => {
     catch (err) { toast(err.message || 'ส่งไม่สำเร็จ', 'err'); }
     e.target.disabled = false; return;
   }
-  if (id === 'refreshLineSendersBtn') {
-    e.target.disabled = true;
-    try { await render(); toast('รีเฟรชรายชื่อแล้ว', 'ok'); }
-    catch (err) { toast(err.message || 'รีเฟรชไม่สำเร็จ', 'err'); }
-    return;
-  }
-  const setLineAdminBtn = e.target.closest('[data-setlineadmin]');
-  if (setLineAdminBtn) {
-    const lineUserId = String(setLineAdminBtn.dataset.setlineadmin || '').trim();
-    if (!lineUserId) return;
-    setLineAdminBtn.disabled = true;
-    try {
-      const saveRes = await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings: { LINE_ADMIN_USER_ID: lineUserId } }) });
-      const saved = await saveRes.json().catch(() => ({}));
-      if (!saveRes.ok) throw new Error(saved.error || 'บันทึกไม่สำเร็จ');
-      const testRes = await api('/api/admin/test-line', { method: 'POST' });
-      const tested = await testRes.json().catch(() => ({}));
-      if (!testRes.ok) throw new Error(tested.error || 'บันทึกแล้ว แต่ส่งข้อความทดสอบไม่สำเร็จ — เช็คว่าบัญชีนี้เป็นเพื่อนกับ OA แล้ว');
-      toast('ตั้งแอดมินแล้ว + ส่งข้อความทดสอบสำเร็จ ✓ เช็ค LINE ได้เลย', 'ok');
-      await render();
-    } catch (err) {
-      toast(err.message || 'ตั้งแอดมินไม่สำเร็จ', 'err');
-      setLineAdminBtn.disabled = false;
-    }
-    return;
-  }
   if (id === 'testLineRoomBtn') {
     e.target.disabled = true;
     try {
@@ -7840,6 +9633,31 @@ document.body.addEventListener('click', async (e) => {
     e.target.disabled = true;
     try { const r = await api('/api/admin/test-mail', { method: 'POST', body: JSON.stringify({}) }); const d = await r.json(); if (!r.ok) throw new Error(d.error); toast('ส่งอีเมลทดสอบแล้ว', 'ok'); }
     catch (err) { toast(err.message || 'ส่งไม่สำเร็จ', 'err'); }
+    e.target.disabled = false; return;
+  }
+  if (id === 'generateLineAdminBindCodeBtn') {
+    e.target.disabled = true;
+    try {
+      const label = String(document.getElementById('lineAdminBindLabel')?.value || '').trim();
+      const r = await api('/api/admin/line/admin-bind-codes', { method: 'POST', body: JSON.stringify({ label }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'สร้างรหัสผูกแอดมินไม่สำเร็จ');
+      const command = `bindadminddd ${d?.bindCode?.code || ''}`.trim();
+      try { if (navigator?.clipboard?.writeText) await navigator.clipboard.writeText(command); } catch {}
+      toast(`สร้างรหัสผูกแอดมินแล้ว${d?.bindCode?.code ? `: ${d.bindCode.code}` : ''}`, 'ok');
+      await render();
+    } catch (err) { toast(err.message || 'สร้างรหัสผูกแอดมินไม่สำเร็จ', 'err'); }
+    e.target.disabled = false; return;
+  }
+  if (id === 'deployLineRichMenuBtn') {
+    e.target.disabled = true;
+    try {
+      const r = await api('/api/admin/line/rich-menu/deploy', { method: 'POST', body: JSON.stringify({}) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'Deploy LINE rich menu failed');
+      toast('Deploy LINE Rich Menu สำเร็จ', 'ok');
+      await render();
+    } catch (err) { toast(err.message || 'Deploy LINE rich menu failed', 'err'); }
     e.target.disabled = false; return;
   }
   if (id === 'refreshDiagnosticsBtn') {
@@ -7858,6 +9676,148 @@ document.body.addEventListener('click', async (e) => {
       await render();
     } catch (err) { toast(err.message || 're-check ไม่สำเร็จ', 'err'); }
     e.target.disabled = false; return;
+  }
+  if (id === 'refreshStoresBtn') {
+    e.target.disabled = true;
+    try { await render(); toast('รีเฟรชรายการร้านแล้ว', 'ok'); }
+    catch (err) { toast(err.message || 'รีเฟรชรายการร้านไม่สำเร็จ', 'err'); }
+    e.target.disabled = false; return;
+  }
+  if (id === 'checkStoreSubdomainBtn') {
+    e.target.disabled = true;
+    const subdomainInput = document.getElementById('storeSubdomainInput');
+    const resultEl = document.getElementById('storeSubdomainCheckResult');
+    const subdomain = normalizeStoreSubdomainDraft(subdomainInput?.value || '');
+    if (subdomainInput && subdomainInput.value !== subdomain) subdomainInput.value = subdomain;
+    if (resultEl) resultEl.innerHTML = renderStoreSubdomainCheck({ subdomain, loading: true });
+    try {
+      const r = await api(`/api/admin/stores/check-subdomain?subdomain=${encodeURIComponent(subdomain)}`);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || 'เช็ก subdomain ไม่สำเร็จ');
+      if (resultEl) resultEl.innerHTML = renderStoreSubdomainCheck(d);
+      if (d?.valid && d?.available) toast('subdomain นี้พร้อมใช้งาน', 'ok');
+      else if (!d?.valid) toast('subdomain นี้ใช้ไม่ได้', 'err');
+      else toast('subdomain นี้ถูกใช้แล้ว', 'err');
+    } catch (err) {
+      if (resultEl) resultEl.innerHTML = renderStoreSubdomainCheck({ subdomain, error: err.message || 'เช็ก subdomain ไม่สำเร็จ' });
+      toast(err.message || 'เช็ก subdomain ไม่สำเร็จ', 'err');
+    }
+    e.target.disabled = false; return;
+  }
+  const copyStoreUrlBtn = e.target.closest('[data-copystoreurl]');
+  if (copyStoreUrlBtn) {
+    e.preventDefault();
+    const url = String(copyStoreUrlBtn.dataset.copystoreurl || '').trim();
+    try {
+      if (navigator?.clipboard?.writeText) await navigator.clipboard.writeText(url);
+      toast(`คัดลอก ${url} แล้ว`, 'ok');
+    } catch {
+      toast(url || 'คัดลอก URL ไม่สำเร็จ', 'ok');
+    }
+    return;
+  }
+  const provisionStoreBtn = e.target.closest('[data-provisionstore]');
+  if (provisionStoreBtn) {
+    e.preventDefault();
+    const storeId = String(provisionStoreBtn.dataset.provisionstore || '').trim();
+    if (!storeId) return;
+    provisionStoreBtn.disabled = true;
+    try {
+      const r = await api(`/api/admin/stores/${encodeURIComponent(storeId)}/provision-domain`, { method: 'POST', body: JSON.stringify({}) });
+      const d = await r.json().catch(() => ({}));
+      const status = String(d?.store?.domainProvision?.status || '').trim();
+      if (!r.ok) throw new Error(d?.store?.domainProvision?.message || d?.error || 'provision domain ไม่สำเร็จ');
+      toast(status === 'ready' ? 'Vercel domain พร้อมใช้งานแล้ว' : `Vercel domain ยังรอตรวจสอบ: ${status || 'pending'}`, status === 'ready' ? 'ok' : 'err');
+      await render();
+    } catch (err) {
+      toast(err.message || 'provision domain ไม่สำเร็จ', 'err');
+      provisionStoreBtn.disabled = false;
+    }
+    return;
+  }
+  const copyBindCommandBtn = e.target.closest('[data-copybindcommand]');
+  if (copyBindCommandBtn) {
+    e.preventDefault();
+    const code = String(copyBindCommandBtn.dataset.copybindcommand || '').trim();
+    const command = `bindadminddd ${code}`.trim();
+    try {
+      if (navigator?.clipboard?.writeText) await navigator.clipboard.writeText(command);
+      toast(`คัดลอกคำสั่ง ${command} แล้ว`, 'ok');
+    } catch {
+      toast(command, 'ok');
+    }
+    return;
+  }
+  const revokeBindCodeBtn = e.target.closest('[data-revokebindcode]');
+  if (revokeBindCodeBtn) {
+    e.preventDefault();
+    revokeBindCodeBtn.disabled = true;
+    try {
+      const r = await api(`/api/admin/line/admin-bind-codes/${encodeURIComponent(revokeBindCodeBtn.dataset.revokebindcode || '')}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'ยกเลิกรหัสไม่สำเร็จ');
+      toast('ยกเลิกรหัสผูกแอดมินแล้ว', 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message || 'ยกเลิกรหัสผูกแอดมินไม่สำเร็จ', 'err');
+      revokeBindCodeBtn.disabled = false;
+    }
+    return;
+  }
+  const setLineAdminPrimaryBtn = e.target.closest('[data-lineadminprimary]');
+  if (setLineAdminPrimaryBtn) {
+    e.preventDefault();
+    setLineAdminPrimaryBtn.disabled = true;
+    try {
+      const r = await api('/api/admin/line/admin-bindings/primary', {
+        method: 'POST',
+        body: JSON.stringify({ userId: String(setLineAdminPrimaryBtn.dataset.lineadminprimary || '').trim() }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'ตั้ง primary ไม่สำเร็จ');
+      toast('ตั้ง LINE admin หลักแล้ว', 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message || 'ตั้ง LINE admin หลักไม่สำเร็จ', 'err');
+      setLineAdminPrimaryBtn.disabled = false;
+    }
+    return;
+  }
+  const revokeLineAdminBtn = e.target.closest('[data-lineadminrevoke]');
+  if (revokeLineAdminBtn) {
+    e.preventDefault();
+    revokeLineAdminBtn.disabled = true;
+    try {
+      const r = await api(`/api/admin/line/admin-bindings/${encodeURIComponent(revokeLineAdminBtn.dataset.lineadminrevoke || '')}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'ถอดสิทธิ์ LINE admin ไม่สำเร็จ');
+      toast('ถอดสิทธิ์ LINE admin แล้ว', 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message || 'ถอดสิทธิ์ LINE admin ไม่สำเร็จ', 'err');
+      revokeLineAdminBtn.disabled = false;
+    }
+    return;
+  }
+  const rollbackConfigBtn = e.target.closest('[data-configrollback]');
+  if (rollbackConfigBtn) {
+    e.preventDefault();
+    rollbackConfigBtn.disabled = true;
+    try {
+      const revisionId = String(rollbackConfigBtn.dataset.configrollback || '').trim();
+      const r = await api(`/api/admin/settings/rollback/${encodeURIComponent(revisionId)}`, { method: 'POST', body: JSON.stringify({}) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'rollback ไม่สำเร็จ');
+      const verifyStatus = String(d?.verification?.status || 'ok').trim();
+      if (verifyStatus === 'error') toast('rollback แล้ว แต่ระบบยังมีจุดผิดพลาดที่ต้องตรวจต่อ', 'err');
+      else if (verifyStatus === 'warn') toast('rollback แล้ว พร้อมคำเตือนที่ควรตรวจต่อ', 'ok');
+      else toast('rollback config revision สำเร็จแล้ว', 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message || 'rollback config revision ไม่สำเร็จ', 'err');
+      rollbackConfigBtn.disabled = false;
+    }
+    return;
   }
   const moveProdBtn = e.target.closest('[data-moveprod]');
   if (moveProdBtn) {
@@ -8100,6 +10060,7 @@ document.body.addEventListener('click', async (e) => {
     return;
   }
 });
+
 document.body.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   if (e.target?.id !== 'adminProductCategoryInput') return;
@@ -8843,6 +10804,13 @@ document.body.addEventListener('click', (e) => {
     renderProductGrid();
     return;
   }
+  const availabilityBtn = e.target.closest('[data-availability]');
+  if (availabilityBtn) {
+    _pf.availability = availabilityBtn.dataset.availability || 'all';
+    document.querySelectorAll('[data-availability]').forEach((b) => b.classList.toggle('on', b === availabilityBtn));
+    renderProductGrid();
+    return;
+  }
   const th = e.target.closest('[data-mi]');
   if (th) { renderMain(+th.dataset.mi); return; }
   const calcModeBtn = e.target.closest('[data-calcmode]');
@@ -8921,6 +10889,25 @@ document.body.addEventListener('input', (e) => {
   }
 });
 document.body.addEventListener('change', async (e) => {
+  if (e.target.matches('[data-account-avatar-file]')) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const dataUrl = await fileToDataUrl(file);
+    const preview = document.querySelector('[data-account-avatar-preview]');
+    const hidden = e.target.closest('form')?.querySelector('input[name=avatar]');
+    if (hidden) hidden.value = '';
+    if (preview) preview.innerHTML = `<img src="${esc(dataUrl)}" alt="profile preview">`;
+    return;
+  }
+  if (e.target.id === 'adminStoreSwitcher') {
+    setAdminSelectedStoreId(e.target.value || 'store_main');
+    _adminSelectedProductIds.clear();
+    adminInboxState.sessionId = '';
+    _adminInboxUnreadTotal = 0;
+    toast('เปลี่ยนร้านที่จัดการแล้ว', 'ok');
+    render();
+    return;
+  }
   if (e.target.matches('[data-admin-limit]')) {
     const key = e.target.dataset.adminLimit;
     setAdminListState(key, { limit: parseInt(e.target.value, 10) || 20, page: 1 });

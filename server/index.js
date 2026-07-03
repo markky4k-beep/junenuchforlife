@@ -18,12 +18,15 @@ import {
   listAdminOrderSummaries, listAdminLeads, listAdminUsers, getAdminDashboardStats,
   listProducts, getProduct, createProduct, updateProduct, deleteProduct,
   listProductsByIds, countProducts, countUsers, countLeads, countOrders, listLeadIdentityRows, listUserIdentityRows, listOrderIdentityRows, listDeliveredOrderTimingRows,
-  getSetting, setSetting, allSettings,
+  getSetting, setSetting, allSettings, getStoreSetting, setStoreSetting, allStoreSettings, getDefaultStore, getStore, getStoreByHost, listStores, isStoreSubdomainAvailable, createStore, addStoreDomain, listStoreDomains, createStoreDatabase, listStoreDatabases, addUserStoreRole, listUserStoreRoles,
   listCoupons, getCoupon, createCoupon, updateCoupon, deleteCoupon, incCouponUse,
   addReview, listReviews, reviewStats, allReviewStats, getAdminOrderAnalytics, userReviewed,
   adjustStock, reserveOrderResources, releaseOrderResources, getPaymentLog, upsertPaymentLog,
   createLead, getLead, listLeads, updateLead,
   createArticle, getArticle, listArticles, updateArticle, deleteArticle,
+  createCommunityPost, getCommunityPost, listCommunityPosts, updateCommunityPostStatus, deleteCommunityPost,
+  createCommunityComment, listCommunityComments, setCommunityReaction, setCommunitySave,
+  createCommunityStory, listCommunityStories, deleteCommunityStory, seedCommunityFromArticles,
   listAllChatSessionMeta, getChatSessionMeta, upsertChatSessionMeta, deleteChatSessionMeta,
   claimLineWebhookEvent, cleanupLineWebhookEvents, insertLineWebhookAudit, listLineWebhookAudits, cleanupLineWebhookAudits,
   activeProvider,
@@ -58,6 +61,8 @@ import { verifyBridgeRequest } from './lineoa-bridge.js';
 import { createOrderService } from './order-service.js';
 import { DEFAULT_ARTICLES } from './default-articles.js';
 import { createLineRuntime } from './lineoa-runtime.js';
+import { extractRequestHost, normalizeRequestedSubdomain, isValidStoreSubdomain, buildStoreId, rootDomainFromPublicUrl, buildStorePublicUrl, buildStoreBootstrapSettings } from './store-tenant.js';
+import { getVercelDomainConfig, provisionVercelProjectDomain, vercelDomainAutomationConfigured } from './vercel-domains.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '..', 'public');
@@ -68,6 +73,8 @@ const adminClientFile = path.join(privateBuildDir, 'admin-app.js');
 const reviewGalleryFile = path.join(publicDir, 'review-gallery.json');
 const isServerless = Boolean(process.env.VERCEL);
 const DEBUG_SERVER_URL = String(process.env.DEBUG_SERVER_URL || '').trim();
+const CONFIG_SECRET_PREFIX = 'enc:v1:';
+const SECRET_SETTING_KEYS = new Set(['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'LINEOA_API_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'SLIPOK_API_KEY', 'SMTP_PASS']);
 const DEBUG_SESSION_ID = String(process.env.DEBUG_SESSION_ID || 'admin-login-lockdown').trim();
 if (!isServerless) fs.mkdirSync(uploadsDir, { recursive: true });
 
@@ -200,9 +207,97 @@ let settingsCache = {};
 let settingsCacheAt = 0;
 let settingsRefreshPromise = null;
 const SETTINGS_CACHE_TTL_MS = Math.max(1000, parseInt(process.env.SETTINGS_CACHE_TTL_MS, 10) || (isServerless ? 30000 : 15000));
+function configEncryptionSecret() {
+  return String(
+    process.env.CONFIG_ENCRYPTION_KEY
+    || process.env.SETTINGS_ENCRYPTION_KEY
+    || process.env.SESSION_SIGNING_SECRET
+    || process.env.ADMIN_ACCESS_KEY
+    || ''
+  ).trim();
+}
+function configEncryptionKeyBuffer() {
+  const secret = configEncryptionSecret();
+  if (!secret) return null;
+  return crypto.createHash('sha256').update(secret).digest();
+}
+function encryptStoredSecretValue(value = '') {
+  const plain = String(value || '').trim();
+  if (!plain) return '';
+  if (plain.startsWith(CONFIG_SECRET_PREFIX)) return plain;
+  const secretKey = configEncryptionKeyBuffer();
+  if (!secretKey) return plain;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', secretKey, iv);
+  const encrypted = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${CONFIG_SECRET_PREFIX}${iv.toString('base64url')}.${tag.toString('base64url')}.${encrypted.toString('base64url')}`;
+}
+function decryptStoredSecretValue(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!raw.startsWith(CONFIG_SECRET_PREFIX)) return raw;
+  const secretKey = configEncryptionKeyBuffer();
+  if (!secretKey) return '';
+  try {
+    const payload = raw.slice(CONFIG_SECRET_PREFIX.length);
+    const [ivRaw = '', tagRaw = '', encryptedRaw = ''] = payload.split('.');
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      secretKey,
+      Buffer.from(ivRaw, 'base64url'),
+    );
+    decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'));
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(encryptedRaw, 'base64url')),
+      decipher.final(),
+    ]);
+    return decrypted.toString('utf8');
+  } catch (err) {
+    console.error('[config] decrypt secret fail:', err?.message || err);
+    return '';
+  }
+}
+function encodeSettingValueForStorage(key = '', value = '') {
+  const normalizedKey = String(key || '').trim();
+  const normalizedValue = String(value || '');
+  return SECRET_SETTING_KEYS.has(normalizedKey) ? encryptStoredSecretValue(normalizedValue) : normalizedValue;
+}
+function decodeSettingValueFromStorage(key = '', value = '') {
+  const normalizedKey = String(key || '').trim();
+  const normalizedValue = String(value || '');
+  return SECRET_SETTING_KEYS.has(normalizedKey) ? decryptStoredSecretValue(normalizedValue) : normalizedValue;
+}
+function encodeConfigSnapshot(snapshot = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(snapshot || {})) out[key] = encodeSettingValueForStorage(key, value);
+  return out;
+}
+function decodeConfigSnapshot(snapshot = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(snapshot || {})) out[key] = decodeSettingValueFromStorage(key, value);
+  return out;
+}
+async function resealPlaintextSecretSettings(rawSettings = {}) {
+  if (!configEncryptionSecret()) return rawSettings;
+  const next = { ...(rawSettings || {}) };
+  let changed = false;
+  for (const key of SECRET_SETTING_KEYS) {
+    const raw = String(next[key] || '');
+    if (!raw || raw.startsWith(CONFIG_SECRET_PREFIX)) continue;
+    const encrypted = encodeSettingValueForStorage(key, raw);
+    if (encrypted && encrypted !== raw) {
+      await setSetting(key, encrypted);
+      next[key] = encrypted;
+      changed = true;
+    }
+  }
+  return changed ? next : rawSettings;
+}
 async function refreshSettingsCache() {
-  const [nextSettings, nextChatMeta] = await Promise.all([allSettings(), listAllChatSessionMeta()]);
-  settingsCache = nextSettings;
+  const [nextSettingsRaw, nextChatMeta] = await Promise.all([allSettings(), listAllChatSessionMeta()]);
+  const nextSettings = await resealPlaintextSecretSettings(nextSettingsRaw);
+  settingsCache = Object.fromEntries(Object.entries(nextSettings || {}).map(([key, value]) => [key, decodeSettingValueFromStorage(key, value)]));
   chatMetaCache = nextChatMeta;
   settingsCacheAt = Date.now();
   await migrateLegacyChatMetaBlob().catch((err) => console.error('[chat-meta] legacy migrate fail:', err?.message || err));
@@ -219,6 +314,104 @@ async function ensureSettingsFresh(force = false) {
 function cfg(key) {
   const v = settingsCache[key];
   return v ? v : (process.env[key] || '');
+}
+const STORE_CONTEXT_TTL_MS = Math.max(5000, parseInt(process.env.STORE_CONTEXT_TTL_MS, 10) || 15000);
+let defaultStoreCache = null;
+let defaultStoreCacheAt = 0;
+const storeHostCache = new Map();
+async function resolveDefaultStore(force = false) {
+  const stale = force || !defaultStoreCacheAt || (Date.now() - defaultStoreCacheAt) >= STORE_CONTEXT_TTL_MS;
+  if (!stale && defaultStoreCache) return defaultStoreCache;
+  defaultStoreCache = await getDefaultStore().catch(() => null);
+  defaultStoreCacheAt = Date.now();
+  return defaultStoreCache;
+}
+async function resolveStoreForHost(host = '', force = false) {
+  const normalizedHost = extractRequestHost({ headers: { host } }) || String(host || '').trim().toLowerCase();
+  const cached = storeHostCache.get(normalizedHost);
+  const stale = !cached || force || (Date.now() - Number(cached.at || 0)) >= STORE_CONTEXT_TTL_MS;
+  if (!stale) return cached.store || null;
+  const store = (normalizedHost ? await getStoreByHost(normalizedHost).catch(() => null) : null) || await resolveDefaultStore(force);
+  storeHostCache.set(normalizedHost, { store, at: Date.now() });
+  return store || null;
+}
+async function getRequestStore(req) {
+  if (req.store) return req.store;
+  const store = await resolveStoreForHost(extractRequestHost(req));
+  req.store = store || null;
+  return req.store;
+}
+async function getRequestStoreSettings(req) {
+  if (req.storeSettings) return req.storeSettings;
+  const store = await getRequestStore(req);
+  req.storeSettings = store?.id ? await allStoreSettings(store.id).catch(() => ({})) : {};
+  return req.storeSettings;
+}
+function requestedAdminStoreId(req = {}) {
+  return String(
+    req.query?.storeId ||
+    req.body?.storeId ||
+    req.headers?.['x-store-id'] ||
+    'store_main'
+  ).trim() || 'store_main';
+}
+const STORE_ROLE_ORDER = new Map([['owner', 4], ['admin', 3], ['staff', 2], ['chat_admin', 1]]);
+async function userStoreRole(req = {}, storeId = '') {
+  if (!req.user?.id) return '';
+  if (String(req.user.role || '') === ROLE_ADMIN) return 'owner';
+  const roles = req.userStoreRoles || await listUserStoreRoles(req.user.id).catch(() => []);
+  req.userStoreRoles = roles;
+  const normalizedStoreId = String(storeId || '').trim() || 'store_main';
+  return String((roles || []).find((role) => String(role.storeId || '') === normalizedStoreId)?.role || '').trim();
+}
+async function canAccessStore(req = {}, storeId = '', minRole = 'staff') {
+  if (String(req.user?.role || '') === ROLE_ADMIN) return true;
+  if (String(req.user?.role || '') === ROLE_CHAT_ADMIN && minRole === 'chat_admin') return true;
+  const role = await userStoreRole(req, storeId);
+  return (STORE_ROLE_ORDER.get(role) || 0) >= (STORE_ROLE_ORDER.get(minRole) || 1);
+}
+async function userHasAnyStoreRole(req = {}) {
+  if (!req.user?.id) return false;
+  if (String(req.user.role || '') === ROLE_ADMIN) return true;
+  const roles = req.userStoreRoles || await listUserStoreRoles(req.user.id).catch(() => []);
+  req.userStoreRoles = roles;
+  return Array.isArray(roles) && roles.length > 0;
+}
+async function canAccessAdminSurface(req = {}) {
+  return canAccessAdminShell(req.user) || await userHasAnyStoreRole(req);
+}
+function requireStoreScopedAccess(minRole = 'staff') {
+  return async (req, res, next) => {
+    if (!req.user) return res.status(404).json({ error: 'ไม่พบรายการที่ร้องขอ' });
+    const storeId = requestedAdminStoreId(req);
+    if (await canAccessStore(req, storeId, minRole)) return next();
+    return res.status(403).json({ error: 'บัญชีนี้ไม่มีสิทธิ์จัดการร้านที่เลือก' });
+  };
+}
+function requireStoreParamAccess(minRole = 'staff') {
+  return async (req, res, next) => {
+    if (!req.user) return res.status(404).json({ error: 'ไม่พบรายการที่ร้องขอ' });
+    const storeId = String(req.params?.id || requestedAdminStoreId(req) || 'store_main').trim() || 'store_main';
+    if (await canAccessStore(req, storeId, minRole)) return next();
+    return res.status(403).json({ error: 'บัญชีนี้ไม่มีสิทธิ์จัดการร้านนี้' });
+  };
+}
+async function requireAdminConsole(req, res, next) {
+  if (await canAccessAdminSurface(req)) return next();
+  return res.status(404).json({ error: 'ไม่พบรายการที่ร้องขอ' });
+}
+async function requireStoreAccess(req, res, storeId = requestedAdminStoreId(req), minRole = 'staff') {
+  if (await canAccessStore(req, storeId, minRole)) return true;
+  res.status(403).json({ error: 'บัญชีนี้ไม่มีสิทธิ์จัดการร้านที่เลือก' });
+  return false;
+}
+async function getAdminSelectedStore(req = {}) {
+  const requested = requestedAdminStoreId(req);
+  const store = await getStore(requested);
+  return store || await getDefaultStore() || { id: 'store_main', name: 'Main Store', isDefault: true };
+}
+function adminStoreScope(req = {}) {
+  return { storeId: requestedAdminStoreId(req) };
 }
 function intCfg(key, fallback) {
   const raw = parseInt(String(cfg(key) || '').trim(), 10);
@@ -241,12 +434,391 @@ function lineClient() {
   return t ? new line.messagingApi.MessagingApiClient({ channelAccessToken: t }) : null;
 }
 function adminUserId() { return cfg('LINE_ADMIN_USER_ID'); }
+const LINE_RICH_MENU_DEPLOYMENT_KEY = 'LINE_RICH_MENU_DEPLOYMENT';
+const LINE_RICH_MENU_ASSETS = [
+  {
+    aliasId: 'line-home',
+    jsonFile: 'customer-home-richmenu.json',
+    imageFile: 'customer-home-richmenu.png',
+    default: true,
+  },
+  {
+    aliasId: 'line-catalog',
+    jsonFile: 'customer-catalog-richmenu.json',
+    imageFile: 'customer-catalog-richmenu.png',
+    default: false,
+  },
+];
+function lineRichMenuDir() {
+  return path.join(__dirname, '..', 'docs', 'line-rich-menu');
+}
+function lineRichMenuAssetStatus() {
+  const dir = lineRichMenuDir();
+  return LINE_RICH_MENU_ASSETS.map((asset) => ({
+    ...asset,
+    jsonReady: fs.existsSync(path.join(dir, asset.jsonFile)),
+    imageReady: fs.existsSync(path.join(dir, asset.imageFile)),
+  }));
+}
+async function lineRichMenuApi(pathname, { method = 'GET', body, headers = {}, dataHost = false } = {}) {
+  const token = lineChannelAccessToken();
+  if (!token) throw new Error('LINE_CHANNEL_ACCESS_TOKEN is missing');
+  const baseUrl = dataHost ? 'https://api-data.line.me' : 'https://api.line.me';
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...headers,
+    },
+    body,
+  });
+  const text = await response.text().catch(() => '');
+  if (!response.ok) throw new Error(`${pathname} failed: ${response.status} ${text.slice(0, 500)}`);
+  try { return text ? JSON.parse(text) : {}; } catch { return {}; }
+}
+async function lineRichMenuStatus() {
+  const assets = lineRichMenuAssetStatus();
+  const configured = Boolean(lineChannelAccessToken());
+  const deployment = internalSettingJson(LINE_RICH_MENU_DEPLOYMENT_KEY, null);
+  let aliases = [];
+  let error = '';
+  if (configured) {
+    try {
+      const result = await lineRichMenuApi('/v2/bot/richmenu/alias/list');
+      aliases = Array.isArray(result.aliases) ? result.aliases : [];
+    } catch (err) {
+      error = err?.message || String(err);
+    }
+  }
+  return {
+    ok: configured && assets.every((asset) => asset.jsonReady && asset.imageReady) && !error,
+    configured,
+    assets,
+    aliases,
+    deployment,
+    error,
+  };
+}
+async function deployLineRichMenus(actor = {}) {
+  const dir = lineRichMenuDir();
+  const assets = lineRichMenuAssetStatus();
+  const missing = assets.filter((asset) => !asset.jsonReady || !asset.imageReady);
+  if (missing.length) throw new Error(`LINE rich menu assets missing: ${missing.map((asset) => asset.aliasId).join(', ')}`);
+
+  const created = [];
+  const aliasesBefore = await lineRichMenuApi('/v2/bot/richmenu/alias/list').then((result) => Array.isArray(result.aliases) ? result.aliases : []);
+  const aliasById = new Map(aliasesBefore.map((item) => [String(item.richMenuAliasId || ''), item]));
+  const aliases = {};
+  let defaultRichMenuId = '';
+
+  for (const asset of LINE_RICH_MENU_ASSETS) {
+    const jsonBody = fs.readFileSync(path.join(dir, asset.jsonFile), 'utf8');
+    const createdMenu = await lineRichMenuApi('/v2/bot/richmenu', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: jsonBody,
+    });
+    const richMenuId = String(createdMenu.richMenuId || '').trim();
+    if (!richMenuId) throw new Error(`LINE rich menu create failed for ${asset.aliasId}`);
+    created.push(richMenuId);
+    await lineRichMenuApi(`/v2/bot/richmenu/${encodeURIComponent(richMenuId)}/content`, {
+      method: 'POST',
+      dataHost: true,
+      headers: { 'Content-Type': 'image/png' },
+      body: fs.readFileSync(path.join(dir, asset.imageFile)),
+    });
+    if (aliasById.has(asset.aliasId)) {
+      await lineRichMenuApi(`/v2/bot/richmenu/alias/${encodeURIComponent(asset.aliasId)}`, { method: 'DELETE' });
+    }
+    await lineRichMenuApi('/v2/bot/richmenu/alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ richMenuAliasId: asset.aliasId, richMenuId }),
+    });
+    aliases[asset.aliasId] = richMenuId;
+    if (asset.default) defaultRichMenuId = richMenuId;
+  }
+
+  if (defaultRichMenuId) {
+    await lineRichMenuApi(`/v2/bot/user/all/richmenu/${encodeURIComponent(defaultRichMenuId)}`, { method: 'POST' });
+  }
+  const deployment = {
+    ok: true,
+    deployedAt: Date.now(),
+    actor,
+    defaultRichMenuId,
+    aliases,
+    created,
+  };
+  await saveInternalSettingJson(LINE_RICH_MENU_DEPLOYMENT_KEY, deployment);
+  await recordSystemEvent({
+    level: 'info',
+    source: 'line_rich_menu',
+    type: 'deployed',
+    message: 'LINE rich menu deployed successfully',
+    data: deployment,
+  });
+  return deployment;
+}
 function stripeClient() { const k = cfg('STRIPE_SECRET_KEY'); return k ? new Stripe(k) : null; }
 function lineSourceKey(source = {}) {
   if (source?.userId) return `user:${String(source.userId).trim()}`;
   if (source?.groupId) return `group:${String(source.groupId).trim()}`;
   if (source?.roomId) return `room:${String(source.roomId).trim()}`;
   return '';
+}
+function parseJsonSettingValue(raw, fallback) {
+  const text = String(raw || '').trim();
+  if (!text) return fallback;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed === undefined ? fallback : parsed;
+  } catch {
+    return fallback;
+  }
+}
+function internalSettingJson(key, fallback) {
+  return parseJsonSettingValue(settingsCache[key], fallback);
+}
+async function saveInternalSettingJson(key, value) {
+  const serialized = JSON.stringify(value ?? null);
+  await setSetting(key, serialized);
+  settingsCache[key] = serialized;
+  settingsCacheAt = Date.now();
+  return value;
+}
+function configActorFromRequest(req = {}) {
+  return {
+    userId: String(req.user?.id || '').trim(),
+    name: String(req.user?.name || '').trim(),
+    email: String(req.user?.email || '').trim(),
+  };
+}
+function lineAdminBindings() {
+  const raw = internalSettingJson(LINE_ADMIN_BINDINGS_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => ({
+      lineUserId: String(item?.lineUserId || '').trim(),
+      name: String(item?.name || '').trim(),
+      role: String(item?.role || 'admin').trim() || 'admin',
+      label: String(item?.label || '').trim(),
+      grantedAt: Number(item?.grantedAt || 0),
+      lastBoundAt: Number(item?.lastBoundAt || 0),
+      grantedBy: String(item?.grantedBy || '').trim(),
+      active: item?.active !== false,
+    }))
+    .filter((item) => item.lineUserId)
+    .slice(0, 30);
+}
+function lineAdminBindCodes() {
+  const raw = internalSettingJson(LINE_ADMIN_BIND_CODES_KEY, []);
+  const now = Date.now();
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => ({
+      code: String(item?.code || '').trim().toUpperCase(),
+      label: String(item?.label || '').trim(),
+      createdAt: Number(item?.createdAt || 0),
+      expiresAt: Number(item?.expiresAt || 0),
+      createdBy: String(item?.createdBy || '').trim(),
+    }))
+    .filter((item) => item.code && item.expiresAt > now)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 20);
+}
+function allLineAdminUserIds() {
+  const ids = new Set();
+  const primary = String(adminUserId() || '').trim();
+  if (primary) ids.add(primary);
+  for (const binding of lineAdminBindings()) {
+    if (binding.active !== false && binding.lineUserId) ids.add(binding.lineUserId);
+  }
+  return [...ids];
+}
+function isAuthorizedLineAdminUserId(userId = '') {
+  const target = String(userId || '').trim();
+  if (!target) return false;
+  return allLineAdminUserIds().includes(target);
+}
+async function setPrimaryLineAdminUserId(userId = '') {
+  const next = String(userId || '').trim();
+  await setSetting('LINE_ADMIN_USER_ID', encodeSettingValueForStorage('LINE_ADMIN_USER_ID', next));
+  settingsCache.LINE_ADMIN_USER_ID = next;
+  settingsCacheAt = Date.now();
+  return next;
+}
+function randomLineAdminBindCode(length = 8) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.randomBytes(Math.max(8, length));
+  let out = '';
+  for (let i = 0; i < length; i += 1) out += chars[bytes[i] % chars.length];
+  return out;
+}
+async function createLineAdminBindCode({ label = '', actor = {} } = {}) {
+  const existing = lineAdminBindCodes();
+  const used = new Set(existing.map((item) => item.code));
+  let code = randomLineAdminBindCode(8);
+  while (used.has(code)) code = randomLineAdminBindCode(8);
+  const entry = {
+    code,
+    label: String(label || '').trim().slice(0, 80),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + (10 * 60 * 1000),
+    createdBy: String(actor?.email || actor?.name || actor?.userId || '').trim(),
+  };
+  await saveInternalSettingJson(LINE_ADMIN_BIND_CODES_KEY, [entry, ...existing].slice(0, 20));
+  await recordSystemEvent({
+    level: 'info',
+    source: 'line_admin_bind',
+    type: 'code_created',
+    message: 'สร้างรหัสผูกแอดมิน LINE ใหม่แล้ว',
+    data: { label: entry.label || '-', createdBy: entry.createdBy || '-' },
+  });
+  return entry;
+}
+async function redeemLineAdminBindCode({ code = '', userId = '', displayName = '' } = {}) {
+  const normalizedCode = String(code || '').trim().toUpperCase();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedCode || !normalizedUserId) return { ok: false, message: 'ข้อมูลสำหรับผูกสิทธิ์ไม่ครบถ้วน' };
+  const codes = lineAdminBindCodes();
+  const target = codes.find((item) => item.code === normalizedCode);
+  if (!target) return { ok: false, message: 'รหัสผูกแอดมินไม่ถูกต้องหรือหมดอายุแล้วค่ะ' };
+  const nextCodes = codes.filter((item) => item.code !== normalizedCode);
+  const bindings = lineAdminBindings();
+  const current = bindings.find((item) => item.lineUserId === normalizedUserId);
+  const name = String(displayName || current?.name || '').trim() || `LINE-${normalizedUserId.slice(-6)}`;
+  const nextBinding = {
+    lineUserId: normalizedUserId,
+    name,
+    role: 'admin',
+    label: target.label || current?.label || '',
+    grantedAt: Number(current?.grantedAt || Date.now()) || Date.now(),
+    lastBoundAt: Date.now(),
+    grantedBy: target.createdBy || current?.grantedBy || '',
+    active: true,
+  };
+  const nextBindings = [nextBinding, ...bindings.filter((item) => item.lineUserId !== normalizedUserId)].slice(0, 30);
+  await saveInternalSettingJson(LINE_ADMIN_BIND_CODES_KEY, nextCodes);
+  await saveInternalSettingJson(LINE_ADMIN_BINDINGS_KEY, nextBindings);
+  if (!String(adminUserId() || '').trim()) await setPrimaryLineAdminUserId(normalizedUserId);
+  await recordSystemEvent({
+    level: 'info',
+    source: 'line_admin_bind',
+    type: 'bound',
+    message: `ผูก LINE admin สำเร็จสำหรับ ${name}`,
+    data: { lineUserId: normalizedUserId, grantedBy: nextBinding.grantedBy || '-' },
+  });
+  return {
+    ok: true,
+    binding: nextBinding,
+    message: `ผูกสิทธิ์แอดมิน LINE สำเร็จแล้วค่ะ\nบัญชีนี้สามารถใช้คำสั่งแอดมินใน LINE OA ได้ทันที`,
+  };
+}
+function configCenterAuditState() {
+  const raw = internalSettingJson(CONFIG_CENTER_AUDIT_KEY, {});
+  return {
+    lastResult: raw && typeof raw.lastResult === 'object' ? raw.lastResult : null,
+    history: Array.isArray(raw?.history) ? raw.history : [],
+  };
+}
+async function saveConfigCenterAudit(result = null) {
+  const current = configCenterAuditState();
+  const nextHistory = [
+    ...(result ? [result] : []),
+    ...current.history.filter((item) => String(item?.revisionId || '') !== String(result?.revisionId || '')),
+  ].slice(0, 12);
+  const payload = {
+    lastResult: result,
+    history: nextHistory,
+  };
+  await saveInternalSettingJson(CONFIG_CENTER_AUDIT_KEY, payload);
+  return payload;
+}
+function configCenterRevisions() {
+  const raw = internalSettingJson(CONFIG_CENTER_REVISIONS_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => ({
+      revisionId: String(item?.revisionId || '').trim(),
+      createdAt: Number(item?.createdAt || 0),
+      changedKeys: Array.isArray(item?.changedKeys) ? item.changedKeys.map((key) => String(key || '').trim()).filter(Boolean) : [],
+      actor: item?.actor && typeof item.actor === 'object' ? item.actor : {},
+      reason: String(item?.reason || 'settings_update').trim(),
+      snapshot: decodeConfigSnapshot(item?.snapshot && typeof item.snapshot === 'object' ? item.snapshot : {}),
+      rolledBackAt: Number(item?.rolledBackAt || 0),
+      rolledBackBy: item?.rolledBackBy && typeof item.rolledBackBy === 'object' ? item.rolledBackBy : null,
+    }))
+    .filter((item) => item.revisionId)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 20);
+}
+async function saveConfigCenterRevisions(list = []) {
+  const payload = (Array.isArray(list) ? list : [])
+    .slice(0, 20)
+    .map((item) => ({
+      revisionId: String(item?.revisionId || '').trim(),
+      createdAt: Number(item?.createdAt || 0),
+      changedKeys: Array.isArray(item?.changedKeys) ? item.changedKeys.map((key) => String(key || '').trim()).filter(Boolean) : [],
+      actor: item?.actor && typeof item.actor === 'object' ? item.actor : {},
+      reason: String(item?.reason || 'settings_update').trim(),
+      snapshot: encodeConfigSnapshot(item?.snapshot && typeof item.snapshot === 'object' ? item.snapshot : {}),
+      rolledBackAt: Number(item?.rolledBackAt || 0),
+      rolledBackBy: item?.rolledBackBy && typeof item.rolledBackBy === 'object' ? item.rolledBackBy : null,
+    }))
+    .filter((item) => item.revisionId);
+  await saveInternalSettingJson(CONFIG_CENTER_REVISIONS_KEY, payload);
+  return payload;
+}
+function collectConfigSnapshot(keys = []) {
+  const snapshot = {};
+  for (const key of [...new Set((Array.isArray(keys) ? keys : []).map((item) => String(item || '').trim()).filter(Boolean))]) {
+    snapshot[key] = String(settingsCache[key] ?? process.env[key] ?? SITE_DEFAULTS[key] ?? '');
+  }
+  return snapshot;
+}
+async function createConfigRevision({ changedKeys = [], actor = {}, reason = 'settings_update', snapshot = {} } = {}) {
+  const keys = [...new Set((Array.isArray(changedKeys) ? changedKeys : []).map((item) => String(item || '').trim()).filter(Boolean))];
+  if (!keys.length) return null;
+  const entry = {
+    revisionId: `rev_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+    createdAt: Date.now(),
+    changedKeys: keys,
+    actor: {
+      userId: String(actor?.userId || '').trim(),
+      name: String(actor?.name || '').trim(),
+      email: String(actor?.email || '').trim(),
+    },
+    reason: String(reason || 'settings_update').trim(),
+    snapshot: { ...(snapshot && typeof snapshot === 'object' ? snapshot : {}) },
+    rolledBackAt: 0,
+    rolledBackBy: null,
+  };
+  const revisions = configCenterRevisions();
+  await saveConfigCenterRevisions([entry, ...revisions]);
+  return entry;
+}
+async function markConfigRevisionRolledBack(revisionId = '', actor = {}) {
+  const targetId = String(revisionId || '').trim();
+  if (!targetId) return false;
+  const revisions = configCenterRevisions();
+  let found = false;
+  const next = revisions.map((item) => {
+    if (item.revisionId !== targetId) return item;
+    found = true;
+    return {
+      ...item,
+      rolledBackAt: Date.now(),
+      rolledBackBy: {
+        userId: String(actor?.userId || '').trim(),
+        name: String(actor?.name || '').trim(),
+        email: String(actor?.email || '').trim(),
+      },
+    };
+  });
+  if (!found) return false;
+  await saveConfigCenterRevisions(next);
+  return true;
 }
 function lineSessionIdFromSource(source = {}) {
   const seed = lineSourceKey(source);
@@ -541,16 +1113,19 @@ async function runStartupValidation(reason = 'startup') {
 
 async function pushAdminAlert(text = '') {
   const c = lineClient();
-  const to = adminUserId();
   const message = String(text || '').trim();
-  if (!c || !to || !message) return false;
-  try {
+  const targets = allLineAdminUserIds();
+  if (!c || !targets.length || !message) return false;
+  const results = await Promise.allSettled(targets.map(async (to) => {
     await c.pushMessage({ to, messages: [{ type: 'text', text: message.slice(0, 1000) }] });
-    return true;
-  } catch (err) {
-    console.error('[line] alert push fail:', err?.body || err?.message || err);
-    return false;
+    return to;
+  }));
+  const delivered = results.filter((item) => item.status === 'fulfilled').length;
+  if (!delivered) {
+    const firstError = results.find((item) => item.status === 'rejected');
+    console.error('[line] alert push fail:', firstError?.reason?.body || firstError?.reason?.message || firstError?.reason || 'unknown');
   }
+  return delivered > 0;
 }
 
 async function recordSystemEvent({ level = 'info', source = 'system', type = 'event', message = '', data = {}, alert = false, dedupeKey = '' } = {}) {
@@ -695,6 +1270,123 @@ function buildHealthSnapshot() {
     configGuardWarningCount: Math.max(0, Number(startup.warningCount || 0)),
   };
 }
+async function verifyLineAccessTokenStatus() {
+  const token = lineChannelAccessToken();
+  if (!token) return { key: 'line_token', label: 'LINE Access Token', status: 'error', note: 'ยังไม่ได้ตั้ง LINE Channel Access Token' };
+  try {
+    const response = await fetch('https://api.line.me/v2/bot/info', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.ok) return { key: 'line_token', label: 'LINE Access Token', status: 'ok', note: 'ตรวจสอบ token กับ LINE Messaging API ผ่านแล้ว' };
+    const body = await response.text().catch(() => '');
+    return {
+      key: 'line_token',
+      label: 'LINE Access Token',
+      status: 'error',
+      note: `LINE Messaging API ตอบกลับ ${response.status}${body ? `: ${body.slice(0, 120)}` : ''}`,
+    };
+  } catch (err) {
+    return { key: 'line_token', label: 'LINE Access Token', status: 'error', note: `ตรวจสอบ token ไม่สำเร็จ: ${err?.message || err}` };
+  }
+}
+function verifyLineSecretStatus() {
+  return lineChannelSecret()
+    ? { key: 'line_secret', label: 'LINE Channel Secret', status: 'ok', note: 'มีค่า channel secret พร้อมตรวจลายเซ็น webhook' }
+    : { key: 'line_secret', label: 'LINE Channel Secret', status: 'error', note: 'ยังไม่ได้ตั้ง LINE Channel Secret' };
+}
+function verifyLineAdminBindingStatus() {
+  const recipients = allLineAdminUserIds();
+  if (recipients.length) {
+    return {
+      key: 'line_admin_binding',
+      label: 'LINE Admin Binding',
+      status: 'ok',
+      note: `พร้อมแจ้งเตือนไปยังแอดมิน LINE ${recipients.length} บัญชี`,
+    };
+  }
+  return {
+    key: 'line_admin_binding',
+    label: 'LINE Admin Binding',
+    status: 'warn',
+    note: 'ยังไม่มีบัญชี LINE ที่ผูกเป็นแอดมินสำหรับรับ alert หรือใช้คำสั่งใน LINE OA',
+  };
+}
+function verifyLineRoomStatus() {
+  const check = lineWebRoomDiagnostics();
+  return check.ok
+    ? { key: 'line_room', label: 'LINE Web Room', status: 'ok', note: `พร้อมใช้งานที่ ${check.path}` }
+    : { key: 'line_room', label: 'LINE Web Room', status: 'warn', note: `line-room ยังไม่พร้อม: ${check.reason}` };
+}
+function verifyPaymentsStatus() {
+  const checks = [];
+  checks.push(
+    stripeClient() && cfg('STRIPE_WEBHOOK_SECRET')
+      ? { key: 'stripe', label: 'Stripe', status: 'ok', note: 'ตั้งค่า Stripe secret และ webhook secret แล้ว' }
+      : { key: 'stripe', label: 'Stripe', status: 'warn', note: 'Stripe ยังไม่ครบทั้ง secret และ webhook secret' },
+  );
+  checks.push(
+    cfg('PROMPTPAY_ID')
+      ? { key: 'promptpay', label: 'PromptPay', status: 'ok', note: 'พร้อมสร้าง QR PromptPay' }
+      : { key: 'promptpay', label: 'PromptPay', status: 'warn', note: 'ยังไม่ได้ตั้ง PromptPay ID' },
+  );
+  checks.push(
+    slipokConfig().enabled
+      ? { key: 'slipok', label: 'SlipOK', status: 'ok', note: 'พร้อมตรวจสลิปอัตโนมัติ' }
+      : { key: 'slipok', label: 'SlipOK', status: 'warn', note: 'ยังไม่ได้ตั้งค่า SlipOK ครบ' },
+  );
+  return checks;
+}
+function verifyMailStatus() {
+  return mailConfigured()
+    ? { key: 'mail', label: 'SMTP Mail', status: 'ok', note: 'พร้อมส่งอีเมลจากระบบหลังบ้าน' }
+    : { key: 'mail', label: 'SMTP Mail', status: 'warn', note: 'ยังไม่ได้ตั้งค่า SMTP host/user ครบ' };
+}
+function verifyConfigEncryptionStatus() {
+  return configEncryptionSecret()
+    ? { key: 'config_encryption', label: 'Secret Encryption', status: 'ok', note: 'secret ที่บันทึกผ่านหลังบ้านจะถูกเข้ารหัสก่อนเก็บลง settings' }
+    : { key: 'config_encryption', label: 'Secret Encryption', status: 'warn', note: 'ยังไม่พบ CONFIG_ENCRYPTION_KEY หรือ secret สำรองสำหรับเข้ารหัส config' };
+}
+async function buildConfigCenterVerification({ reason = 'manual', changedKeys = [], actor = {} } = {}) {
+  await ensureSettingsFresh(true);
+  const report = await runStartupValidation(reason);
+  const health = buildHealthSnapshot();
+  const checks = [
+    verifyLineSecretStatus(),
+    await verifyLineAccessTokenStatus(),
+    verifyLineAdminBindingStatus(),
+    verifyLineRoomStatus(),
+    ...verifyPaymentsStatus(),
+    verifyMailStatus(),
+    verifyConfigEncryptionStatus(),
+  ];
+  const errorCount = checks.filter((item) => item.status === 'error').length + Math.max(0, Number(report.errorCount || 0));
+  const warningCount = checks.filter((item) => item.status === 'warn').length + Math.max(0, Number(report.warningCount || 0));
+  const status = errorCount > 0 ? 'error' : (warningCount > 0 ? 'warn' : 'ok');
+  const revisionId = `cfg_${Date.now().toString(36)}`;
+  const result = {
+    revisionId,
+    status,
+    ok: status !== 'error',
+    checkedAt: Date.now(),
+    reason: String(reason || 'manual').trim(),
+    changedKeys: [...new Set((Array.isArray(changedKeys) ? changedKeys : []).map((item) => String(item || '').trim()).filter(Boolean))],
+    actor: {
+      userId: String(actor?.userId || '').trim(),
+      name: String(actor?.name || '').trim(),
+      email: String(actor?.email || '').trim(),
+    },
+    health,
+    validation: {
+      ok: Boolean(report.ok),
+      errorCount: Math.max(0, Number(report.errorCount || 0)),
+      warningCount: Math.max(0, Number(report.warningCount || 0)),
+      checkedAt: Number(report.checkedAt || 0),
+    },
+    checks,
+  };
+  await saveConfigCenterAudit(result);
+  return result;
+}
 function lineReplyMode(meta = {}) {
   return normalizeLineChatMode(meta?.replyMode || lineChatMode());
 }
@@ -815,10 +1507,16 @@ app.use((req, res, next) => {
   const localAssetOrigins = ' http://localhost:3005 http://127.0.0.1:3005';
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', isCropPreview ? 'SAMEORIGIN' : 'DENY');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  res.setHeader('Origin-Agent-Cluster', '?1');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('X-DNS-Prefetch-Control', 'off');
+  if (req.path.startsWith('/secure-admin') || req.path.startsWith('/api/admin')) {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
+  }
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'", "base-uri 'self'", "object-src 'none'", `frame-ancestors ${isCropPreview ? "'self'" : "'none'"}`,
     `img-src 'self' data: blob: https:${localAssetOrigins}`, `media-src 'self' https: data: blob:${localAssetOrigins}`,
@@ -845,23 +1543,71 @@ app.use(async (req, res, next) => {
     next(err);
   }
 });
+app.use(async (req, res, next) => {
+  const needsStoreContext = req.path === '/'
+    || req.path.startsWith('/api/')
+    || req.path.startsWith('/secure-admin')
+    || req.path.startsWith('/products')
+    || req.path.startsWith('/line-room')
+    || req.path.startsWith('/articles');
+  if (!needsStoreContext) return next();
+  try {
+    req.store = await resolveStoreForHost(extractRequestHost(req));
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 // rate limiting (กันบรูตฟอร์ซ/บอท) — เก็บใน memory
 const _rl = new Map();
-function rateLimit({ windowMs, max }) {
+function requestIp(req) {
+  return String(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'x').split(',')[0].trim() || 'x';
+}
+function rateLimit({ windowMs, max, name = 'route', keyFn } = {}) {
   return (req, res, next) => {
-    const k = (req.ip || 'x') + '|' + req.method + req.baseUrl + req.path;
+    const routePath = req.route?.path ? String(req.route.path) : req.path;
+    const actor = req.user?.id ? `u:${req.user.id}` : `ip:${requestIp(req)}`;
+    const k = typeof keyFn === 'function' ? keyFn(req) : `${name}|${actor}|${req.method}|${req.baseUrl || ''}${routePath}`;
     const now = Date.now();
     let b = _rl.get(k);
     if (!b || now > b.reset) { b = { n: 0, reset: now + windowMs }; _rl.set(k, b); }
+    const remaining = Math.max(0, max - (b.n + 1));
+    res.setHeader('X-RateLimit-Limit', String(max));
+    res.setHeader('X-RateLimit-Remaining', String(remaining));
+    res.setHeader('X-RateLimit-Reset', String(Math.ceil(b.reset / 1000)));
+    if (b.n + 1 > max) {
+      const retryAfter = Math.max(1, Math.ceil((b.reset - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfter));
+      void recordSystemEvent({
+        level: 'warn',
+        source: 'security',
+        type: 'rate_limited',
+        message: `Rate limit exceeded: ${name}`,
+        data: {
+          name,
+          method: req.method,
+          path: req.path,
+          ip: requestIp(req),
+          userId: req.user?.id || '',
+          storeId: req.store?.id || '',
+        },
+        alert: name === 'auth' || name === 'admin' || name === 'payment',
+        dedupeKey: `rate:${name}:${requestIp(req)}`,
+      }).catch(() => null);
+    }
     if (++b.n > max) return res.status(429).json({ error: 'คำขอถี่เกินไป กรุณาลองใหม่ในภายหลัง' });
     next();
   };
 }
-const authLimiter = rateLimit({ windowMs: 5 * 60000, max: 50 });
-const orderLimiter = rateLimit({ windowMs: 5 * 60000, max: 30 });
-const leadLimiter = rateLimit({ windowMs: 5 * 60000, max: 20 });
-const adminLimiter = rateLimit({ windowMs: 5 * 60000, max: 180 });
+const authLimiter = rateLimit({ windowMs: 5 * 60000, max: 25, name: 'auth' });
+const orderLimiter = rateLimit({ windowMs: 5 * 60000, max: 25, name: 'order' });
+const leadLimiter = rateLimit({ windowMs: 5 * 60000, max: 12, name: 'lead' });
+const adminLimiter = rateLimit({ windowMs: 5 * 60000, max: 240, name: 'admin' });
+const communityLimiter = rateLimit({ windowMs: 5 * 60000, max: 40, name: 'community' });
+const couponLimiter = rateLimit({ windowMs: 5 * 60000, max: 45, name: 'coupon' });
+const paymentLimiter = rateLimit({ windowMs: 5 * 60000, max: 15, name: 'payment' });
+const uploadLimiter = rateLimit({ windowMs: 5 * 60000, max: 20, name: 'upload' });
 setInterval(() => { const now = Date.now(); for (const [k, b] of _rl) if (now > b.reset) _rl.delete(k); }, 10 * 60000).unref?.();
 
 // ──────────────────── สถานะออเดอร์ ────────────────────
@@ -1142,7 +1888,7 @@ async function emitAdminInboxUpdate(payload = {}) {
   };
   return sendSupabaseBroadcast(ADMIN_INBOX_REALTIME_CHANNEL, 'inbox_update', safePayload);
 }
-async function routeCustomerMessage({ sessionId, name, text, via = 'rest', at = Date.now(), channel = 'web', metaPatch = {} }) {
+async function routeCustomerMessage({ sessionId, name, text, via = 'rest', at = Date.now(), channel = 'web', storeId = '', metaPatch = {} }) {
   const normalizedSessionId = normalizeChatSessionId(sessionId);
   const clean = String(text || '').trim().slice(0, 1000);
   if (!normalizedSessionId || !clean) return null;
@@ -1160,7 +1906,7 @@ async function routeCustomerMessage({ sessionId, name, text, via = 'rest', at = 
   // จังหวะ 1: งานเขียนอิสระต่อกัน — ยิงขนานลดเวลารอ (เดิมเรียงคิวทีละ round trip)
   await Promise.all([
     rememberLastActiveSession(normalizedSessionId),
-    saveMessage(normalizedSessionId, 'customer', clean, now),
+    saveMessage(normalizedSessionId, 'customer', clean, now, { storeId: storeId || metaPatch.storeId }),
     patchChatInboxMeta(normalizedSessionId, {
       visitorName,
       customerName: metaPatch.customerName || visitorName,
@@ -1170,6 +1916,7 @@ async function routeCustomerMessage({ sessionId, name, text, via = 'rest', at = 
       lastCustomerAt: now,
       lastMessageVia: via,
       ...metaPatch,
+      storeId: storeId || metaPatch.storeId,
     }),
   ]);
   // จังหวะ 2: แจ้งเตือน (หลังข้อความถูกเซฟแล้ว) — broadcast กับ LINE push ขนานกันได้
@@ -1191,8 +1938,9 @@ async function saveAdminReply(sessionId, text, options = {}) {
   if (channel === 'line_oa' && replyMode !== LINE_CHAT_MODE_WEB_ROOM) await deliverLineReply(normalizedSessionId, clean, meta);
   // เซฟข้อความ + รวม lastReadAt เข้า patch เดียว (เดิมแยก 2 ครั้ง = เขียนแถวเดิมซ้อนกันเอง)
   await Promise.all([
-    saveMessage(normalizedSessionId, 'admin', clean, at),
+    saveMessage(normalizedSessionId, 'admin', clean, at, { storeId: options.storeId || meta.storeId }),
     patchChatInboxMeta(normalizedSessionId, {
+      storeId: options.storeId || meta.storeId,
       lastReadAt: at,
       lastAdminAt: at,
       lastMessageVia: channel === 'line_oa' && replyMode !== LINE_CHAT_MODE_WEB_ROOM ? 'line_push' : 'admin_reply',
@@ -1285,16 +2033,16 @@ function clientAdminOrderSummary(order) {
     itemSummary: String(order.itemSummary || summarizeOrderItems(items)).trim(),
   };
 }
-async function enrichInboxSessionItem(item = {}) {
+async function enrichInboxSessionItem(item = {}, options = {}) {
   const sessionId = normalizeChatSessionId(item?.session_id || '');
   if (!sessionId) return null;
   const meta = chatInboxMetaMap()[sessionId] || {};
-  const linkedOrderRaw = await findLatestOrderBySessionId(sessionId);
+  const linkedOrderRaw = await findLatestOrderBySessionId(sessionId, { storeId: options.storeId });
   const linkedOrder = linkedOrderRaw ? clientAdminOrderSummary(linkedOrderRaw) : null;
   const lastReadAt = Number(meta.lastReadAt || 0);
   let unreadCount = 0;
   if (Number(item?.last_customer_at || 0) > lastReadAt) {
-    const recent = await listMessagesSince(sessionId, lastReadAt);
+    const recent = await listMessagesSince(sessionId, lastReadAt, { storeId: options.storeId });
     unreadCount = recent.filter((message) => message?.sender === 'customer').length;
   }
   return {
@@ -1641,6 +2389,8 @@ const { handleLineWebhookRequest } = createLineRuntime({
   statusLabel: STATUS_LABEL,
   applyOrderAction,
   adminUserId,
+  isLineAdminUserId: isAuthorizedLineAdminUserId,
+  redeemLineAdminBindCode,
   handleAdminMessage,
   ensureSettingsFresh,
   ensureLineWebhookEventIdempotency,
@@ -1690,8 +2440,31 @@ function denyAdminSurface(res) {
   setSensitiveNoStore(res);
   return res.status(404).type('text/plain').send('Not Found');
 }
-function requireOpaqueAdmin(req, res, next) {
-  const allowed = canAccessAdminShell(req.user);
+const BLOCKED_SOURCE_PATH_RE = /^\/(?:client-src|server|supabase|private-build|\.git|\.codex|node_modules|tmp)(?:\/|$)|^\/(?:package(?:-lock)?\.json|\.env(?:\..*)?|tsconfig\.json|vite\.config\.[cm]?js|vercel\.json)$/i;
+app.use((req, res, next) => {
+  if (BLOCKED_SOURCE_PATH_RE.test(req.path)) return denyAdminSurface(res);
+  next();
+});
+function requestHasBody(req) {
+  const contentLength = Number(req.headers['content-length'] || 0);
+  return contentLength > 0 || Boolean(req.headers['transfer-encoding']);
+}
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') || !['POST', 'PUT', 'PATCH'].includes(req.method)) return next();
+  if (req.path === '/api/integrations/line/webhook') return next();
+  if (requestHasBody(req) && !req.is('application/json') && !req.is('application/*+json')) {
+    setSensitiveNoStore(res);
+    return res.status(415).json({ error: 'Unsupported content type' });
+  }
+  if (req.body == null) return next();
+  if (typeof req.body !== 'object' || Array.isArray(req.body)) {
+    setSensitiveNoStore(res);
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+  next();
+});
+async function requireOpaqueAdmin(req, res, next) {
+  const allowed = await canAccessAdminSurface(req);
   // #region debug-point C:opaque-admin-gate
   reportServerDebug('C', 'server/index.js:requireOpaqueAdmin', `[DEBUG] opaque admin gate ${allowed ? 'allow' : 'deny'}`, {
     path: req.path,
@@ -1720,6 +2493,39 @@ app.use(express.static(publicDir, {
 app.use(authMiddleware);
 app.use('/api/auth', authLimiter);
 app.use('/api/admin', adminLimiter);
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  const method = String(req.method || 'GET').toUpperCase();
+  const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+  const shouldAudit = isWrite
+    || req.path.startsWith('/api/admin')
+    || req.path.startsWith('/api/auth')
+    || req.path.startsWith('/secure-admin');
+  if (!shouldAudit) return next();
+  res.on('finish', () => {
+    const status = Number(res.statusCode || 0);
+    if (!isWrite && status < 400) return;
+    void recordSystemEvent({
+      level: status >= 500 ? 'error' : (status >= 400 ? 'warn' : 'info'),
+      source: 'request_audit',
+      type: isWrite ? 'write_request' : 'sensitive_request',
+      message: `${method} ${req.path} -> ${status}`,
+      data: {
+        method,
+        path: req.path,
+        status,
+        durationMs: Date.now() - startedAt,
+        ip: requestIp(req),
+        userId: req.user?.id || '',
+        userRole: req.user?.role || '',
+        storeId: req.store?.id || '',
+      },
+      alert: status === 401 || status === 403 || status === 429 || status >= 500,
+      dedupeKey: status >= 400 ? `audit:${method}:${req.path}:${status}:${requestIp(req)}` : '',
+    }).catch(() => null);
+  });
+  next();
+});
 
 app.get(/^\/secure-admin(?:\/.*)?$/, requireOpaqueAdmin, (_req, res) => {
   setSensitiveNoStore(res);
@@ -1875,6 +2681,7 @@ app.get('/api/line/web-room-entry/:token', async (req, res) => {
 const chatLimiter = rateLimit({ windowMs: 60000, max: 60 });
 const chatPollLimiter = rateLimit({ windowMs: 60000, max: 60 });
 app.post('/api/chat/send', chatLimiter, async (req, res) => {
+  const store = await getRequestStore(req);
   const b = req.body || {};
   let sessionId = normalizeChatSessionId(b.sessionId || b.session_id || b.website_session_id || '');
   if (!CHAT_SESSION_ID_RE.test(sessionId)) sessionId = makeChatSessionId();
@@ -1882,29 +2689,33 @@ app.post('/api/chat/send', chatLimiter, async (req, res) => {
   const name = String(b.name || '').trim().slice(0, 40) || `ลูกค้า-${sessionId}`;
   const at = Number(b.at || Date.now()) || Date.now();
   if (!text) return res.status(400).json({ error: 'ไม่มีข้อความ' });
-  const message = await routeCustomerMessage({ sessionId, name, text, via: 'rest', at });
+  const message = await routeCustomerMessage({ sessionId, name, text, via: 'rest', at, storeId: store?.id });
   res.json({ ok: true, sessionId, message: { from: 'customer', text, at: message?.at || at } });
 });
 app.get('/api/chat/history', chatPollLimiter, async (req, res) => {
+  const store = await getRequestStore(req);
   const sessionId = normalizeChatSessionId(req.query.session || '');
   const limit = Math.min(300, Math.max(1, parseInt(req.query.limit, 10) || 200));
   if (!sessionId) return res.json({ sessionId: '', messages: [], now: Date.now() });
-  const messages = publicChatMessages(await listChatMessages(sessionId, limit));
+  const messages = publicChatMessages(await listChatMessages(sessionId, limit, { storeId: store?.id }));
   res.json({ sessionId, messages, now: Date.now() });
 });
 app.post('/api/chat/read', chatLimiter, async (req, res) => {
+  const store = await getRequestStore(req);
   const b = req.body || {};
   const sessionId = normalizeChatSessionId(b.sessionId || b.session_id || b.website_session_id || '');
   const at = Number(b.at || Date.now()) || Date.now();
   if (!sessionId) return res.json({ ok: true });
   await markChatSessionVisitorRead(sessionId, at);
+  if (store?.id) await patchChatInboxMeta(sessionId, { storeId: store.id });
   res.json({ ok: true, sessionId, at });
 });
 app.get('/api/chat/poll', chatPollLimiter, async (req, res) => {
+  const store = await getRequestStore(req);
   const sessionId = normalizeChatSessionId(req.query.session || '');
   const after = parseInt(req.query.after, 10) || 0;
   if (!sessionId) return res.json({ messages: [], now: Date.now() });
-  const rows = await listMessagesSince(sessionId, after);
+  const rows = await listMessagesSince(sessionId, after, { storeId: store?.id });
   // ส่งกลับเฉพาะข้อความที่ไม่ใช่ของ visitor เอง (คำตอบแอดมิน/ระบบ)
   const messages = rows.filter((m) => m.sender !== 'customer').map((m) => ({ from: m.sender, text: m.text, at: m.at }));
   res.json({ messages, now: Date.now() });
@@ -1983,6 +2794,124 @@ function siteValue(k) { return settingsCache[k] || SITE_DEFAULTS[k]; }
 const siteConfig = () => Object.fromEntries(SITE_KEYS.map((k) => [k, siteValue(k)]));
 const sitePublicConfig = () => Object.fromEntries(SITE_PUBLIC_KEYS.map((k) => [k, siteValue(k)]));
 const siteHeavyConfig = () => Object.fromEntries(SITE_HEAVY_KEYS.map((k) => [k, siteValue(k)]));
+function siteValueFromOverrides(k, overrides = {}) {
+  const next = overrides && Object.prototype.hasOwnProperty.call(overrides, k) ? overrides[k] : undefined;
+  return next !== undefined && next !== null && next !== '' ? next : siteValue(k);
+}
+function siteConfigWithOverrides(overrides = {}, keys = SITE_KEYS) {
+  return Object.fromEntries(keys.map((key) => [key, siteValueFromOverrides(key, overrides)]));
+}
+async function siteOverridesForRequest(req) {
+  const storeSettings = await getRequestStoreSettings(req);
+  return storeSettings && typeof storeSettings === 'object' ? storeSettings : {};
+}
+function tenantRootDomain(req) {
+  return rootDomainFromPublicUrl(process.env.MULTITENANT_ROOT_DOMAIN || siteValue('PUBLIC_URL'), extractRequestHost(req));
+}
+function currentStorePublicUrl(req, store = req?.store) {
+  if (!store?.subdomain) return siteValue('PUBLIC_URL');
+  const protocol = req?.secure ? 'https' : (String(req?.headers?.['x-forwarded-proto'] || '').includes('https') ? 'https' : 'http');
+  return buildStorePublicUrl({
+    subdomain: store.subdomain,
+    rootDomain: tenantRootDomain(req),
+    protocol,
+    port: protocol === 'http' && /localhost$/i.test(tenantRootDomain(req)) ? PORT : '',
+  }) || siteValue('PUBLIC_URL');
+}
+function storeHostFromPublicUrl(publicUrl = '', fallbackHost = '') {
+  try { return new URL(publicUrl).host.toLowerCase(); }
+  catch { return String(fallbackHost || '').trim().toLowerCase(); }
+}
+const STORE_TENANT_TABLES = ['products', 'orders', 'reviews', 'leads', 'payment_logs', 'members', 'messages', 'articles', 'coupons', 'store_settings'];
+async function provisionStoreDatabase(store, { req, publicUrl = '' } = {}) {
+  if (!store?.id) return null;
+  const database = await createStoreDatabase(store.id, {
+    namespace: store.id,
+    tenantTables: STORE_TENANT_TABLES,
+    metadata: {
+      source: 'admin_create_store',
+      storeName: store.name || '',
+      subdomain: store.subdomain || '',
+      publicUrl: publicUrl || '',
+      createdFromHost: req ? extractRequestHost(req) : '',
+    },
+  });
+  await recordSystemEvent({
+    level: 'info',
+    source: 'multi_tenant',
+    type: 'store_database_ready',
+    message: `Database namespace ${database?.databaseKey || store.id} ready for store ${store.id}`,
+    data: {
+      storeId: store.id,
+      databaseKey: database?.databaseKey || '',
+      namespace: database?.namespace || '',
+      provider: database?.provider || '',
+      tenantTables: database?.tenantTables || [],
+    },
+    dedupeKey: `store_database:${store.id}`,
+  });
+  return database;
+}
+function storeTemplateSettings(templateKey = '', storeName = '') {
+  const key = String(templateKey || 'blank').trim();
+  const name = String(storeName || '').trim();
+  const map = {
+    blank: {},
+    agri: {
+      SITE_HERO_TITLE: `${name || 'ร้านใหม่'} - อาหารเสริมพืชและคำแนะนำครบ`,
+      SITE_HERO_SUBTITLE: 'จัดร้านให้พร้อมขายสินค้าเกษตร พร้อมพื้นที่ความรู้และรีวิวจากลูกค้าจริง',
+      SITE_PRODUCT_INTRO: 'เลือกสินค้าแนะนำสำหรับพืชของคุณ',
+    },
+    pod: {
+      SITE_HERO_TITLE: `${name || 'ร้านใหม่'} - พอตพร้อมส่งดีไซน์พรีเมียม`,
+      SITE_HERO_SUBTITLE: 'หน้าร้านสะอาด เลือกซื้อง่าย พร้อมระบบติดตามออเดอร์และแชต',
+      SITE_PRODUCT_INTRO: 'รวมสินค้าแนะนำและโปรโมชันพร้อมส่ง',
+    },
+    course: {
+      SITE_HERO_TITLE: `${name || 'ร้านใหม่'} - แหล่งเรียนรู้และคอร์สออนไลน์`,
+      SITE_HERO_SUBTITLE: 'ขายคอร์ส แบ่งปันประสบการณ์ และสร้างชุมชนผู้เรียนในที่เดียว',
+      SITE_PRODUCT_INTRO: 'เลือกคอร์สหรือแพ็กเกจที่เหมาะกับคุณ',
+    },
+  };
+  return map[key] || {};
+}
+async function provisionStoreDomain({ req, store, host, isPrimary = true } = {}) {
+  const normalizedHost = String(host || '').trim().toLowerCase();
+  if (!store?.id || !normalizedHost) {
+    return { ok: false, status: 'error', verified: false, message: 'missing store/domain' };
+  }
+  const result = await provisionVercelProjectDomain(normalizedHost).catch((err) => ({
+    ok: false,
+    status: 'error',
+    domain: normalizedHost,
+    verified: false,
+    message: err?.message || String(err),
+  }));
+  await addStoreDomain(store.id, normalizedHost, {
+    isPrimary,
+    verified: result.ok === true,
+  });
+  await recordSystemEvent({
+    level: result.ok ? 'info' : (result.status === 'skipped' ? 'warn' : 'error'),
+    source: 'multi_tenant',
+    type: result.ok ? 'store_domain_ready' : 'store_domain_pending',
+    message: result.ok
+      ? `Domain ${normalizedHost} ready for store ${store.id}`
+      : `Domain ${normalizedHost} provisioning pending for store ${store.id}: ${result.message || result.status}`,
+    data: {
+      storeId: store.id,
+      host: normalizedHost,
+      status: result.status || '',
+      verified: result.verified === true,
+      misconfigured: result.misconfigured === true,
+      configuredBy: result.configuredBy || '',
+      triggeredFromHost: req ? extractRequestHost(req) : '',
+    },
+    alert: result.status === 'error',
+    dedupeKey: `store_domain:${store.id}:${normalizedHost}:${result.status || 'unknown'}`,
+  });
+  return result;
+}
 function siteRealtimeConfig() {
   const env = supabaseEnv();
   return {
@@ -2144,20 +3073,23 @@ async function computeOnTimeHybridRate() {
 }
 
 // คำนวณตัวเลขสถิติหน้าเกี่ยวกับเรา — รองรับ 'auto' (คำนวณจากข้อมูลจริง) หรือเลขที่ตั้งเอง
-async function computeSiteStats() {
-  const cacheFresh = siteStatsCache && (Date.now() - siteStatsCacheAt) < SITE_STATS_CACHE_TTL_MS;
+async function computeSiteStats(options = {}) {
+  const scopedStoreId = String(options.storeId || '').trim();
+  const overrides = options.overrides && typeof options.overrides === 'object' ? options.overrides : {};
+  const cacheFresh = !scopedStoreId && siteStatsCache && (Date.now() - siteStatsCacheAt) < SITE_STATS_CACHE_TTL_MS;
   if (cacheFresh) return siteStatsCache;
-  if (siteStatsCachePromise) return siteStatsCachePromise;
-  siteStatsCachePromise = (async () => {
-  const manual = (k, fb) => { const n = parseFloat(siteValue(k)); return Number.isFinite(n) ? n : fb; };
+  if (!scopedStoreId && siteStatsCachePromise) return siteStatsCachePromise;
+  const runner = (async () => {
+  const scopedSiteValue = (key) => siteValueFromOverrides(key, overrides);
+  const manual = (k, fb) => { const n = parseFloat(scopedSiteValue(k)); return Number.isFinite(n) ? n : fb; };
   const farmersBase = manual('SITE_STAT_FARMERS', 0);
   let products = manual('SITE_STAT_PRODUCTS', 0);
   let rating = manual('SITE_STAT_RATING', 0);
   let farmers = farmersBase;
   let ontime = Math.min(100, Math.max(0, Math.round(manual('SITE_STAT_ONTIME', 0))));
-  if (siteValue('SITE_STAT_PRODUCTS') === 'auto') products = await countProducts(false);
-  if (siteValue('SITE_STAT_RATING') === 'auto') {
-    const stats = await allReviewStats();
+  if (scopedSiteValue('SITE_STAT_PRODUCTS') === 'auto') products = await countProducts(false, { storeId: scopedStoreId });
+  if (scopedSiteValue('SITE_STAT_RATING') === 'auto') {
+    const stats = await allReviewStats({ storeId: scopedStoreId });
     let sum = 0, cnt = 0;
     for (const s of Object.values(stats)) { sum += (s.avg || 0) * (s.count || 0); cnt += (s.count || 0); }
     rating = cnt ? Math.round((sum / cnt) * 10) / 10 : 5.0;   // ยังไม่มีรีวิว → แสดง 5.0
@@ -2170,25 +3102,40 @@ async function computeSiteStats() {
     rating: Math.min(5, Math.max(0, rating)),
     ontime: Math.min(100, Math.max(0, Math.round(ontime))),
   };
-  siteStatsCache = result;
-  siteStatsCacheAt = Date.now();
+  if (!scopedStoreId) {
+    siteStatsCache = result;
+    siteStatsCacheAt = Date.now();
+  }
   return result;
-  })().finally(() => { siteStatsCachePromise = null; });
+  })();
+  if (scopedStoreId) return runner;
+  siteStatsCachePromise = runner.finally(() => { siteStatsCachePromise = null; });
   return siteStatsCachePromise;
 }
-app.get('/api/site', async (_req, res) => {
+app.get('/api/site', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  const productCategories = await resolvedPublicProductCategories();
+  const store = await getRequestStore(req);
+  const overrides = await siteOverridesForRequest(req);
+  const productCategories = await resolvedPublicProductCategories({ storeId: store?.id, overrides });
   res.json({
-    ...sitePublicConfig(),
+    ...siteConfigWithOverrides(overrides, SITE_PUBLIC_KEYS),
     ...siteRealtimeConfig(),
     SITE_PRODUCT_CATEGORIES: JSON.stringify(productCategories),
-    stats: await computeSiteStats(),
+    stats: await computeSiteStats({ storeId: store?.id, overrides }),
+    store: store ? {
+      id: store.id,
+      name: store.name,
+      slug: store.slug,
+      subdomain: store.subdomain,
+      primaryDomain: store.primaryDomain,
+      publicUrl: currentStorePublicUrl(req, store),
+    } : null,
   });
 });
-app.get('/api/site/content', async (_req, res) => {
+app.get('/api/site/content', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json(siteHeavyConfig());
+  const overrides = await siteOverridesForRequest(req);
+  res.json(siteConfigWithOverrides(overrides, SITE_HEAVY_KEYS));
 });
 app.get('/api/reviews/gallery', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -2350,26 +3297,30 @@ function normalizeProductForClient(product = {}) {
     model: normalizeProductModelValue(product?.model || ''),
   };
 }
-async function resolvedPublicProductCategories() {
-  const configured = parseProductCategorySettings(siteValue('SITE_PRODUCT_CATEGORIES'));
-  const liveProducts = await listProducts(false);
+async function resolvedPublicProductCategories(options = {}) {
+  const storeId = String(options.storeId || '').trim();
+  const overrides = options.overrides && typeof options.overrides === 'object' ? options.overrides : {};
+  const configured = parseProductCategorySettings(siteValueFromOverrides('SITE_PRODUCT_CATEGORIES', overrides));
+  const liveProducts = await listProducts(false, { storeId });
   const live = liveProducts.map((item) => inferProductCategoryValue(item)).filter(Boolean);
   return [...new Set([...configured, ...live])];
 }
-async function replaceProductCategoryAcrossCatalog({ sourceCategory = '', targetCategory = '', mode = 'merge' } = {}) {
+async function replaceProductCategoryAcrossCatalog({ sourceCategory = '', targetCategory = '', mode = 'merge', storeId = '' } = {}) {
+  const normalizedStoreId = String(storeId || '').trim();
   const source = normalizeProductCategoryValue(sourceCategory);
   const target = normalizeProductCategoryValue(targetCategory) || String(targetCategory || '').trim();
   if (!source) throw new Error('กรุณาเลือกหมวดหมู่ต้นทาง');
   if (!target) throw new Error('กรุณาระบุหมวดหมู่ปลายทาง');
   if (source === target) throw new Error(mode === 'rename' ? 'ชื่อหมวดหมู่ใหม่ต้องไม่ซ้ำกับชื่อเดิม' : 'หมวดต้นทางและปลายทางต้องไม่ซ้ำกัน');
 
-  const products = await listProducts(true);
+  const products = await listProducts(true, { storeId: normalizedStoreId });
   let updatedProducts = 0;
   for (const product of products) {
     if (inferProductCategoryValue(product) !== source) continue;
     const extra = ensureProductCategoryExtra(product?.extra, product);
     extra.category = target;
     await updateProduct(product.id, {
+      storeId: normalizedStoreId || product.storeId,
       extra,
       tag: sanitizeProductTag(product),
       model: normalizeProductModelValue(product?.model || ''),
@@ -2377,7 +3328,8 @@ async function replaceProductCategoryAcrossCatalog({ sourceCategory = '', target
     updatedProducts += 1;
   }
 
-  const currentCategories = parseProductCategorySettings(await getSetting('SITE_PRODUCT_CATEGORIES'));
+  const storeOverrides = normalizedStoreId ? await allStoreSettings(normalizedStoreId).catch(() => ({})) : {};
+  const currentCategories = parseProductCategorySettings(siteValueFromOverrides('SITE_PRODUCT_CATEGORIES', storeOverrides));
   const sourceIndex = currentCategories.indexOf(source);
   let nextCategories = currentCategories.slice();
   if (mode === 'rename') {
@@ -2391,8 +3343,11 @@ async function replaceProductCategoryAcrossCatalog({ sourceCategory = '', target
   }
   nextCategories = [...new Set(nextCategories.map((item) => normalizeProductCategoryValue(item)).filter(Boolean))];
   if (!nextCategories.length) nextCategories = parseProductCategorySettings(SITE_DEFAULTS.SITE_PRODUCT_CATEGORIES);
-  await setSetting('SITE_PRODUCT_CATEGORIES', serializeProductCategorySettings(nextCategories));
-  await ensureSettingsFresh(true);
+  if (normalizedStoreId) await setStoreSetting(normalizedStoreId, 'SITE_PRODUCT_CATEGORIES', serializeProductCategorySettings(nextCategories));
+  else {
+    await setSetting('SITE_PRODUCT_CATEGORIES', serializeProductCategorySettings(nextCategories));
+    await ensureSettingsFresh(true);
+  }
   return { sourceCategory: source, targetCategory: target, updatedProducts, categories: nextCategories };
 }
 function orderEmailHTML(o, heading) {
@@ -2417,7 +3372,8 @@ app.post('/api/auth/register', async (req, res) => {
   if (String(password).length < 6) return res.status(400).json({ error: 'รหัสผ่านอย่างน้อย 6 ตัวอักษร' });
   if (await getUserByEmail(email)) return res.status(409).json({ error: 'อีเมลนี้ถูกใช้แล้ว' });
   const { salt, hash } = hashPassword(password);
-  const user = await createUser({ id: 'u_' + crypto.randomBytes(6).toString('hex'), email: String(email).toLowerCase(), name: (name || '').trim() || String(email).split('@')[0], salt, hash, role: ROLE_USER });
+  const displayName = (name || '').trim() || String(email).split('@')[0];
+  const user = await createUser({ id: 'u_' + crypto.randomBytes(6).toString('hex'), email: String(email).toLowerCase(), name: displayName, username: displayName, avatar: '', salt, hash, role: ROLE_USER });
   const token = newToken(); await createToken(token, user.id);
   writeSessionCookies(req, res, { token, adminGrant: '' });
   res.json({ user: publicUser(user) });
@@ -2452,7 +3408,37 @@ app.post('/api/auth/login', async (req, res) => {
   // #endregion
   res.json({ user: publicUser(resolvedUser) });
 });
-app.get('/api/auth/me', (req, res) => { setSensitiveNoStore(res); res.json({ user: publicUser(req.user) }); });
+app.get('/api/auth/me', async (req, res) => {
+  setSensitiveNoStore(res);
+  const user = publicUser(req.user);
+  if (user?.id) {
+    user.storeRoles = await listUserStoreRoles(user.id).catch(() => []);
+  }
+  res.json({ user });
+});
+app.put('/api/account/profile', requireAuth, async (req, res) => {
+  setSensitiveNoStore(res);
+  try {
+    const body = req.body || {};
+    const name = String(body.name || '').trim().slice(0, 80);
+    const username = String(body.username || '')
+      .trim()
+      .replace(/^@+/, '')
+      .replace(/[^\p{L}\p{N}._-]+/gu, '')
+      .slice(0, 32);
+    let avatar = String(body.avatar || req.user.avatar || '').trim();
+    if (avatar.startsWith('data:')) avatar = await saveAsset(avatar);
+    const bio = String(body.bio || '').trim().slice(0, 180);
+    const lineId = String(body.lineId || body.line_id || '').trim().replace(/^@+/, '').slice(0, 40);
+    const phone = String(body.phone || '').trim().replace(/[^\d+\-\s()]/g, '').slice(0, 32);
+    const location = String(body.location || '').trim().slice(0, 80);
+    if (!name) return res.status(400).json({ error: 'กรุณากรอกชื่อโปรไฟล์' });
+    const user = await updateUser(req.user.id, { name, username: username || name, avatar, bio, line_id: lineId, phone, location, role: req.user.role });
+    res.json({ ok: true, user: publicUser(user) });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'บันทึกโปรไฟล์ไม่สำเร็จ' });
+  }
+});
 app.post('/api/auth/logout', async (req, res) => {
   setSensitiveNoStore(res);
   if (req.token) await deleteToken(req.token);
@@ -2461,31 +3447,176 @@ app.post('/api/auth/logout', async (req, res) => {
 });
 
 // ──────────── products (public) ────────────
-app.get('/api/products', async (_req, res) => {
-  const st = await allReviewStats(); const sale = saleConfig();
-  res.json((await listProducts(false)).map((p) => {
+app.get('/api/products', async (req, res) => {
+  const store = await getRequestStore(req);
+  const st = await allReviewStats({ storeId: store?.id }); const sale = saleConfig();
+  res.json((await listProducts(false, { storeId: store?.id })).map((p) => {
     const item = normalizeProductForClient(p);
     return { ...item, rating: st[item.id]?.avg || 0, reviews: st[item.id]?.count || 0, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item) : 0) };
   }));
 });
 app.get('/api/products/:id', async (req, res) => {
-  const p = await getProduct(req.params.id);
+  const store = await getRequestStore(req);
+  const p = await getProduct(req.params.id, { storeId: store?.id });
   if (!p || !p.active) return res.status(404).json({ error: 'ไม่พบสินค้า' });
-  const s = await reviewStats(p.id); const sale = saleConfig();
+  const s = await reviewStats(p.id, { storeId: store?.id }); const sale = saleConfig();
   const item = normalizeProductForClient(p);
   res.json({ ...item, rating: s.avg, reviews: s.count, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item) : 0) });
 });
 
 // ──────────── articles (public) ────────────
-app.get('/api/articles', async (_req, res) => res.json(await listArticles(false)));
+app.get('/api/articles', async (req, res) => {
+  const store = await getRequestStore(req);
+  res.json(await listArticles(false, { storeId: store?.id }));
+});
 app.get('/api/articles/:id', async (req, res) => {
-  const a = await getArticle(req.params.id);
+  const store = await getRequestStore(req);
+  const a = await getArticle(req.params.id, { storeId: store?.id });
   if (!a || !a.published) return res.status(404).json({ error: 'ไม่พบบทความ' });
   res.json(a);
 });
 
+// ──────────── community / learning platform ────────────
+function communityViewerId(req) {
+  return String(req.user?.id || '').trim();
+}
+function communityAuthorName(req) {
+  return String(req.user?.username || req.user?.name || req.user?.email || 'สมาชิก').trim().slice(0, 80);
+}
+function communityAuthorAvatar(req) {
+  return String(req.user?.avatar || '').trim();
+}
+function normalizeCommunityHashtags(value = []) {
+  const list = Array.isArray(value) ? value : String(value || '').split(/[,\s#]+/);
+  return [...new Set(list.map((item) => String(item || '').trim().replace(/^#/, '')).filter(Boolean).slice(0, 12))];
+}
+function normalizeCommunityMedia(media = []) {
+  const list = Array.isArray(media) ? media : [];
+  return list.map((item) => {
+    if (typeof item === 'string') return { type: 'image', url: item };
+    return { type: item?.type === 'video' ? 'video' : 'image', url: String(item?.url || '').trim() };
+  }).filter((item) => item.url).slice(0, 8);
+}
+async function resolveCommunityMedia(media = []) {
+  const list = normalizeCommunityMedia(media);
+  const next = [];
+  for (const item of list) {
+    let url = item.url;
+    if (typeof url === 'string' && url.startsWith('data:')) url = await saveAsset(url);
+    next.push({ ...item, url });
+  }
+  return next;
+}
+app.get('/api/community', async (req, res) => {
+  const store = await getRequestStore(req);
+  const limit = Math.min(60, Math.max(1, Number(req.query.limit || 30) || 30));
+  await seedCommunityFromArticles({ storeId: store?.id, all: false }).catch(() => null);
+  const posts = await listCommunityPosts({ storeId: store?.id, viewerId: communityViewerId(req), limit });
+  res.json({ posts });
+});
+app.get('/api/community/stories', async (req, res) => {
+  const store = await getRequestStore(req);
+  await seedCommunityFromArticles({ storeId: store?.id, all: false }).catch(() => null);
+  res.json({ stories: await listCommunityStories({ storeId: store?.id, limit: 50 }) });
+});
+app.post('/api/community/posts', communityLimiter, requireAuth, async (req, res) => {
+  try {
+    const store = await getRequestStore(req);
+    const body = req.body || {};
+    const caption = String(body.caption || '').trim().slice(0, 2000);
+    const media = await resolveCommunityMedia(body.media || []);
+    if (!caption && !media.length) return res.status(400).json({ error: 'กรุณาใส่ข้อความหรือรูปภาพ' });
+    const admin = isAdminRole(req.user?.role);
+    const post = await createCommunityPost({
+      storeId: store?.id,
+      userId: req.user.id,
+      authorName: communityAuthorName(req),
+      authorAvatar: communityAuthorAvatar(req),
+      authorRole: admin ? 'admin' : 'member',
+      caption,
+      media,
+      hashtags: normalizeCommunityHashtags(body.hashtags),
+      productIds: Array.isArray(body.productIds) ? body.productIds : [],
+      status: admin ? 'approved' : 'pending',
+      pinned: false,
+    });
+    res.json({ ok: true, post, pending: post?.status === 'pending' });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+app.get('/api/community/posts/:id/comments', async (req, res) => {
+  const store = await getRequestStore(req);
+  res.json({ comments: await listCommunityComments(req.params.id, { storeId: store?.id, limit: 100 }) });
+});
+app.post('/api/community/posts/:id/comments', communityLimiter, requireAuth, async (req, res) => {
+  const store = await getRequestStore(req);
+  const text = String(req.body?.text || '').trim().slice(0, 1000);
+  if (!text) return res.status(400).json({ error: 'กรุณาใส่คอมเมนต์' });
+  const comment = await createCommunityComment(req.params.id, { storeId: store?.id, userId: req.user.id, authorName: communityAuthorName(req), text });
+  if (!comment) return res.status(404).json({ error: 'ไม่พบโพสต์' });
+  res.json({ ok: true, comment, comments: await listCommunityComments(req.params.id, { storeId: store?.id, limit: 100 }) });
+});
+app.post('/api/community/posts/:id/reaction', communityLimiter, requireAuth, async (req, res) => {
+  const store = await getRequestStore(req);
+  const active = req.body?.active !== false;
+  const post = await setCommunityReaction(req.params.id, req.user.id, 'like', active, { storeId: store?.id });
+  if (!post) return res.status(404).json({ error: 'ไม่พบโพสต์' });
+  res.json({ ok: true, post });
+});
+app.post('/api/community/posts/:id/save', communityLimiter, requireAuth, async (req, res) => {
+  const store = await getRequestStore(req);
+  const active = req.body?.active !== false;
+  const post = await setCommunitySave(req.params.id, req.user.id, active, { storeId: store?.id });
+  if (!post) return res.status(404).json({ error: 'ไม่พบโพสต์' });
+  res.json({ ok: true, post });
+});
+app.get('/api/admin/community', requireStoreScopedAccess('staff'), async (req, res) => {
+  const { storeId } = adminStoreScope(req);
+  const [posts, stories] = await Promise.all([
+    listCommunityPosts({ storeId, all: true, limit: 100 }),
+    listCommunityStories({ storeId, all: true, limit: 100 }),
+  ]);
+  res.json({ posts, stories });
+});
+app.post('/api/admin/community/seed', requireStoreScopedAccess('staff'), async (req, res) => {
+  const result = await seedCommunityFromArticles({ ...adminStoreScope(req), all: true });
+  res.json({ ok: true, ...result });
+});
+app.put('/api/admin/community/posts/:id', requireStoreScopedAccess('staff'), async (req, res) => {
+  const post = await updateCommunityPostStatus(req.params.id, { ...adminStoreScope(req), status: req.body?.status, pinned: !!req.body?.pinned });
+  if (!post) return res.status(404).json({ error: 'ไม่พบโพสต์' });
+  res.json({ ok: true, post });
+});
+app.delete('/api/admin/community/posts/:id', requireStoreScopedAccess('staff'), async (req, res) => {
+  await deleteCommunityPost(req.params.id, adminStoreScope(req));
+  res.json({ ok: true });
+});
+app.post('/api/admin/community/stories', requireStoreScopedAccess('staff'), async (req, res) => {
+  try {
+    const body = req.body || {};
+    let media = String(body.media || '').trim();
+    if (media.startsWith('data:')) media = await saveAsset(media);
+    if (!media) return res.status(400).json({ error: 'กรุณาใส่รูปสตอรี่' });
+    const story = await createCommunityStory({
+      ...adminStoreScope(req),
+      postId: body.postId || '',
+      authorName: body.authorName || 'ทีมจูนนุชฟอร์ไลฟ์',
+      title: body.title || '',
+      media,
+      caption: body.caption || '',
+      status: body.status || 'approved',
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    });
+    res.json({ ok: true, story });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+app.delete('/api/admin/community/stories/:id', requireStoreScopedAccess('staff'), async (req, res) => {
+  await deleteCommunityStory(req.params.id, adminStoreScope(req));
+  res.json({ ok: true });
+});
+
 // ──────────── leads / consultation ────────────
 app.post('/api/leads', leadLimiter, async (req, res) => {
+  const store = await getRequestStore(req);
   const b = req.body || {};
   const name = String(b.name || '').trim().slice(0, 80);
   const phone = String(b.phone || '').trim().slice(0, 30);
@@ -2506,6 +3637,7 @@ app.post('/api/leads', leadLimiter, async (req, res) => {
     utmCampaign: String(b.utmCampaign || '').trim().slice(0, 80),
     note: '',
     status: 'new',
+    storeId: store?.id,
   });
   await pushToAdmin([
     '🌱 มีลีดใหม่จากเว็บไซต์',
@@ -2527,27 +3659,31 @@ app.post('/api/leads', leadLimiter, async (req, res) => {
 
 // ──────────── reviews ────────────
 app.get('/api/products/:id/reviews', async (req, res) => {
-  res.json({ reviews: await listReviews(req.params.id), stats: await reviewStats(req.params.id) });
+  const store = await getRequestStore(req);
+  res.json({ reviews: await listReviews(req.params.id, { storeId: store?.id }), stats: await reviewStats(req.params.id, { storeId: store?.id }) });
 });
 app.post('/api/products/:id/reviews', requireAuth, async (req, res) => {
-  const p = await getProduct(req.params.id);
+  const store = await getRequestStore(req);
+  const p = await getProduct(req.params.id, { storeId: store?.id });
   if (!p) return res.status(404).json({ error: 'ไม่พบสินค้า' });
   const rating = Math.max(1, Math.min(5, parseInt(req.body?.rating, 10) || 0));
   if (!rating) return res.status(400).json({ error: 'กรุณาให้คะแนน 1–5 ดาว' });
-  if (await userReviewed(p.id, req.user.id)) return res.status(409).json({ error: 'คุณรีวิวสินค้านี้ไปแล้ว' });
-  await addReview(p.id, req.user.id, req.user.name || req.user.email, rating, (req.body?.comment || '').slice(0, 500));
-  res.json({ ok: true, reviews: await listReviews(p.id), stats: await reviewStats(p.id) });
+  if (await userReviewed(p.id, req.user.id, { storeId: store?.id })) return res.status(409).json({ error: 'คุณรีวิวสินค้านี้ไปแล้ว' });
+  await addReview(p.id, req.user.id, req.user.name || req.user.email, rating, (req.body?.comment || '').slice(0, 500), { storeId: store?.id });
+  res.json({ ok: true, reviews: await listReviews(p.id, { storeId: store?.id }), stats: await reviewStats(p.id, { storeId: store?.id }) });
 });
 
 // ──────────── orders ────────────
-app.post('/api/coupons/validate', async (req, res) => {
+app.post('/api/coupons/validate', couponLimiter, async (req, res) => {
+  const store = await getRequestStore(req);
   const { code, subtotal } = req.body || {};
-  const r = await evalCoupon(code, parseInt(subtotal, 10) || 0);
+  const r = await evalCoupon(code, parseInt(subtotal, 10) || 0, { storeId: store?.id });
   if (!r.ok) return res.status(400).json({ error: r.error });
   res.json({ ok: true, discount: r.discount, coupon: r.coupon });
 });
 
 app.post('/api/orders', orderLimiter, async (req, res) => {
+  const store = await getRequestStore(req);
   const { items, customer, payment, sessionId, coupon } = req.body || {};
   try {
     const result = await orderService.createCheckoutOrder({
@@ -2557,7 +3693,8 @@ app.post('/api/orders', orderLimiter, async (req, res) => {
       sessionId,
       coupon,
       userId: req.user?.id || '',
-      baseUrl: cfg('PUBLIC_URL') || `${req.protocol}://${req.get('host')}`,
+      storeId: store?.id,
+      baseUrl: currentStorePublicUrl(req, store) || cfg('PUBLIC_URL') || `${req.protocol}://${req.get('host')}`,
       channel: 'web',
     });
     res.json({ ok: true, order: clientOrder(result.order), accessToken: result.accessToken, checkoutUrl: result.checkoutUrl, promptpay: result.promptpay });
@@ -2581,21 +3718,21 @@ app.get('/api/orders/:id/promptpay-qr', async (req, res) => {
   res.setHeader('Cache-Control', 'private, max-age=60');
   res.end(buffer);
 });
-app.post('/api/orders/:id/notify-payment', async (req, res) => {
+app.post('/api/orders/:id/notify-payment', paymentLimiter, async (req, res) => {
   const o = await expireOrderIfNeeded(await getOrder(req.params.id));
   if (!o || !canAccessOrder(req, o)) return res.status(404).json({ error: 'ไม่พบคำสั่งซื้อ' });
   if (o.status === 'expired') return res.status(410).json({ error: 'ออเดอร์นี้หมดเวลาชำระแล้ว กรุณาสั่งซื้อใหม่' });
   const result = await orderService.claimPayment(o.id);
   res.json({ ok: true, order: clientOrder(result.order), alreadyPaid: !!result.alreadyPaid });
 });
-app.post('/api/orders/:id/confirm-stripe', async (req, res) => {
+app.post('/api/orders/:id/confirm-stripe', paymentLimiter, async (req, res) => {
   const o = await expireOrderIfNeeded(await getOrder(req.params.id));
   if (!o || !canAccessOrder(req, o)) return res.status(404).json({ error: 'ไม่พบคำสั่งซื้อ' });
   if (o.status === 'expired') return res.status(410).json({ error: 'ออเดอร์นี้หมดเวลาชำระแล้ว กรุณาสั่งซื้อใหม่' });
   const result = await orderService.confirmStripePayment(o.id);
   res.json({ ok: true, order: clientOrder(result.order), alreadyPaid: !!result.alreadyPaid });
 });
-app.post('/api/orders/:id/verify-slip', async (req, res) => {
+app.post('/api/orders/:id/verify-slip', paymentLimiter, async (req, res) => {
   const o = await expireOrderIfNeeded(await getOrder(req.params.id));
   if (!o || !canAccessOrder(req, o)) return res.status(404).json({ error: 'ไม่พบคำสั่งซื้อ' });
   if (o.status === 'expired') return res.status(410).json({ error: 'ออเดอร์นี้หมดเวลาชำระแล้ว กรุณาสั่งซื้อใหม่' });
@@ -2630,7 +3767,10 @@ app.post('/api/orders/:id/verify-slip', async (req, res) => {
     return res.status(400).json({ error: err.message || 'ตรวจสลิปไม่สำเร็จ' });
   }
 });
-app.get('/api/my/orders', requireAuth, async (req, res) => res.json((await listOrdersByUser(req.user.id)).map((o) => ({ ...clientOrder(o), statusLabel: STATUS_LABEL[o.status] }))));
+app.get('/api/my/orders', requireAuth, async (req, res) => {
+  const store = await getRequestStore(req);
+  res.json((await listOrdersByUser(req.user.id, 50, { storeId: store?.id })).map((o) => ({ ...clientOrder(o), statusLabel: STATUS_LABEL[o.status] })));
+});
 
 // ════════════ ADMIN ════════════
 function saveLocalAsset(dataUrl) {
@@ -2656,7 +3796,7 @@ async function saveAsset(dataUrl) {
   if (isServerless) throw new Error('ต้องตั้งค่า Supabase Storage ก่อน deploy บน Vercel');
   return saveLocalAsset(dataUrl);
 }
-app.post('/api/admin/upload', requireAdmin, async (req, res) => {
+app.post('/api/admin/upload', uploadLimiter, requireAdmin, async (req, res) => {
   try {
     const dataUrl = String(req.body?.dataUrl || '');
     if (!dataUrl) return res.status(400).json({ error: 'ไม่พบไฟล์ที่อัปโหลด' });
@@ -2665,18 +3805,39 @@ app.post('/api/admin/upload', requireAdmin, async (req, res) => {
 });
 const SETTING_KEYS = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'LINE_ADMIN_USER_ID', 'LINE_CHAT_MODE', 'LINE_WEB_CHAT_PATH', 'LINEOA_API_BASE_URL', 'LINEOA_API_CLIENT_ID', 'LINEOA_API_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'PROMPTPAY_ID', 'PROMPTPAY_NAME', 'SLIPOK_API_URL', 'SLIPOK_API_KEY', 'ORDER_RESERVATION_TTL_MINUTES', 'PUBLIC_URL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'];
 const SECRET_KEYS = new Set(['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'LINEOA_API_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'SLIPOK_API_KEY', 'SMTP_PASS']);
+const STORE_SETTING_KEYS = [...new Set([
+  ...SITE_KEYS,
+  'LINE_CHANNEL_ACCESS_TOKEN',
+  'LINE_CHANNEL_SECRET',
+  'LINE_ADMIN_USER_ID',
+  'LINE_CHAT_MODE',
+  'LINE_WEB_CHAT_PATH',
+  'PROMPTPAY_ID',
+  'PROMPTPAY_NAME',
+  'PUBLIC_URL',
+  'SMTP_HOST',
+  'SMTP_PORT',
+  'SMTP_USER',
+  'SMTP_PASS',
+  'SMTP_FROM',
+])];
+const CONFIG_CENTER_AUDIT_KEY = '__CONFIG_CENTER_AUDIT__';
+const CONFIG_CENTER_REVISIONS_KEY = '__CONFIG_CENTER_REVISIONS__';
+const LINE_ADMIN_BINDINGS_KEY = '__LINE_ADMIN_BINDINGS__';
+const LINE_ADMIN_BIND_CODES_KEY = '__LINE_ADMIN_BIND_CODES__';
 
-app.get('/api/admin/stats', requireAdmin, async (_req, res) => {
-  const stats = await getAdminDashboardStats();
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  const stats = await getAdminDashboardStats(adminStoreScope(req));
   res.json({
     ...stats,
     recent: (stats.recent || []).map((order) => ({ ...order, statusLabel: STATUS_LABEL[order.status] })),
   });
 });
-app.get('/api/admin/products', requireAdmin, async (_req, res) => res.json((await listProducts(true)).map((item) => normalizeProductForClient(item))));
-app.post('/api/admin/products', requireAdmin, async (req, res) => {
+app.get('/api/admin/products', requireStoreScopedAccess('staff'), async (req, res) => res.json((await listProducts(true, adminStoreScope(req))).map((item) => normalizeProductForClient(item))));
+app.post('/api/admin/products', requireStoreScopedAccess('staff'), async (req, res) => {
   try {
     const b = req.body || {};
+    const { storeId } = adminStoreScope(req);
     if (!b.name || !b.price) return res.status(400).json({ error: 'กรอกชื่อและราคา' });
     let image = b.image || '';
     if (typeof image === 'string' && image.startsWith('data:')) image = await saveAsset(image);
@@ -2690,16 +3851,17 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
     const pricing = canonicalizeProductPricingPayload({ price: parseInt(b.price, 10) || 0, salePrice: b.salePrice, comparePrice: b.comparePrice, extra });
     extra = pricing.extra;
     const id = b.id || ('p_' + crypto.randomBytes(4).toString('hex'));
-    const p = await createProduct({ id, name: b.name, tag: sanitizeProductTag(b), price: pricing.price, short: b.short, desc: b.desc, specs: b.specs || {}, segment: b.segment || 'agri', extra, icon: b.icon || 'pod', image, video: (b.video || '').trim(), images, model: normalizeProductModelValue(b.model), stock: parseInt(b.stock, 10) || 0, active: b.active !== false, sort: parseInt(b.sort, 10) || 0 });
+    const p = await createProduct({ storeId, id, name: b.name, tag: sanitizeProductTag(b), price: pricing.price, short: b.short, desc: b.desc, specs: b.specs || {}, segment: b.segment || 'agri', extra, icon: b.icon || 'pod', image, video: (b.video || '').trim(), images, model: normalizeProductModelValue(b.model), stock: parseInt(b.stock, 10) || 0, active: b.active !== false, sort: parseInt(b.sort, 10) || 0 });
     res.json({ ok: true, product: p });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
-app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
+app.put('/api/admin/products/:id', requireStoreScopedAccess('staff'), async (req, res) => {
   try {
-    const current = await getProduct(req.params.id);
+    const { storeId } = adminStoreScope(req);
+    const current = await getProduct(req.params.id, { storeId });
     if (!current) return res.status(404).json({ error: 'ไม่พบสินค้า' });
     const b = req.body || {};
-    const patch = { ...b };
+    const patch = { ...b, storeId };
     if (b.price !== undefined) patch.price = parseInt(b.price, 10) || 0;
     if (b.stock !== undefined) patch.stock = parseInt(b.stock, 10) || 0;
     if (b.sort !== undefined) patch.sort = parseInt(b.sort, 10) || 0;
@@ -2729,13 +3891,14 @@ app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
     res.json({ ok: true, product: p });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
-app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => { await deleteProduct(req.params.id); res.json({ ok: true }); });
+app.delete('/api/admin/products/:id', requireStoreScopedAccess('staff'), async (req, res) => { await deleteProduct(req.params.id, adminStoreScope(req)); res.json({ ok: true }); });
 app.post('/api/admin/product-categories/merge', requireAdmin, async (req, res) => {
   try {
     const result = await replaceProductCategoryAcrossCatalog({
       sourceCategory: req.body?.sourceCategory,
       targetCategory: req.body?.targetCategory,
       mode: req.body?.mode || 'merge',
+      storeId: requestedAdminStoreId(req),
     });
     res.json({ ok: true, ...result });
   } catch (err) {
@@ -2744,51 +3907,56 @@ app.post('/api/admin/product-categories/merge', requireAdmin, async (req, res) =
 });
 
 // articles (admin)
-app.get('/api/admin/articles', requireAdmin, async (_req, res) => res.json(await listArticles(true)));
-app.post('/api/admin/articles', requireAdmin, async (req, res) => {
+app.get('/api/admin/articles', requireStoreScopedAccess('staff'), async (req, res) => res.json(await listArticles(true, adminStoreScope(req))));
+app.post('/api/admin/articles', requireStoreScopedAccess('staff'), async (req, res) => {
   try {
     const b = req.body || {};
+    const { storeId } = adminStoreScope(req);
     if (!b.title) return res.status(400).json({ error: 'กรอกหัวข้อบทความ' });
     let cover = b.cover || '';
     if (typeof cover === 'string' && cover.startsWith('data:')) cover = await saveAsset(cover);
     const id = b.id || ('a_' + crypto.randomBytes(4).toString('hex'));
-    res.json({ ok: true, article: await createArticle({ id, title: b.title, cover, excerpt: b.excerpt, body: b.body, published: b.published !== false }) });
+    res.json({ ok: true, article: await createArticle({ storeId, id, title: b.title, cover, excerpt: b.excerpt, body: b.body, published: b.published !== false }) });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
-app.put('/api/admin/articles/:id', requireAdmin, async (req, res) => {
+app.put('/api/admin/articles/:id', requireStoreScopedAccess('staff'), async (req, res) => {
   try {
     const b = req.body || {}; const patch = { ...b };
+    patch.storeId = requestedAdminStoreId(req);
     if (typeof b.cover === 'string' && b.cover.startsWith('data:')) patch.cover = await saveAsset(b.cover);
     const a = await updateArticle(req.params.id, patch);
     if (!a) return res.status(404).json({ error: 'ไม่พบบทความ' });
     res.json({ ok: true, article: a });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
-app.delete('/api/admin/articles/:id', requireAdmin, async (req, res) => { await deleteArticle(req.params.id); res.json({ ok: true }); });
+app.delete('/api/admin/articles/:id', requireStoreScopedAccess('staff'), async (req, res) => { await deleteArticle(req.params.id, adminStoreScope(req)); res.json({ ok: true }); });
 
-app.get('/api/admin/leads', requireAdmin, async (req, res) => {
+app.get('/api/admin/leads', requireStoreScopedAccess('staff'), async (req, res) => {
   const { page, limit, offset, search, status } = parseAdminListQuery(req, 20);
+  const { storeId } = adminStoreScope(req);
   const [items, total] = await Promise.all([
-    listAdminLeads(limit, offset, { search, status }),
-    countLeads({ search, status }),
+    listAdminLeads(limit, offset, { search, status, storeId }),
+    countLeads({ search, status, storeId }),
   ]);
   res.json(pagedAdminResponse({ items, page, limit, total }));
 });
-app.put('/api/admin/leads/:id', requireAdmin, async (req, res) => {
+app.put('/api/admin/leads/:id', requireStoreScopedAccess('staff'), async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const cur = await getLead(id);
+  const { storeId } = adminStoreScope(req);
+  const cur = await getLead(id, { storeId });
   if (!cur) return res.status(404).json({ error: 'ไม่พบลีด' });
   const status = ['new', 'contacted', 'qualified', 'won', 'lost'].includes(req.body?.status) ? req.body.status : cur.status;
   const note = req.body?.note !== undefined ? String(req.body.note).slice(0, 1000) : cur.note;
-  const lead = await updateLead(id, { status, note });
+  const lead = await updateLead(id, { status, note, storeId });
   res.json({ ok: true, lead });
 });
 
-app.get('/api/admin/orders', requireAdmin, async (req, res) => {
+app.get('/api/admin/orders', requireStoreScopedAccess('staff'), async (req, res) => {
   const { page, limit, offset, search, status } = parseAdminListQuery(req, 20);
+  const { storeId } = adminStoreScope(req);
   const [items, total] = await Promise.all([
-    listAdminOrderSummaries(limit, offset, { search, status }),
-    countOrders({ search, status }),
+    listAdminOrderSummaries(limit, offset, { search, status, storeId }),
+    countOrders({ search, status, storeId }),
   ]);
   res.json(pagedAdminResponse({
     items: items.map((o) => ({ ...clientAdminOrderSummary(o), statusLabel: STATUS_LABEL[o.status] })),
@@ -2797,47 +3965,52 @@ app.get('/api/admin/orders', requireAdmin, async (req, res) => {
     total,
   }));
 });
-app.get('/api/admin/inbox', requireAdminInbox, async (req, res) => {
+app.get('/api/admin/inbox', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const { page, limit, offset, search } = parseAdminListQuery(req, 30);
-  const data = await listChatSessions({ search, limit, offset });
-  const items = (await Promise.all((data.items || []).map((item) => enrichInboxSessionItem(item)))).filter(Boolean);
+  const { storeId } = adminStoreScope(req);
+  const data = await listChatSessions({ search, limit, offset, storeId });
+  const items = (await Promise.all((data.items || []).map((item) => enrichInboxSessionItem(item, { storeId })))).filter(Boolean);
   res.json(pagedAdminResponse({ items, page, limit, total: data.total || 0 }));
 });
-app.get('/api/admin/inbox/summary', requireAdminInbox, async (_req, res) => {
-  const data = await listChatSessions({ limit: 500, offset: 0 });
-  const items = (await Promise.all((data.items || []).map((item) => enrichInboxSessionItem(item)))).filter(Boolean);
+app.get('/api/admin/inbox/summary', requireStoreScopedAccess('chat_admin'), async (req, res) => {
+  const { storeId } = adminStoreScope(req);
+  const data = await listChatSessions({ limit: 500, offset: 0, storeId });
+  const items = (await Promise.all((data.items || []).map((item) => enrichInboxSessionItem(item, { storeId })))).filter(Boolean);
   const unreadTotal = items.reduce((sum, item) => sum + Math.max(0, Number(item?.unreadCount || 0)), 0);
   const unreadSessions = items.filter((item) => Number(item?.unreadCount || 0) > 0).length;
   res.json({ unreadTotal, unreadSessions, totalSessions: Number(data?.total || items.length || 0) });
 });
-app.get('/api/admin/inbox/:sessionId', requireAdminInbox, async (req, res) => {
+app.get('/api/admin/inbox/:sessionId', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const sessionId = normalizeChatSessionId(req.params.sessionId);
+  const { storeId } = adminStoreScope(req);
   if (!CHAT_SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'รหัสห้องแชตไม่ถูกต้อง' });
-  const messages = await listChatMessages(sessionId, 300);
+  const messages = await listChatMessages(sessionId, 300, { storeId });
   if (!messages.length) return res.status(404).json({ error: 'ไม่พบห้องแชตนี้แล้ว' });
   await markChatSessionRead(sessionId, messages.length ? Number(messages[messages.length - 1]?.at || Date.now()) : Date.now());
-  const detail = await enrichInboxSessionItem({ session_id: sessionId, last_customer_at: messages.filter((message) => message?.sender === 'customer').slice(-1)[0]?.at || 0 });
+  const detail = await enrichInboxSessionItem({ session_id: sessionId, last_customer_at: messages.filter((message) => message?.sender === 'customer').slice(-1)[0]?.at || 0 }, { storeId });
   res.json({ sessionId, messages, detail });
 });
-app.delete('/api/admin/inbox/:sessionId', requireAdminInbox, async (req, res) => {
+app.delete('/api/admin/inbox/:sessionId', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const sessionId = normalizeChatSessionId(req.params.sessionId);
+  const { storeId } = adminStoreScope(req);
   if (!CHAT_SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'รหัสห้องแชตไม่ถูกต้อง' });
-  const existing = await listChatMessages(sessionId, 1);
+  const existing = await listChatMessages(sessionId, 1, { storeId });
   if (!existing.length) return res.status(404).json({ error: 'ไม่พบห้องแชตนี้แล้ว' });
-  await deleteChatSession(sessionId);
+  await deleteChatSession(sessionId, { storeId });
   await removeChatInboxMeta(sessionId);
   sessions.delete(sessionId);
   if (lastActiveSession === sessionId) lastActiveSession = null;
   await emitAdminInboxUpdate({ type: 'session_deleted', sessionId });
   res.json({ ok: true, sessionId });
 });
-app.post('/api/admin/inbox/:sessionId/reply', requireAdminInbox, async (req, res) => {
+app.post('/api/admin/inbox/:sessionId/reply', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const sessionId = normalizeChatSessionId(req.params.sessionId);
+  const { storeId } = adminStoreScope(req);
   const text = String(req.body?.text || '').trim().slice(0, 1000);
   if (!CHAT_SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'รหัสห้องแชตไม่ถูกต้อง' });
   if (!text) return res.status(400).json({ error: 'กรอกข้อความก่อนตอบกลับ' });
   try {
-    const message = await saveAdminReply(sessionId, text);
+    const message = await saveAdminReply(sessionId, text, { storeId });
     res.json({ ok: true, sessionId, message });
   } catch (err) {
     const message = String(err?.message || '').trim();
@@ -2847,15 +4020,19 @@ app.post('/api/admin/inbox/:sessionId/reply', requireAdminInbox, async (req, res
     throw err;
   }
 });
-app.get('/api/admin/orders/:id', requireAdmin, async (req, res) => {
+app.get('/api/admin/orders/:id', requireStoreScopedAccess('staff'), async (req, res) => {
   const o = await getOrder(req.params.id);
-  if (!o) return res.status(404).json({ error: 'ไม่พบคำสั่งซื้อ' });
+  const { storeId } = adminStoreScope(req);
+  if (!o || String(o.storeId || 'store_main') !== String(storeId || 'store_main')) return res.status(404).json({ error: 'ไม่พบคำสั่งซื้อ' });
   let account = null;
   if (o.user_id) { const u = await getUserById(o.user_id); if (u) account = { id: u.id, email: u.email, name: u.name }; }
   res.json({ ...clientOrder(o), statusLabel: STATUS_LABEL[o.status], account });
 });
-app.post('/api/admin/orders/:id/status', requireAdmin, async (req, res) => {
+app.post('/api/admin/orders/:id/status', requireStoreScopedAccess('staff'), async (req, res) => {
   const { action, tracking } = req.body || {};
+  const { storeId } = adminStoreScope(req);
+  const current = await getOrder(req.params.id);
+  if (!current || String(current.storeId || 'store_main') !== String(storeId || 'store_main')) return res.status(404).json({ error: 'ไม่พบออเดอร์ในร้านที่เลือก' });
   const o = await applyOrderAction(req.params.id, action, tracking || '');
   if (!o) return res.status(400).json({ error: 'ไม่พบออเดอร์หรือสถานะไม่ถูกต้อง' });
   res.json({ ok: true, order: { ...clientOrder(o), statusLabel: STATUS_LABEL[o.status] } });
@@ -2882,11 +4059,317 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
     id: 'u_' + crypto.randomBytes(6).toString('hex'),
     email: normalizedEmail,
     name: String(name || '').trim() || normalizedEmail.split('@')[0],
+    username: String(name || '').trim() || normalizedEmail.split('@')[0],
+    avatar: '',
     salt,
     hash,
     role: normalizedRole,
   });
   res.json({ ok: true, user: publicUser(user) });
+});
+app.get('/api/admin/stores', requireAdminConsole, async (req, res) => {
+  const stores = await listStores();
+  const domains = await listStoreDomains().catch(() => []);
+  const databases = await listStoreDatabases().catch(() => []);
+  const currentUserStoreRoles = await listUserStoreRoles(String(req.user?.id || '').trim()).catch(() => []);
+  const roleByStore = new Map(currentUserStoreRoles.map((role) => [String(role.storeId || ''), role]));
+  const domainsByStore = new Map();
+  for (const domain of domains) {
+    const key = String(domain?.storeId || '').trim();
+    if (!key) continue;
+    const list = domainsByStore.get(key) || [];
+    list.push(domain);
+    domainsByStore.set(key, list);
+  }
+  const databasesByStore = new Map();
+  for (const database of databases) {
+    const key = String(database?.storeId || '').trim();
+    if (key) databasesByStore.set(key, database);
+  }
+  const currentHost = extractRequestHost(req);
+  const globalAdmin = String(req.user?.role || '') === ROLE_ADMIN;
+  const visibleStores = globalAdmin ? stores : stores.filter((store) => roleByStore.has(store.id));
+  res.json({
+    ok: true,
+    rootDomain: tenantRootDomain(req),
+    currentHost,
+    domainAutomationConfigured: vercelDomainAutomationConfigured(),
+    stores: visibleStores.map((store) => ({
+      ...store,
+      publicUrl: currentStorePublicUrl(req, store),
+      domains: domainsByStore.get(store.id) || [],
+      database: databasesByStore.get(store.id) || null,
+      currentUserRole: globalAdmin ? 'owner' : (roleByStore.get(store.id)?.role || ''),
+    })),
+  });
+});
+app.get('/api/admin/stores/check-subdomain', requireAdmin, async (req, res) => {
+  const subdomain = normalizeRequestedSubdomain(String(req.query?.subdomain || '').trim());
+  const valid = isValidStoreSubdomain(subdomain);
+  const available = valid ? await isStoreSubdomainAvailable(subdomain) : false;
+  res.json({
+    ok: true,
+    subdomain,
+    valid,
+    available,
+    rootDomain: tenantRootDomain(req),
+    previewUrl: valid && available ? currentStorePublicUrl(req, { subdomain }) : '',
+  });
+});
+app.post('/api/admin/stores', requireAdmin, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const subdomain = normalizeRequestedSubdomain(String(req.body?.subdomain || '').trim());
+  const templateKey = String(req.body?.templateKey || 'blank').trim() || 'blank';
+  const cloneFromStoreId = String(req.body?.cloneFromStoreId || '').trim();
+  if (!name) return res.status(400).json({ error: 'กรุณาตั้งชื่อร้าน' });
+  if (!isValidStoreSubdomain(subdomain)) return res.status(400).json({ error: 'Subdomain ไม่ถูกต้องหรือเป็นคำสงวนของระบบ' });
+  if (!(await isStoreSubdomainAvailable(subdomain))) return res.status(409).json({ error: 'Subdomain นี้ถูกใช้แล้ว' });
+  const rootDomain = tenantRootDomain(req);
+  const publicUrl = currentStorePublicUrl(req, { subdomain });
+  const host = storeHostFromPublicUrl(publicUrl, `${subdomain}.${rootDomain}`);
+  const store = await createStore({
+    id: buildStoreId(subdomain),
+    name,
+    slug: subdomain,
+    subdomain,
+    status: 'active',
+    templateKey,
+    primaryDomain: host,
+    ownerUserId: String(req.user?.id || '').trim(),
+    metadata: {
+      source: 'admin_create_store',
+      createdFromHost: extractRequestHost(req),
+    },
+  });
+  const database = await provisionStoreDatabase(store, { req, publicUrl });
+  const domainProvision = await provisionStoreDomain({ req, store, host, isPrimary: true });
+  await addUserStoreRole(String(req.user?.id || '').trim(), store.id, ROLE_ADMIN);
+  const cloneSettings = cloneFromStoreId ? await allStoreSettings(cloneFromStoreId).catch(() => ({})) : {};
+  const seedSettings = {
+    ...siteConfig(),
+    ...cloneSettings,
+    ...buildStoreBootstrapSettings({ storeName: name, publicUrl }),
+    ...storeTemplateSettings(templateKey, name),
+  };
+  for (const [key, value] of Object.entries(seedSettings)) {
+    await setStoreSetting(store.id, key, String(value ?? ''));
+  }
+  await recordSystemEvent({
+    level: 'info',
+    source: 'multi_tenant',
+    type: 'store_created',
+    message: `สร้างร้านใหม่ ${name} (${subdomain}) สำเร็จแล้ว`,
+    data: { storeId: store.id, subdomain, host, database, domainProvision },
+  });
+  res.json({
+    ok: true,
+    store: {
+      ...store,
+      publicUrl,
+      primaryDomain: host,
+      domains: [{ host, isPrimary: true, verified: domainProvision.ok === true }],
+      database,
+      domainProvision,
+    },
+  });
+});
+app.post('/api/admin/stores/:id/provision-domain', requireStoreParamAccess('admin'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้านที่ต้องการตั้งค่าโดเมน' });
+  if (store.isDefault || !store.subdomain) return res.status(400).json({ error: 'ร้านหลักไม่ต้อง provision subdomain' });
+  const publicUrl = currentStorePublicUrl(req, store);
+  const host = storeHostFromPublicUrl(publicUrl, store.primaryDomain || `${store.subdomain}.${tenantRootDomain(req)}`);
+  const domainProvision = await provisionStoreDomain({ req, store, host, isPrimary: true });
+  res.json({
+    ok: domainProvision.ok === true,
+    store: {
+      ...store,
+      publicUrl,
+      primaryDomain: host,
+      domains: [{ host, isPrimary: true, verified: domainProvision.ok === true }],
+      domainProvision,
+    },
+  });
+});
+app.get('/api/admin/stores/:id/domain-health', requireStoreParamAccess('staff'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
+  const domains = await listStoreDomains(store.id).catch(() => []);
+  const publicUrl = currentStorePublicUrl(req, store);
+  const host = storeHostFromPublicUrl(publicUrl, store.primaryDomain || domains.find((item) => item.isPrimary)?.host || '');
+  const domainConfig = host && vercelDomainAutomationConfigured()
+    ? await getVercelDomainConfig(host).catch((err) => ({ ok: false, message: err.message || 'domain check failed' }))
+    : { ok: store.isDefault || false, message: vercelDomainAutomationConfigured() ? 'missing host' : 'Vercel automation is not configured' };
+  const primary = domains.find((item) => item.host === host) || domains.find((item) => item.isPrimary) || domains[0] || null;
+  res.json({
+    ok: true,
+    store,
+    host,
+    publicUrl,
+    wildcardRecommended: store.subdomain ? `CNAME * cname.vercel-dns.com` : '',
+    domainAutomationConfigured: vercelDomainAutomationConfigured(),
+    dns: {
+      ready: store.isDefault || primary?.verified === true || domainConfig.ok === true,
+      verified: primary?.verified === true,
+      message: domainConfig.message || '',
+    },
+    ssl: {
+      ready: store.isDefault || domainConfig.ok === true,
+      message: domainConfig.ok ? 'Vercel domain config is ready' : (domainConfig.message || 'Pending DNS/Vercel verification'),
+    },
+    domains,
+    vercel: domainConfig,
+  });
+});
+app.get('/api/admin/stores/:id/export', requireStoreParamAccess('admin'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
+  const storeId = store.id;
+  const [products, orders, leads, articles, coupons, settings, domains, database] = await Promise.all([
+    listProducts(true, { storeId }),
+    listOrders(5000, { storeId }),
+    listLeads(5000, { storeId }).catch(() => []),
+    listArticles(true, { storeId }).catch(() => []),
+    listCoupons({ storeId }).catch(() => []),
+    allStoreSettings(storeId).catch(() => ({})),
+    listStoreDomains(storeId).catch(() => []),
+    Promise.resolve().then(() => listStoreDatabases(storeId)).then((items) => items[0] || null).catch(() => null),
+  ]);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${storeId}-backup.json"`);
+  res.json({ exportedAt: new Date().toISOString(), store, domains, database, settings, products, orders, leads, articles, coupons });
+});
+app.post('/api/admin/stores/:id/import', requireStoreParamAccess('admin'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
+  const body = req.body || {};
+  const backup = body.backup && typeof body.backup === 'object' ? body.backup : body;
+  const dryRun = body.dryRun !== false;
+  const storeId = store.id;
+  const products = Array.isArray(backup.products) ? backup.products.slice(0, 1000) : [];
+  const articles = Array.isArray(backup.articles) ? backup.articles.slice(0, 1000) : [];
+  const coupons = Array.isArray(backup.coupons) ? backup.coupons.slice(0, 1000) : [];
+  const settings = backup.settings && typeof backup.settings === 'object' && !Array.isArray(backup.settings) ? backup.settings : {};
+  const summary = {
+    settings: Object.keys(settings).filter((key) => STORE_SETTING_KEYS.includes(key)).length,
+    products: products.filter((item) => item?.id && item?.name).length,
+    articles: articles.filter((item) => item?.id && item?.title).length,
+    coupons: coupons.filter((item) => item?.code && item?.value !== undefined).length,
+    skipped: {
+      orders: Array.isArray(backup.orders) ? backup.orders.length : 0,
+      leads: Array.isArray(backup.leads) ? backup.leads.length : 0,
+      customers: Array.isArray(backup.customers) ? backup.customers.length : 0,
+    },
+  };
+  if (dryRun) return res.json({ ok: true, dryRun: true, store, summary });
+
+  for (const [key, value] of Object.entries(settings)) {
+    if (!STORE_SETTING_KEYS.includes(key)) continue;
+    await setStoreSetting(storeId, key, String(value ?? ''));
+  }
+  for (const item of products) {
+    const id = String(item?.id || '').trim();
+    const name = String(item?.name || '').trim();
+    if (!id || !name) continue;
+    const payload = {
+      ...item,
+      storeId,
+      id,
+      name,
+      price: parseInt(item.price, 10) || 0,
+      stock: parseInt(item.stock, 10) || 0,
+      sort: parseInt(item.sort, 10) || 0,
+      active: item.active !== false,
+    };
+    if (await getProduct(id, { storeId })) await updateProduct(id, payload);
+    else await createProduct(payload);
+  }
+  for (const item of articles) {
+    const id = String(item?.id || '').trim();
+    const title = String(item?.title || '').trim();
+    if (!id || !title) continue;
+    const payload = { ...item, storeId, id, title, published: item.published !== false };
+    if (await getArticle(id, { storeId })) await updateArticle(id, payload);
+    else await createArticle(payload);
+  }
+  for (const item of coupons) {
+    const code = String(item?.code || '').trim().toUpperCase();
+    if (!code || item?.value === undefined) continue;
+    const payload = { ...item, storeId, code };
+    if (await getCoupon(code, { storeId })) await updateCoupon(code, payload);
+    else await createCoupon(payload);
+  }
+  await recordSystemEvent({
+    level: 'warn',
+    source: 'store_backup',
+    type: 'store_import_applied',
+    message: `Applied safe store import for ${storeId}`,
+    data: { storeId, summary, actor: configActorFromRequest(req) },
+    alert: true,
+  });
+  res.json({ ok: true, dryRun: false, store, summary });
+});
+app.get('/api/admin/stores/:id/roles', requireStoreParamAccess('admin'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
+  const roles = (await listUserStoreRoles().catch(() => [])).filter((role) => String(role.storeId || '') === store.id);
+  const users = await listUsers().catch(() => []);
+  const userById = new Map(users.map((user) => [String(user.id || ''), user]));
+  res.json({ ok: true, store, roles: roles.map((role) => ({ ...role, user: userById.get(role.userId) || null })) });
+});
+app.post('/api/admin/stores/:id/roles', requireStoreParamAccess('owner'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const role = String(req.body?.role || 'staff').trim();
+  if (!STORE_ROLE_ORDER.has(role)) return res.status(400).json({ error: 'role รายร้านไม่ถูกต้อง' });
+  const user = await getUserByEmail(email);
+  if (!user) return res.status(404).json({ error: 'ไม่พบผู้ใช้จากอีเมลนี้' });
+  await addUserStoreRole(user.id, store.id, role);
+  res.json({ ok: true, store, role: { userId: user.id, storeId: store.id, role, user: publicUser(user) } });
+});
+app.get('/api/admin/stores/:id/settings', requireStoreParamAccess('staff'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
+  const overrides = await allStoreSettings(store.id).catch(() => ({}));
+  const mergedSite = siteConfigWithOverrides(overrides);
+  const rows = STORE_SETTING_KEYS.map((key) => {
+    const hasOverride = overrides[key] !== undefined && overrides[key] !== null && overrides[key] !== '';
+    const rawValue = hasOverride ? String(overrides[key] || '') : String(settingsCache[key] ?? process.env[key] ?? SITE_DEFAULTS[key] ?? '');
+    return {
+      key,
+      value: SECRET_KEYS.has(key) && hasOverride ? '' : rawValue,
+      inherited: !hasOverride,
+      secret: SECRET_KEYS.has(key),
+      display: SECRET_KEYS.has(key) && rawValue ? '••••••' + rawValue.slice(-4) : rawValue,
+    };
+  });
+  res.json({ ok: true, store, site: mergedSite, settings: rows, overrides });
+});
+app.put('/api/admin/stores/:id/settings', requireStoreParamAccess('admin'), async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
+  const incoming = req.body?.settings && typeof req.body.settings === 'object' ? req.body.settings : {};
+  const changedKeys = [];
+  for (const key of STORE_SETTING_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(incoming, key)) continue;
+    const current = await getStoreSetting(store.id, key).catch(() => '');
+    const next = String(incoming[key] ?? '').trim();
+    if (SECRET_KEYS.has(key) && !next) continue;
+    if (String(current || '') !== next) changedKeys.push(key);
+    await setStoreSetting(store.id, key, next);
+  }
+  siteStatsCache = null;
+  siteStatsCacheAt = 0;
+  await recordSystemEvent({
+    level: 'info',
+    source: 'multi_tenant',
+    type: 'store_settings_saved',
+    message: `บันทึก settings ร้าน ${store.name || store.id} แล้ว`,
+    data: { storeId: store.id, changedKeys },
+  });
+  const overrides = await allStoreSettings(store.id).catch(() => ({}));
+  res.json({ ok: true, store, changedKeys, site: siteConfigWithOverrides(overrides), overrides });
 });
 app.put('/api/admin/users/:id', requireAdmin, async (req, res) => {
   const target = await getUserById(req.params.id);
@@ -2908,24 +4391,24 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
 });
 
 // coupons
-app.get('/api/admin/coupons', requireAdmin, async (_req, res) => res.json(await listCoupons()));
-app.post('/api/admin/coupons', requireAdmin, async (req, res) => {
-  const b = req.body || {};
+app.get('/api/admin/coupons', requireStoreScopedAccess('staff'), async (req, res) => res.json(await listCoupons(adminStoreScope(req))));
+app.post('/api/admin/coupons', requireStoreScopedAccess('admin'), async (req, res) => {
+  const b = { ...(req.body || {}), storeId: requestedAdminStoreId(req) };
   if (!b.code || !b.value) return res.status(400).json({ error: 'กรอกรหัสคูปองและมูลค่า' });
-  if (await getCoupon(b.code)) return res.status(409).json({ error: 'มีคูปองรหัสนี้แล้ว' });
+  if (await getCoupon(b.code, { storeId: b.storeId })) return res.status(409).json({ error: 'มีคูปองรหัสนี้แล้วในร้านนี้' });
   res.json({ ok: true, coupon: await createCoupon(b) });
 });
-app.put('/api/admin/coupons/:code', requireAdmin, async (req, res) => {
-  const c = await updateCoupon(req.params.code, req.body || {});
+app.put('/api/admin/coupons/:code', requireStoreScopedAccess('admin'), async (req, res) => {
+  const c = await updateCoupon(req.params.code, { ...(req.body || {}), storeId: requestedAdminStoreId(req) });
   if (!c) return res.status(404).json({ error: 'ไม่พบคูปอง' });
   res.json({ ok: true, coupon: c });
 });
-app.delete('/api/admin/coupons/:code', requireAdmin, async (req, res) => { await deleteCoupon(req.params.code); res.json({ ok: true }); });
+app.delete('/api/admin/coupons/:code', requireStoreScopedAccess('admin'), async (req, res) => { await deleteCoupon(req.params.code, adminStoreScope(req)); res.json({ ok: true }); });
 
 // analytics สำหรับแดชบอร์ด
-app.get('/api/admin/analytics', requireAdmin, async (req, res) => {
+app.get('/api/admin/analytics', requireStoreScopedAccess('staff'), async (req, res) => {
   const days = Math.min(90, Math.max(7, parseInt(req.query.days, 10) || 30));
-  const analytics = await getAdminOrderAnalytics(days);
+  const analytics = await getAdminOrderAnalytics(days, adminStoreScope(req));
   res.json({
     ...analytics,
     statusLabels: STATUS_LABEL,
@@ -2933,24 +4416,206 @@ app.get('/api/admin/analytics', requireAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/settings', requireAdmin, async (_req, res) => {
+  await ensureSettingsFresh();
   const dbS = await allSettings();
   res.json(SETTING_KEYS.map((k) => {
-    const val = dbS[k] || process.env[k] || '';
-    const source = dbS[k] ? 'db' : (process.env[k] ? 'env' : 'none');
+    const hasDbValue = dbS[k] !== undefined && dbS[k] !== null && dbS[k] !== '';
+    const val = hasDbValue ? decodeSettingValueFromStorage(k, dbS[k]) : (settingsCache[k] ?? process.env[k] ?? '');
+    const source = hasDbValue ? 'db' : (process.env[k] ? 'env' : 'none');
     const display = !val ? '' : (SECRET_KEYS.has(k) ? '••••••' + val.slice(-4) : val);
     return { key: k, set: Boolean(val), source, display, secret: SECRET_KEYS.has(k) };
   }));
 });
 app.put('/api/admin/settings', requireAdmin, async (req, res) => {
   const s = req.body?.settings || {};
+  const changedKeys = [];
+  const actor = configActorFromRequest(req);
+  const previousSnapshot = {};
   for (const k of [...SETTING_KEYS, ...SITE_KEYS]) {
-    if (typeof s[k] === 'string') await setSetting(k, s[k].trim());
+    if (typeof s[k] === 'string') {
+      const nextValue = s[k].trim();
+      const currentValue = String(settingsCache[k] ?? process.env[k] ?? '');
+      if (currentValue !== nextValue) {
+        changedKeys.push(k);
+        previousSnapshot[k] = currentValue;
+      }
+      await setSetting(k, encodeSettingValueForStorage(k, nextValue));
+    }
   }
   await refreshSettingsCache();
-  await runStartupValidation('settings_update');
   siteStatsCache = null;
   siteStatsCacheAt = 0;
-  res.json({ ok: true });
+  const verification = await buildConfigCenterVerification({
+    reason: 'settings_update',
+    changedKeys,
+    actor,
+  });
+  const revision = await createConfigRevision({
+    changedKeys,
+    actor,
+    reason: 'settings_update',
+    snapshot: previousSnapshot,
+  });
+  await recordSystemEvent({
+    level: verification.status === 'error' ? 'error' : (verification.status === 'warn' ? 'warn' : 'info'),
+    source: 'config_center',
+    type: 'settings_saved',
+    message: verification.status === 'ok'
+      ? 'บันทึกการตั้งค่าและตรวจสอบผ่านแล้ว'
+      : (verification.status === 'warn' ? 'บันทึกการตั้งค่าแล้ว แต่ยังมีคำเตือน' : 'บันทึกการตั้งค่าแล้ว แต่ยังมีจุดผิดพลาดต้องแก้'),
+    data: { changedKeys: verification.changedKeys.slice(0, 12), revisionId: verification.revisionId, rollbackRevisionId: revision?.revisionId || '' },
+    alert: verification.status === 'error',
+  });
+  res.json({ ok: true, verification, rollbackRevision: revision ? { revisionId: revision.revisionId, createdAt: revision.createdAt, changedKeys: revision.changedKeys } : null });
+});
+app.get('/api/admin/settings/status', requireAdmin, async (_req, res) => {
+  await ensureSettingsFresh();
+  const audit = configCenterAuditState();
+  res.json({
+    ok: true,
+    health: buildHealthSnapshot(),
+    lastApply: audit.lastResult,
+    history: audit.history.slice(0, 8),
+    revisions: configCenterRevisions().slice(0, 8).map((item) => ({
+      revisionId: item.revisionId,
+      createdAt: item.createdAt,
+      changedKeys: item.changedKeys,
+      actor: item.actor,
+      reason: item.reason,
+      rolledBackAt: item.rolledBackAt,
+      rolledBackBy: item.rolledBackBy,
+    })),
+    lineAdmin: {
+      primaryUserId: String(adminUserId() || '').trim(),
+      bindings: lineAdminBindings(),
+      pendingCodes: lineAdminBindCodes(),
+    },
+  });
+});
+app.post('/api/admin/settings/rollback/:revisionId', requireAdmin, async (req, res) => {
+  await ensureSettingsFresh();
+  const revisionId = String(req.params.revisionId || '').trim();
+  const actor = configActorFromRequest(req);
+  const target = configCenterRevisions().find((item) => item.revisionId === revisionId);
+  if (!target) return res.status(404).json({ error: 'ไม่พบ revision ที่ต้องการย้อนกลับ' });
+  const snapshotKeys = Object.keys(target.snapshot || {});
+  if (!snapshotKeys.length) return res.status(400).json({ error: 'revision นี้ไม่มีข้อมูลสำหรับ rollback' });
+  const rollbackBeforeSnapshot = collectConfigSnapshot(snapshotKeys);
+  for (const key of snapshotKeys) {
+    await setSetting(key, encodeSettingValueForStorage(key, target.snapshot[key] ?? ''));
+  }
+  await refreshSettingsCache();
+  siteStatsCache = null;
+  siteStatsCacheAt = 0;
+  const verification = await buildConfigCenterVerification({
+    reason: 'settings_rollback',
+    changedKeys: snapshotKeys,
+    actor,
+  });
+  const rollbackRevision = await createConfigRevision({
+    changedKeys: snapshotKeys,
+    actor,
+    reason: `rollback:${revisionId}`,
+    snapshot: rollbackBeforeSnapshot,
+  });
+  await markConfigRevisionRolledBack(revisionId, actor);
+  await recordSystemEvent({
+    level: verification.status === 'error' ? 'error' : (verification.status === 'warn' ? 'warn' : 'info'),
+    source: 'config_center',
+    type: 'settings_rollback',
+    message: `ย้อนกลับการตั้งค่าจาก revision ${revisionId} แล้ว`,
+    data: { revisionId, rollbackRevisionId: rollbackRevision?.revisionId || '', changedKeys: snapshotKeys.slice(0, 12) },
+    alert: verification.status === 'error',
+  });
+  res.json({
+    ok: true,
+    verification,
+    revisionId,
+    rollbackRevision: rollbackRevision ? { revisionId: rollbackRevision.revisionId, createdAt: rollbackRevision.createdAt, changedKeys: rollbackRevision.changedKeys } : null,
+  });
+});
+app.get('/api/admin/line/admin-bindings', requireAdmin, async (_req, res) => {
+  await ensureSettingsFresh();
+  res.json({
+    ok: true,
+    primaryUserId: String(adminUserId() || '').trim(),
+    bindings: lineAdminBindings(),
+    pendingCodes: lineAdminBindCodes(),
+  });
+});
+app.post('/api/admin/line/admin-bind-codes', requireAdmin, async (req, res) => {
+  const bindCode = await createLineAdminBindCode({
+    label: String(req.body?.label || '').trim(),
+    actor: configActorFromRequest(req),
+  });
+  res.json({
+    ok: true,
+    bindCode,
+    primaryUserId: String(adminUserId() || '').trim(),
+    bindings: lineAdminBindings(),
+    pendingCodes: lineAdminBindCodes(),
+  });
+});
+app.delete('/api/admin/line/admin-bind-codes/:code', requireAdmin, async (req, res) => {
+  const targetCode = String(req.params.code || '').trim().toUpperCase();
+  const nextCodes = lineAdminBindCodes().filter((item) => item.code !== targetCode);
+  await saveInternalSettingJson(LINE_ADMIN_BIND_CODES_KEY, nextCodes);
+  await recordSystemEvent({
+    level: 'info',
+    source: 'line_admin_bind',
+    type: 'code_revoked',
+    message: `ยกเลิกรหัสผูกแอดมิน ${targetCode || '-'}`,
+  });
+  res.json({ ok: true, pendingCodes: lineAdminBindCodes() });
+});
+app.post('/api/admin/line/admin-bindings/primary', requireAdmin, async (req, res) => {
+  const userId = String(req.body?.userId || '').trim();
+  if (!userId || !lineAdminBindings().some((item) => item.lineUserId === userId)) {
+    return res.status(404).json({ error: 'ไม่พบบัญชี LINE ที่ผูกไว้' });
+  }
+  await setPrimaryLineAdminUserId(userId);
+  await recordSystemEvent({
+    level: 'info',
+    source: 'line_admin_bind',
+    type: 'primary_changed',
+    message: `เปลี่ยน primary LINE admin เป็น ${userId}`,
+  });
+  res.json({ ok: true, primaryUserId: String(adminUserId() || '').trim(), bindings: lineAdminBindings() });
+});
+app.delete('/api/admin/line/admin-bindings/:userId', requireAdmin, async (req, res) => {
+  const userId = String(req.params.userId || '').trim();
+  const nextBindings = lineAdminBindings().filter((item) => item.lineUserId !== userId);
+  await saveInternalSettingJson(LINE_ADMIN_BINDINGS_KEY, nextBindings);
+  if (String(adminUserId() || '').trim() === userId) {
+    await setPrimaryLineAdminUserId(nextBindings[0]?.lineUserId || '');
+  }
+  await recordSystemEvent({
+    level: 'warn',
+    source: 'line_admin_bind',
+    type: 'binding_removed',
+    message: `ถอดสิทธิ์ LINE admin ${userId || '-'}`,
+  });
+  res.json({ ok: true, primaryUserId: String(adminUserId() || '').trim(), bindings: lineAdminBindings() });
+});
+app.get('/api/admin/line/rich-menu/status', requireAdmin, async (_req, res) => {
+  await ensureSettingsFresh();
+  res.json(await lineRichMenuStatus());
+});
+app.post('/api/admin/line/rich-menu/deploy', requireAdmin, async (req, res) => {
+  await ensureSettingsFresh();
+  try {
+    const deployment = await deployLineRichMenus(configActorFromRequest(req));
+    res.json({ ok: true, deployment, status: await lineRichMenuStatus() });
+  } catch (err) {
+    await recordSystemEvent({
+      level: 'error',
+      source: 'line_rich_menu',
+      type: 'deploy_failed',
+      message: err?.message || 'LINE rich menu deploy failed',
+      alert: true,
+    });
+    res.status(400).json({ ok: false, error: err?.message || 'LINE rich menu deploy failed' });
+  }
 });
 app.get('/api/admin/diagnostics', requireAdmin, async (_req, res) => {
   await ensureSettingsFresh();
@@ -2981,7 +4646,11 @@ app.post('/api/admin/diagnostics/recheck', requireAdmin, async (_req, res) => {
   res.json({ ok: true, report, health: buildHealthSnapshot() });
 });
 // ข้อมูลร้าน/แบรนด์สำหรับหลังบ้าน (ค่าจริง ไม่ปิดบัง)
-app.get('/api/admin/site', requireAdmin, (_req, res) => res.json(siteConfig()));
+app.get('/api/admin/site', requireStoreScopedAccess('staff'), async (req, res) => {
+  const { storeId } = adminStoreScope(req);
+  const overrides = await allStoreSettings(storeId).catch(() => ({}));
+  res.json(siteConfigWithOverrides(overrides));
+});
 app.get('/api/admin/reviews', requireAdmin, (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json(mergedReviewGalleryData());
@@ -3012,6 +4681,7 @@ app.put('/api/admin/reviews', requireAdmin, async (req, res) => {
 app.get('/api/admin/line/recent-senders', requireAdmin, async (_req, res) => {
   await ensureSettingsFresh();
   const currentAdminUserId = String(adminUserId() || '').trim();
+  const adminIds = new Set(allLineAdminUserIds());
   const byUserId = new Map();
   for (const [sessionId, meta] of Object.entries(chatInboxMetaMap())) {
     const lineUserId = String(meta?.lineUserId || '').trim();
@@ -3026,13 +4696,14 @@ app.get('/api/admin/line/recent-senders', requireAdmin, async (_req, res) => {
       avatar: String(meta.customerAvatar || '').trim(),
       lastActiveAt,
       isCurrentAdmin: lineUserId === currentAdminUserId,
+      isBoundAdmin: adminIds.has(lineUserId),
     });
   }
   const senders = [...byUserId.values()].sort((a, b) => b.lastActiveAt - a.lastActiveAt).slice(0, 20);
   res.json({ ok: true, currentAdminUserId, senders });
 });
 app.post('/api/admin/test-line', requireAdmin, async (req, res) => {
-  if (!lineClient() || !adminUserId()) return res.status(400).json({ error: 'ยังไม่ได้ตั้งค่า LINE token หรือ admin userId' });
+  if (!lineClient() || !allLineAdminUserIds().length) return res.status(400).json({ error: 'ยังไม่ได้ตั้งค่า LINE token หรือยังไม่มีแอดมิน LINE ที่ผูกไว้' });
   try {
     const delivered = await pushToAdmin(`🔔 ทดสอบการเชื่อมต่อ LINE OA จากหลังบ้าน ${siteValue('SITE_NAME')} สำเร็จ`);
     if (!delivered) throw new Error('LINE push ไม่สำเร็จ');

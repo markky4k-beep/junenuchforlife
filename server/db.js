@@ -78,16 +78,22 @@ export const upsertPaymentLog = (...args) => active.upsertPaymentLog(...args);
 export const getSetting = (...args) => active.getSetting(...args);
 export const setSetting = (...args) => active.setSetting(...args);
 export const allSettings = (...args) => active.allSettings(...args);
-
-export const listAllChatSessionMeta = (...args) => active.listAllChatSessionMeta(...args);
-export const getChatSessionMeta = (...args) => active.getChatSessionMeta(...args);
-export const upsertChatSessionMeta = (...args) => active.upsertChatSessionMeta(...args);
-export const deleteChatSessionMeta = (...args) => active.deleteChatSessionMeta(...args);
-export const claimLineWebhookEvent = (...args) => active.claimLineWebhookEvent(...args);
-export const cleanupLineWebhookEvents = (...args) => active.cleanupLineWebhookEvents(...args);
-export const insertLineWebhookAudit = (...args) => active.insertLineWebhookAudit(...args);
-export const listLineWebhookAudits = (...args) => active.listLineWebhookAudits(...args);
-export const cleanupLineWebhookAudits = (...args) => active.cleanupLineWebhookAudits(...args);
+export const getStoreSetting = (...args) => (typeof active.getStoreSetting === 'function' ? active.getStoreSetting(...args) : Promise.resolve(undefined));
+export const setStoreSetting = (...args) => (typeof active.setStoreSetting === 'function' ? active.setStoreSetting(...args) : Promise.resolve());
+export const allStoreSettings = (...args) => (typeof active.allStoreSettings === 'function' ? active.allStoreSettings(...args) : Promise.resolve({}));
+export const getDefaultStore = (...args) => (typeof active.getDefaultStore === 'function' ? active.getDefaultStore(...args) : Promise.resolve(null));
+export const getStore = (...args) => (typeof active.getStore === 'function' ? active.getStore(...args) : Promise.resolve(null));
+export const getStoreByHost = (...args) => (typeof active.getStoreByHost === 'function' ? active.getStoreByHost(...args) : Promise.resolve(null));
+export const listStores = (...args) => (typeof active.listStores === 'function' ? active.listStores(...args) : Promise.resolve([]));
+export const isStoreSubdomainAvailable = (...args) => (typeof active.isStoreSubdomainAvailable === 'function' ? active.isStoreSubdomainAvailable(...args) : Promise.resolve(false));
+export const createStore = (...args) => (typeof active.createStore === 'function' ? active.createStore(...args) : Promise.resolve(null));
+export const addStoreDomain = (...args) => (typeof active.addStoreDomain === 'function' ? active.addStoreDomain(...args) : Promise.resolve(null));
+export const listStoreDomains = (...args) => (typeof active.listStoreDomains === 'function' ? active.listStoreDomains(...args) : Promise.resolve([]));
+export const createStoreDatabase = (...args) => (typeof active.createStoreDatabase === 'function' ? active.createStoreDatabase(...args) : Promise.resolve(null));
+export const getStoreDatabase = (...args) => (typeof active.getStoreDatabase === 'function' ? active.getStoreDatabase(...args) : Promise.resolve(null));
+export const listStoreDatabases = (...args) => (typeof active.listStoreDatabases === 'function' ? active.listStoreDatabases(...args) : Promise.resolve([]));
+export const addUserStoreRole = (...args) => (typeof active.addUserStoreRole === 'function' ? active.addUserStoreRole(...args) : Promise.resolve());
+export const listUserStoreRoles = (...args) => (typeof active.listUserStoreRoles === 'function' ? active.listUserStoreRoles(...args) : Promise.resolve([]));
 
 export const addReview = (...args) => active.addReview(...args);
 export const listReviews = (...args) => active.listReviews(...args);
@@ -102,5 +108,96 @@ export const getArticle = (...args) => active.getArticle(...args);
 export const listArticles = (...args) => active.listArticles(...args);
 export const updateArticle = (...args) => active.updateArticle(...args);
 export const deleteArticle = (...args) => active.deleteArticle(...args);
+export const createCommunityPost = (...args) => (typeof active.createCommunityPost === 'function' ? active.createCommunityPost(...args) : Promise.resolve(null));
+export const getCommunityPost = (...args) => (typeof active.getCommunityPost === 'function' ? active.getCommunityPost(...args) : Promise.resolve(null));
+export const listCommunityPosts = (...args) => (typeof active.listCommunityPosts === 'function' ? active.listCommunityPosts(...args) : Promise.resolve([]));
+export const updateCommunityPostStatus = (...args) => (typeof active.updateCommunityPostStatus === 'function' ? active.updateCommunityPostStatus(...args) : Promise.resolve(null));
+export const deleteCommunityPost = (...args) => (typeof active.deleteCommunityPost === 'function' ? active.deleteCommunityPost(...args) : Promise.resolve());
+export const createCommunityComment = (...args) => (typeof active.createCommunityComment === 'function' ? active.createCommunityComment(...args) : Promise.resolve(null));
+export const listCommunityComments = (...args) => (typeof active.listCommunityComments === 'function' ? active.listCommunityComments(...args) : Promise.resolve([]));
+export const setCommunityReaction = (...args) => (typeof active.setCommunityReaction === 'function' ? active.setCommunityReaction(...args) : Promise.resolve(null));
+export const setCommunitySave = (...args) => (typeof active.setCommunitySave === 'function' ? active.setCommunitySave(...args) : Promise.resolve(null));
+export const createCommunityStory = (...args) => (typeof active.createCommunityStory === 'function' ? active.createCommunityStory(...args) : Promise.resolve(null));
+export const listCommunityStories = (...args) => (typeof active.listCommunityStories === 'function' ? active.listCommunityStories(...args) : Promise.resolve([]));
+export const deleteCommunityStory = (...args) => (typeof active.deleteCommunityStory === 'function' ? active.deleteCommunityStory(...args) : Promise.resolve());
+export const seedCommunityFromArticles = (...args) => (typeof active.seedCommunityFromArticles === 'function' ? active.seedCommunityFromArticles(...args) : Promise.resolve({ posts: 0, stories: 0, totalArticles: 0 }));
+
+const chatSessionMetaStore = new Map();
+const lineWebhookEventStore = new Map();
+const lineWebhookAuditStore = [];
+
+export async function listAllChatSessionMeta() {
+  if (typeof active.listAllChatSessionMeta === 'function') return active.listAllChatSessionMeta();
+  return Object.fromEntries(chatSessionMetaStore.entries());
+}
+
+export async function getChatSessionMeta(sessionId) {
+  if (typeof active.getChatSessionMeta === 'function') return active.getChatSessionMeta(sessionId);
+  const key = String(sessionId || '').trim();
+  return key ? (chatSessionMetaStore.get(key) || null) : null;
+}
+
+export async function upsertChatSessionMeta(sessionId, meta = {}) {
+  if (typeof active.upsertChatSessionMeta === 'function') return active.upsertChatSessionMeta(sessionId, meta);
+  const key = String(sessionId || '').trim();
+  if (!key) return null;
+  const current = chatSessionMetaStore.get(key) || {};
+  const next = { ...current, ...(meta && typeof meta === 'object' ? meta : {}) };
+  chatSessionMetaStore.set(key, next);
+  return next;
+}
+
+export async function deleteChatSessionMeta(sessionId) {
+  if (typeof active.deleteChatSessionMeta === 'function') return active.deleteChatSessionMeta(sessionId);
+  const key = String(sessionId || '').trim();
+  if (!key) return false;
+  return chatSessionMetaStore.delete(key);
+}
+
+export async function claimLineWebhookEvent(eventKey, processedAt = Date.now()) {
+  if (typeof active.claimLineWebhookEvent === 'function') return active.claimLineWebhookEvent(eventKey, processedAt);
+  const key = String(eventKey || '').trim();
+  if (!key) return { duplicate: false };
+  if (lineWebhookEventStore.has(key)) return { duplicate: true, existing: lineWebhookEventStore.get(key) };
+  const record = { eventKey: key, processedAt: Number(processedAt || Date.now()) || Date.now() };
+  lineWebhookEventStore.set(key, record);
+  return { duplicate: false, record };
+}
+
+export async function cleanupLineWebhookEvents(olderThan = 0) {
+  if (typeof active.cleanupLineWebhookEvents === 'function') return active.cleanupLineWebhookEvents(olderThan);
+  const cutoff = Number(olderThan || 0);
+  let removed = 0;
+  for (const [key, value] of lineWebhookEventStore.entries()) {
+    if (Number(value?.processedAt || 0) < cutoff) {
+      lineWebhookEventStore.delete(key);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+export async function insertLineWebhookAudit(entry = {}) {
+  if (typeof active.insertLineWebhookAudit === 'function') return active.insertLineWebhookAudit(entry);
+  lineWebhookAuditStore.unshift({ ...(entry && typeof entry === 'object' ? entry : {}) });
+  if (lineWebhookAuditStore.length > 1000) lineWebhookAuditStore.length = 1000;
+  return true;
+}
+
+export async function listLineWebhookAudits(limit = 100) {
+  if (typeof active.listLineWebhookAudits === 'function') return active.listLineWebhookAudits(limit);
+  const size = Math.max(0, Number(limit || 0) || 100);
+  return lineWebhookAuditStore.slice(0, size);
+}
+
+export async function cleanupLineWebhookAudits(olderThan = 0) {
+  if (typeof active.cleanupLineWebhookAudits === 'function') return active.cleanupLineWebhookAudits(olderThan);
+  const cutoff = Number(olderThan || 0);
+  const kept = lineWebhookAuditStore.filter((item) => Number(item?.at || 0) >= cutoff);
+  const removed = lineWebhookAuditStore.length - kept.length;
+  lineWebhookAuditStore.length = 0;
+  lineWebhookAuditStore.push(...kept);
+  return removed;
+}
 
 export default active.default || null;

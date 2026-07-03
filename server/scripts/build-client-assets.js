@@ -79,7 +79,7 @@ function transformPublicApp(source = '') {
   const adminBlock = source.slice(start, end);
   let next = `${source.slice(0, start)}${publicAdminStubSource(adminBlock)}\n\n${source.slice(end)}`;
   next = next.replace(/\/api\/admin/g, '/__admin_disabled__');
-  next = next.replace(/\/admin\/(products|articles|inbox|orders|users|coupons|site|settings)/g, '/__admin_disabled__/$1');
+  next = next.replace(/\/admin\/(products|community|articles|inbox|orders|users|coupons|site|settings)/g, '/__admin_disabled__/$1');
   return next;
 }
 
@@ -89,16 +89,22 @@ async function buildTask(task) {
   const result = await minify(source, {
     module: task.module,
     compress: {
-      passes: 2,
+      passes: 3,
       drop_console: true,
       drop_debugger: true,
       pure_getters: true,
+      dead_code: true,
+      unused: true,
+      booleans_as_integers: true,
     },
-    mangle: true,
+    mangle: {
+      safari10: true,
+    },
     format: {
       comments: false,
       ascii_only: true,
     },
+    sourceMap: false,
   });
   if (!result.code) throw new Error(`build_failed:${path.basename(task.src)}`);
   const banner = '/* generated file: edit client-src sources, not public output */\n';
@@ -119,6 +125,11 @@ const tasks = [
     module: false,
   },
   {
+    src: path.join(projectRoot, 'client-src', 'modules', 'core.js'),
+    dest: path.join(projectRoot, 'public', 'client-core.js'),
+    module: false,
+  },
+  {
     src: path.join(projectRoot, 'client-src', 'bg3d.js'),
     dest: path.join(projectRoot, 'public', 'bg3d.js'),
     module: true,
@@ -127,7 +138,6 @@ const tasks = [
 
 await Promise.all(tasks.map(buildTask));
 
-// stamp ?v= ด้วย content hash อัตโนมัติ — จำเป็นเพราะ asset พวกนี้ถูก cache แบบ immutable 1 ปี
 async function contentHash(file) {
   const buf = await fs.readFile(file);
   return crypto.createHash('md5').update(buf).digest('hex').slice(0, 10);
@@ -142,20 +152,23 @@ async function stampAssetVersions(htmlFile, hashByAsset) {
   await fs.writeFile(htmlFile, html, 'utf8');
 }
 
-const [stylesHash, appHash, bg3dHash, adminAppHash] = await Promise.all([
+const [stylesHash, appHash, clientCoreHash, bg3dHash, adminAppHash] = await Promise.all([
   contentHash(path.join(projectRoot, 'public', 'styles.css')),
   contentHash(path.join(projectRoot, 'public', 'app.js')),
+  contentHash(path.join(projectRoot, 'public', 'client-core.js')),
   contentHash(path.join(projectRoot, 'public', 'bg3d.js')),
   contentHash(path.join(projectRoot, 'private-build', 'admin-app.js')),
 ]);
 await stampAssetVersions(path.join(projectRoot, 'public', 'index.html'), {
   '/styles.css': stylesHash,
+  '/client-core.js': clientCoreHash,
   '/app.js': appHash,
   '/bg3d.js': bg3dHash,
 });
 await stampAssetVersions(path.join(projectRoot, 'private-build', 'admin.html'), {
   '/styles.css': stylesHash,
+  '/client-core.js': clientCoreHash,
   '/api/admin/client/app.js': adminAppHash,
   '/bg3d.js': bg3dHash,
 });
-console.log(`built ${tasks.length} client assets (styles=${stylesHash} app=${appHash} bg3d=${bg3dHash} admin=${adminAppHash})`);
+console.log(`built ${tasks.length} client assets (styles=${stylesHash} core=${clientCoreHash} app=${appHash} bg3d=${bg3dHash} admin=${adminAppHash})`);

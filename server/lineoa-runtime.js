@@ -38,6 +38,8 @@ export function createLineRuntime(deps = {}) {
     statusLabel,
     applyOrderAction,
     adminUserId,
+    isLineAdminUserId,
+    redeemLineAdminBindCode,
     handleAdminMessage,
     ensureSettingsFresh,
     ensureLineWebhookEventIdempotency,
@@ -73,9 +75,11 @@ export function createLineRuntime(deps = {}) {
 
   // ต้องไม่ว่างทั้งคู่ — กันกรณี LINE_ADMIN_USER_ID ยังไม่ตั้ง ('' === '' จะกลายเป็นแอดมินทั้งที่ไม่ใช่)
   function isLineAdminSource(source = {}) {
-    const admin = String(typeof adminUserId === 'function' ? adminUserId() || '' : '').trim();
     const userId = String(source?.userId || '').trim();
-    return Boolean(admin && userId && userId === admin);
+    if (!userId) return false;
+    if (typeof isLineAdminUserId === 'function') return Boolean(isLineAdminUserId(userId));
+    const admin = String(typeof adminUserId === 'function' ? adminUserId() || '' : '').trim();
+    return Boolean(admin && userId === admin);
   }
 
   const lineTraceByReplyToken = new Map();
@@ -796,6 +800,95 @@ export function createLineRuntime(deps = {}) {
     return 'กรุณาส่งข้อมูลการจัดส่งต่อได้เลยค่ะ';
   }
 
+  function buildLineCheckoutCollectCustomerFlex(draft = {}, field = '') {
+    const customer = lineCheckoutCustomerFromDraft(draft);
+    const productName = String(draft?.productName || 'สินค้า').trim();
+    const activeField = String(field || lineCheckoutMissingField(customer)?.key || '').trim();
+    const fieldLabel = activeField === 'name'
+      ? 'ชื่อผู้รับ'
+      : activeField === 'phone'
+        ? 'เบอร์โทรศัพท์'
+        : activeField === 'address'
+          ? 'ที่อยู่'
+          : 'ข้อมูลจัดส่ง';
+    const rows = [
+      ['ชื่อ', customer.name],
+      ['เบอร์โทรศัพท์', customer.phone],
+      ['ที่อยู่', customer.address],
+    ];
+    return {
+      type: 'flex',
+      altText: 'ขอชื่อ เบอร์โทรศัพท์ และที่อยู่',
+      contents: {
+        type: 'bubble',
+        size: 'mega',
+        body: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'md',
+          paddingAll: '18px',
+          backgroundColor: '#FBFAFF',
+          contents: [
+            lineCategoryBadge('DELIVERY INFO', '#7B5CFF'),
+            {
+              type: 'text',
+              text: 'ขอชื่อ เบอร์โทรศัพท์ และที่อยู่',
+              weight: 'bold',
+              size: 'xl',
+              color: '#191528',
+              wrap: true,
+            },
+            {
+              type: 'text',
+              text: `สำหรับ ${productName || 'ออเดอร์นี้'} พิมพ์${fieldLabel}ส่งในแชตนี้ได้เลยค่ะ`,
+              size: 'sm',
+              color: '#6B5CA5',
+              wrap: true,
+            },
+            {
+              type: 'box',
+              layout: 'vertical',
+              spacing: 'sm',
+              cornerRadius: '18px',
+              backgroundColor: '#FFFFFF',
+              paddingAll: '14px',
+              borderColor: '#EFE9FF',
+              borderWidth: '1px',
+              contents: rows.map(([label, value]) => ({
+                type: 'box',
+                layout: 'horizontal',
+                spacing: 'sm',
+                contents: [
+                  { type: 'text', text: label, size: 'sm', color: '#7A7195', flex: 4 },
+                  {
+                    type: 'text',
+                    text: value ? 'เรียบร้อย' : 'รอกรอก',
+                    size: 'sm',
+                    weight: 'bold',
+                    color: value ? '#2D9B5F' : '#B68A2E',
+                    align: 'end',
+                    flex: 3,
+                  },
+                ],
+              })),
+            },
+            {
+              type: 'text',
+              text: 'ต้องการยกเลิก พิมพ์ cancel ได้เลยค่ะ',
+              size: 'xs',
+              color: '#9A91B8',
+              wrap: true,
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  function buildLineCheckoutPromptMessage(draft = {}, field = '') {
+    return buildLineCheckoutCollectCustomerFlex(draft, field);
+  }
+
   function lineCheckoutActiveOrder(meta = {}) {
     return {
       orderId: String(meta?.lineActiveOrderId || '').trim(),
@@ -972,9 +1065,12 @@ export function createLineRuntime(deps = {}) {
     };
   }
 
-  function buildLinePromptPayOrderFlex(order = {}, accessToken = '') {
+  function buildLinePromptPayOrderFlex(order = {}, accessToken = '', promptpay = null) {
     const qrUrl = buildPromptPayQrUrl ? buildPromptPayQrUrl(order?.id, accessToken) : '';
     const orderUrl = lineOrderUrl(order?.id, accessToken);
+    const promptpayName = String(promptpay?.name || '').trim();
+    const promptpayId = String(promptpay?.promptpayId || '').trim();
+    const totalText = formatLineCurrency(order?.total || promptpay?.amount || 0);
     return {
       type: 'flex',
       altText: `ออเดอร์ ${order?.id || ''} พร้อมชำระผ่าน PromptPay`,
@@ -998,6 +1094,18 @@ export function createLineRuntime(deps = {}) {
               contents: [
                 { type: 'text', text: 'ข้อมูลบัญชีรับเงิน', size: 'md', weight: 'bold', color: '#2C2158' },
                 { type: 'text', text: `order_id ${String(order?.id || '-').trim() || '-'}`, size: 'sm', wrap: true, color: '#5A3E00', weight: 'bold' },
+                { type: 'text', text: `ยอดชำระ ${totalText}`, size: 'xl', wrap: true, color: '#2C2158', weight: 'bold' },
+                ...(promptpayName ? [{ type: 'text', text: promptpayName, size: 'sm', wrap: true, color: '#5A3E00', weight: 'bold' }] : []),
+                ...(promptpayId ? [{ type: 'text', text: `PromptPay ${promptpayId}`, size: 'sm', wrap: true, color: '#7A6740' }] : []),
+                ...(qrUrl ? [{
+                  type: 'image',
+                  url: qrUrl,
+                  size: 'full',
+                  aspectRatio: '1:1',
+                  aspectMode: 'fit',
+                  backgroundColor: '#FFFFFF',
+                  margin: 'sm',
+                }] : []),
                 { type: 'text', text: `ยอดชำระ ${formatLineCurrency(order?.total || 0)}`, size: 'sm', wrap: true, color: '#7A6740' },
                 { type: 'text', text: 'สแกน QR ที่แนบไว้ด้านบนได้ทันที', size: 'sm', wrap: true, color: '#7A6740' },
               ],
@@ -2654,7 +2762,7 @@ export function createLineRuntime(deps = {}) {
       lineAwaitingSlipOrderId: '',
     });
     if (missing) {
-      await replyLineMessages(event.replyToken, [lineTextReply(lineCheckoutFieldPrompt(missing.key, draft))]);
+      await replyLineMessages(event.replyToken, [buildLineCheckoutPromptMessage(draft, missing.key)]);
       return true;
     }
     await replyLineMessages(event.replyToken, [buildLineCheckoutPaymentMethodFlex(draft)]);
@@ -2675,7 +2783,7 @@ export function createLineRuntime(deps = {}) {
         lineCheckoutState: 'collect_customer',
         lineCheckoutAwaitingField: missing.key,
       });
-      await replyLineMessages(event.replyToken, [lineTextReply(lineCheckoutFieldPrompt(missing.key, draft))]);
+      await replyLineMessages(event.replyToken, [buildLineCheckoutPromptMessage(draft, missing.key)]);
       return true;
     }
     const paymentMethod = normalizeLinePaymentMethod(selectedValue);
@@ -2711,7 +2819,7 @@ export function createLineRuntime(deps = {}) {
         lineCheckoutState: 'collect_customer',
         lineCheckoutAwaitingField: missing.key,
       });
-      await replyLineMessages(event.replyToken, [lineTextReply(lineCheckoutFieldPrompt(missing.key, draft))]);
+      await replyLineMessages(event.replyToken, [buildLineCheckoutPromptMessage(draft, missing.key)]);
       return true;
     }
     const resolvedPaymentMethod = normalizeLinePaymentMethod(paymentMethod || draft?.paymentMethod || '') || 'promptpay';
@@ -2739,13 +2847,7 @@ export function createLineRuntime(deps = {}) {
         lineAwaitingSlipOrderId: resolvedPaymentMethod === 'promptpay' ? orderId : '',
       });
       if (resolvedPaymentMethod === 'promptpay') {
-        const qrUrl = buildPromptPayQrUrl ? buildPromptPayQrUrl(orderId, accessToken) : '';
-        const messages = [lineTextReply(`สร้างออเดอร์ ${orderId} สำเร็จแล้วค่ะ ยอดชำระ ${formatLineCurrency(result?.order?.total || 0)}`)];
-        if (qrUrl) {
-          messages.push({ type: 'image', originalContentUrl: qrUrl, previewImageUrl: qrUrl });
-        }
-        messages.push(buildLinePromptPayOrderFlex(result.order, accessToken));
-        await replyLineMessages(event.replyToken, messages);
+        await replyLineMessages(event.replyToken, [buildLinePromptPayOrderFlex(result.order, accessToken, result.promptpay)]);
         return true;
       }
       await replyLineMessages(event.replyToken, [buildLineCardOrderFlex(result.order, result.checkoutUrl || '', accessToken)]);
@@ -2856,7 +2958,7 @@ export function createLineRuntime(deps = {}) {
       lineCheckoutAwaitingField: missing?.key || '',
     });
     if (missing) {
-      await replyLineMessages(event.replyToken, [lineTextReply(lineCheckoutFieldPrompt(missing.key, nextDraft))]);
+      await replyLineMessages(event.replyToken, [buildLineCheckoutPromptMessage(nextDraft, missing.key)]);
       return true;
     }
     await replyLineMessages(event.replyToken, [buildLineCheckoutPaymentMethodFlex(nextDraft)]);
@@ -3217,7 +3319,7 @@ export function createLineRuntime(deps = {}) {
           lineCheckoutState: 'collect_customer',
           lineCheckoutAwaitingField: missing.key,
         });
-        await replyLineMessages(event.replyToken, [lineTextReply(lineCheckoutFieldPrompt(missing.key, draft))]);
+        await replyLineMessages(event.replyToken, [buildLineCheckoutPromptMessage(draft, missing.key)]);
         return true;
       }
     }
@@ -3292,6 +3394,21 @@ export function createLineRuntime(deps = {}) {
     if (event.type === 'postback') {
       lineTraceStep(event, 'postback_start');
       if (await handleLinePostbackEvent(event)) return;
+    }
+    if (event.type === 'message' && event.message?.type === 'text') {
+      const incomingText = String(event.message.text || '').trim();
+      const bindMatch = incomingText.match(/^bindadminddd\b\s*([A-Z0-9-]{4,20})?$/i);
+      if (bindMatch && typeof redeemLineAdminBindCode === 'function') {
+        lineTraceStep(event, 'admin_bind_start');
+        const result = await redeemLineAdminBindCode({
+          code: String(bindMatch[1] || '').trim(),
+          userId: String(event.source?.userId || '').trim(),
+          displayName: '',
+        });
+        await replyLineMessages(event.replyToken, [lineTextReply(result?.message || 'ไม่สามารถผูกสิทธิ์แอดมินได้ค่ะ')]);
+        lineTraceStep(event, 'admin_bind_done');
+        return;
+      }
     }
     if (event.type === 'message' && event.message?.type === 'text' && isLineAdminSource(event.source)) {
       lineTraceStep(event, 'admin_text_start');

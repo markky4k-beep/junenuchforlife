@@ -80,7 +80,7 @@ export async function uploadPublicAsset({ buffer, contentType, extension, folder
   const objectPath = `${safeFolder}/${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}.${safeExt}`;
   const { error: uploadError } = await supabase.storage.from(bucket).upload(objectPath, buffer, {
     contentType,
-    cacheControl: '31536000',
+    cacheControl: '3600',
     upsert: false,
   });
   if (uploadError) throw new Error(`อัปโหลดไฟล์ขึ้น Supabase ไม่สำเร็จ: ${uploadError.message}`);

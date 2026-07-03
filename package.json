@@ -10,6 +10,12 @@
     "dev": "node --watch server/index.js",
     "verify:chat": "node server/scripts/verify-chat-realtime.js",
     "verify:chat:supabase": "node server/scripts/verify-chat-supabase-realtime.js",
+    "verify:community": "node server/scripts/verify-community-smoke.js",
+    "verify:hard-isolation": "node server/scripts/verify-hard-isolation-audit.js",
+    "verify:lineoa": "node server/scripts/verify-lineoa-runtime-smoke.js",
+    "verify:multistore": "node server/scripts/verify-multistore-smoke.js",
+    "verify:order": "node server/scripts/verify-order-service-smoke.js",
+    "verify:release": "npm run build && npm run verify:hard-isolation && npm run verify:community && npm run verify:order && npm run verify:lineoa",
     "import:markky": "node server/scripts/import-markkyproduction-products.js",
     "migrate:supabase": "node server/scripts/migrate-sqlite-to-supabase.js",
     "export:supabase-sql": "node server/scripts/export-sqlite-to-supabase-sql.js"

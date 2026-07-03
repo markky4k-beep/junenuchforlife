@@ -55,12 +55,12 @@ export function createOrderService(deps = {}) {
     return 'VYU-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 5)).toUpperCase().slice(-7);
   }
 
-  async function buildDetailedOrderItems(items = []) {
+  async function buildDetailedOrderItems(items = [], options = {}) {
     if (!Array.isArray(items) || !items.length) throw new Error('ไม่มีสินค้าในคำสั่งซื้อ');
     let subtotal = 0;
     const detailed = [];
     const lines = [];
-    const productMap = new Map((await listProductsByIds(items.map((it) => it?.id), false)).map((product) => [product.id, product]));
+    const productMap = new Map((await listProductsByIds(items.map((it) => it?.id), false, { storeId: options.storeId })).map((product) => [product.id, product]));
     for (const it of items) {
       const product = productMap.get(String(it?.id || ''));
       if (!product || !product.active) continue;
@@ -86,6 +86,7 @@ export function createOrderService(deps = {}) {
     baseUrl = '',
     channel = 'web',
     lineUserId = '',
+    storeId = '',
   } = {}) {
     assertCustomer(customer);
     const method = payment === 'card' ? 'card' : 'promptpay';
@@ -93,9 +94,10 @@ export function createOrderService(deps = {}) {
     if (method === 'card' && !stripe) throw new Error('ระบบบัตรยังไม่พร้อม (ยังไม่ได้ตั้งค่า Stripe)');
     if (method === 'promptpay' && !cfg('PROMPTPAY_ID')) throw new Error('ระบบ PromptPay ยังไม่พร้อม (ยังไม่ได้ตั้งค่า PromptPay ID)');
 
-    const { subtotal, detailed, lines } = await buildDetailedOrderItems(items);
+    const normalizedStoreId = String(storeId || '').trim() || 'store_main';
+    const { subtotal, detailed, lines } = await buildDetailedOrderItems(items, { storeId: normalizedStoreId });
     const normalizedCustomer = normalizeCustomer(customer);
-    const couponResult = await evalCoupon(coupon, subtotal);
+    const couponResult = await evalCoupon(coupon, subtotal, { storeId: normalizedStoreId });
     if (!couponResult.ok) throw new Error(couponResult.error || 'คูปองไม่ถูกต้อง');
     const discount = couponResult.discount || 0;
     const shipping = shippingFor(normalizedCustomer.country, subtotal - discount);
@@ -118,7 +120,7 @@ export function createOrderService(deps = {}) {
           shipping,
         });
       }
-      await reserveOrderResources({ items: detailed, coupon: reservedCoupon });
+      await reserveOrderResources({ items: detailed, coupon: reservedCoupon, storeId: normalizedStoreId });
       reserved = true;
 
       const order = await createOrder({
@@ -140,6 +142,7 @@ export function createOrderService(deps = {}) {
         resources_reserved: true,
         channel: String(channel || 'web').trim() || 'web',
         line_user_id: String(lineUserId || '').trim(),
+        storeId: normalizedStoreId,
       });
 
       if (normalizedSessionId) {
@@ -152,6 +155,7 @@ export function createOrderService(deps = {}) {
           lineActiveOrderAccessToken: accessToken,
           lineCheckoutState: '',
           lineCheckoutAwaitingField: '',
+          storeId: normalizedStoreId,
         });
         await emitAdminInboxUpdate({ type: 'order_linked', sessionId: normalizedSessionId, orderId: order.id });
       }
@@ -175,7 +179,7 @@ export function createOrderService(deps = {}) {
     } catch (err) {
       if (reserved) {
         try {
-          await releaseOrderResources({ items: detailed, coupon: reservedCoupon });
+          await releaseOrderResources({ items: detailed, coupon: reservedCoupon, storeId: normalizedStoreId });
         } catch {}
       }
       throw err;

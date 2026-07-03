@@ -35,8 +35,9 @@ data-hygiene-audit.json
 debug-cookies.txt
 *.rar
 
-# ───── raw media sources (ไม่ใช่ส่วนของเว็บ) ─────
+# raw import/media sources
 Nuchforlife/
+POD/
 Reviewbest/
 markkyproduction/
 

@@ -271,5 +271,17 @@ export function requireAdminInbox(req, res, next) {
 
 export function publicUser(u) {
   if (!u) return null;
-  return { id: u.id, email: u.email, name: u.name, role: u.role, createdAt: u.created_at };
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    username: u.username || '',
+    avatar: u.avatar || '',
+    bio: u.bio || '',
+    lineId: u.line_id || u.lineId || '',
+    phone: u.phone || '',
+    location: u.location || '',
+    role: u.role,
+    createdAt: u.created_at,
+  };
 }
