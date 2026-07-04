@@ -9755,8 +9755,32 @@ body .brand-dot::after {
 .qa-command{display:block;white-space:normal;word-break:break-word;padding:12px 14px;border-radius:14px;background:#171423;color:#f5f1ff}
 .store-check-item{color:inherit;text-decoration:none}
 .store-check-item.warn span{background:rgba(245,158,11,.14);color:#b45309}
+.diagnostics-compact{gap:16px}
+.diagnostics-compact > section{max-height:none!important;overflow:visible!important}
+.diagnostics-compact .diagnostics-actions{top:96px;display:flex;flex-wrap:wrap;gap:8px}
+.diagnostics-fold-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}
+.diagnostics-fold{border:1px solid rgba(124,92,255,.13);border-radius:22px;background:rgba(255,255,255,.78);box-shadow:0 18px 44px rgba(42,35,82,.06);overflow:hidden}
+.diagnostics-fold[open]{grid-column:span 2}
+.diagnostics-fold summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px}
+.diagnostics-fold summary::-webkit-details-marker{display:none}
+.diagnostics-fold summary span{display:grid;gap:3px;min-width:0}
+.diagnostics-fold summary b{font-size:1rem;color:#181629}
+.diagnostics-fold summary small{color:#77748a;overflow-wrap:anywhere}
+.diagnostics-fold summary em{font-style:normal;font-weight:800;color:#7b5cff;background:rgba(124,92,255,.1);border:1px solid rgba(124,92,255,.14);border-radius:999px;padding:7px 10px;white-space:nowrap}
+.diagnostics-fold[open] summary{border-bottom:1px solid rgba(124,92,255,.1)}
+.diagnostics-fold-body{padding:14px 16px 18px;max-height:min(620px,calc(100dvh - 260px));overflow:auto}
+.qa-dashboard{gap:14px}
+.qa-dashboard .diagnostics-fold{margin-top:0}
+.qa-hero{padding:16px 18px}
+.qa-counts{gap:10px}
+.qa-two-col{gap:14px}
+.qa-check-list{max-height:360px;overflow:auto;padding-right:3px}
+.qa-share-image{max-height:220px}
+.qa-command{font-size:.88rem}
 @media (max-width: 900px){
   .qa-hero{display:grid}
   .qa-score{text-align:left;min-width:0}
-  .qa-counts,.qa-two-col,.qa-check-list{grid-template-columns:1fr}
+  .qa-counts,.qa-two-col,.qa-check-list,.diagnostics-fold-grid{grid-template-columns:1fr}
+  .diagnostics-fold[open]{grid-column:auto}
+  .diagnostics-compact .diagnostics-actions{top:80px}
 }

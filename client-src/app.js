@@ -7192,6 +7192,15 @@ function diagnosticsSection(title = '', desc = '', body = '') {
     ${body}
   </section>`;
 }
+function diagnosticsCompactSection(title = '', desc = '', body = '', options = {}) {
+  return `<details class="diagnostics-fold glass" ${options.open ? 'open' : ''}>
+    <summary>
+      <span><b>${esc(title)}</b><small>${esc(desc || '')}</small></span>
+      <em>${options.open ? 'เปิดอยู่' : 'กดดูรายละเอียด'}</em>
+    </summary>
+    <div class="diagnostics-fold-body">${body}</div>
+  </details>`;
+}
 function diagnosticsEventRows(items = [], emptyText = 'ยังไม่มีข้อมูลล่าสุด') {
   if (!Array.isArray(items) || !items.length) return `<div class="glass" style="padding:18px">${esc(emptyText)}</div>`;
   return `<div class="adm-list">${items.map((item) => `<article class="adm-prod glass">
@@ -7270,11 +7279,11 @@ function productionQaDashboard(qa = {}) {
         </div>
       </article>
     </div>
-    ${diagnosticsSection('Live System Status', 'สถานะระบบที่ต้องดูหลัง deploy และก่อนเปิดร้านใหม่', `<div class="adm-list">${systemCards}</div>`)}
     <section class="glass" style="padding:18px;margin-top:18px">
       <div class="adm-head" style="margin:0 0 12px"><h3>Smoke Test Command</h3><span class="muted">รันกับ preview/production ก่อนเปิดขายจริง</span></div>
       <code class="qa-command">${esc(qa.smokeCommand || 'npm run verify:multistore')}</code>
     </section>
+    ${diagnosticsCompactSection('Live System Status', 'โดเมน ฐานข้อมูล LINE Payment และ share preview', `<div class="adm-list">${systemCards}</div>`)}
   </section>`;
 }
 async function viewAdminDiagnostics() {
@@ -7322,14 +7331,12 @@ async function viewAdminDiagnostics() {
     ${diagnosticsMetricCard('Aliases', diagnosticsHealthBadge(richAliases.length >= 2, 'Ready', 'Pending'), 'line-home / line-catalog aliases', richAliases.map((item) => item.richMenuAliasId).join(', ') || richMenu.error || 'not deployed')}
   </div>
   <div class="pf-actions" style="margin-top:14px"><button class="btn btn-primary" type="button" id="deployLineRichMenuBtn">Deploy LINE Rich Menu</button></div>`;
-  return adminLayout('diagnostics', `<div class="admin-workspace admin-diagnostics-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Health Center</span><h2>System Diagnostics</h2><p class="muted">ตรวจสุขภาพระบบ, config guard, alert ล่าสุด และ LINE webhook audit จากหลังบ้าน</p></div></div>
-    <div class="pf-actions" style="margin-bottom:16px"><button class="btn btn-primary" type="button" id="runDiagnosticsRecheckBtn">Re-check Config</button><button class="btn btn-glass" type="button" id="refreshDiagnosticsBtn">รีเฟรชหน้านี้</button><a class="btn btn-glass" href="${routeHref('/admin/settings')}">ไปหน้าตั้งค่า</a></div>
-    ${diagnosticsSection('Live Production QA', 'หน้าเดียวสำหรับเช็กความพร้อมหลัง deploy และก่อนเปิดร้านใหม่', productionQaDashboard(productionQa))}
-    ${diagnosticsSection('ภาพรวมระบบ', 'สรุปสถานะหลักที่ต้องดูทุกวัน', `<div class="adm-list">${overviewCards}</div>`)}
-    ${diagnosticsSection('การตรวจตั้งค่า', 'แยกผลตอนบูตกับผลตรวจล่าสุด เพื่อดูว่า config เสถียรหรือไม่', validationGrid)}
-    ${diagnosticsSection('LINE Rich Menu', 'Check assets and deploy Home/Catalog rich menus directly from admin', richMenuBody)}
-    ${diagnosticsSection('LINE Webhook', 'ดูปริมาณ event, duplicate และรายการล่าสุดที่เกิดขึ้น', `${webhookSummary}${diagnosticsAuditRows(runtime.webhook?.audits || [])}`)}
-    ${diagnosticsSection('Alerts และ Events', 'alerts ใช้ดูเหตุเสี่ยงล่าสุด ส่วน events ใช้ trace ระบบย้อนหลัง', `<div class="adm-list">
+  const foldedSections = `<div class="diagnostics-fold-grid">
+    ${diagnosticsCompactSection('ภาพรวมระบบ', 'สถานะหลักที่ต้องดูทุกวัน', `<div class="adm-list">${overviewCards}</div>`, { open: true })}
+    ${diagnosticsCompactSection('การตรวจตั้งค่า', 'ผลตอนบูตและผลตรวจล่าสุด', validationGrid)}
+    ${diagnosticsCompactSection('LINE Rich Menu', 'ตรวจ assets และ deploy เมนู LINE', richMenuBody)}
+    ${diagnosticsCompactSection('LINE Webhook', 'event, duplicate, failed ล่าสุด', `${webhookSummary}${diagnosticsAuditRows(runtime.webhook?.audits || [])}`)}
+    ${diagnosticsCompactSection('Alerts และ Events', 'เหตุเสี่ยงและ trace ระบบย้อนหลัง', `<div class="adm-list">
       <article class="glass" style="padding:18px">
         <div class="adm-head" style="margin:0 0 12px"><h3>Recent Alerts</h3><span class="muted">แจ้งเตือนที่เสี่ยงต่อ production</span></div>
         ${diagnosticsEventRows(runtime.recentAlerts || [], 'ยังไม่มี alert ล่าสุด')}
@@ -7339,6 +7346,11 @@ async function viewAdminDiagnostics() {
         ${diagnosticsEventRows(runtime.recentEvents || [], 'ยังไม่มี event ล่าสุด')}
       </article>
     </div>`)}
+  </div>`;
+  return adminLayout('diagnostics', `<div class="admin-workspace admin-diagnostics-ui diagnostics-compact"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Health Center</span><h2>System Diagnostics</h2><p class="muted">ตรวจสุขภาพระบบและจุดที่ต้องแก้จากหน้าเดียว โดยรายละเอียดรองถูกพับไว้ให้เปิดดูเฉพาะเวลาต้องใช้</p></div></div>
+    <div class="pf-actions diagnostics-actions" style="margin-bottom:16px"><button class="btn btn-primary" type="button" id="runDiagnosticsRecheckBtn">Re-check Config</button><button class="btn btn-glass" type="button" id="refreshDiagnosticsBtn">รีเฟรชหน้านี้</button><a class="btn btn-glass" href="${routeHref('/admin/settings')}">ไปหน้าตั้งค่า</a><a class="btn btn-glass" href="${routeHref('/admin/stores')}">Store Manager</a></div>
+    ${diagnosticsSection('Live Production QA', 'หน้าเดียวสำหรับเช็กความพร้อมหลัง deploy และก่อนเปิดร้านใหม่', productionQaDashboard(productionQa))}
+    ${foldedSections}
   </div>`);
 }
 function cropStageLines(stages) {
