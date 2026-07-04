@@ -365,6 +365,7 @@ async function userStoreRole(req = {}, storeId = '') {
   return String((roles || []).find((role) => String(role.storeId || '') === normalizedStoreId)?.role || '').trim();
 }
 async function canAccessStore(req = {}, storeId = '', minRole = 'staff') {
+  if (String(storeId || '').trim() === 'all') return String(req.user?.role || '') === ROLE_ADMIN;
   if (String(req.user?.role || '') === ROLE_ADMIN) return true;
   if (String(req.user?.role || '') === ROLE_CHAT_ADMIN && minRole === 'chat_admin') return true;
   const role = await userStoreRole(req, storeId);
@@ -410,8 +411,14 @@ async function getAdminSelectedStore(req = {}) {
   const store = await getStore(requested);
   return store || await getDefaultStore() || { id: 'store_main', name: 'Main Store', isDefault: true };
 }
-function adminStoreScope(req = {}) {
-  return { storeId: requestedAdminStoreId(req) };
+function adminStoreScope(req = {}, options = {}) {
+  const requested = requestedAdminStoreId(req);
+  if (requested === 'all') {
+    return {
+      storeId: options.allowAll === true && String(req.user?.role || '') === ROLE_ADMIN ? '' : 'store_main',
+    };
+  }
+  return { storeId: requested };
 }
 function intCfg(key, fallback) {
   const raw = parseInt(String(cfg(key) || '').trim(), 10);
@@ -3971,13 +3978,13 @@ app.get('/api/admin/orders', requireStoreScopedAccess('staff'), async (req, res)
 });
 app.get('/api/admin/inbox', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const { page, limit, offset, search } = parseAdminListQuery(req, 30);
-  const { storeId } = adminStoreScope(req);
+  const { storeId } = adminStoreScope(req, { allowAll: true });
   const data = await listChatSessions({ search, limit, offset, storeId });
   const items = (await Promise.all((data.items || []).map((item) => enrichInboxSessionItem(item, { storeId })))).filter(Boolean);
   res.json(pagedAdminResponse({ items, page, limit, total: data.total || 0 }));
 });
 app.get('/api/admin/inbox/summary', requireStoreScopedAccess('chat_admin'), async (req, res) => {
-  const { storeId } = adminStoreScope(req);
+  const { storeId } = adminStoreScope(req, { allowAll: true });
   const data = await listChatSessions({ limit: 500, offset: 0, storeId });
   const items = (await Promise.all((data.items || []).map((item) => enrichInboxSessionItem(item, { storeId })))).filter(Boolean);
   const unreadTotal = items.reduce((sum, item) => sum + Math.max(0, Number(item?.unreadCount || 0)), 0);
@@ -3986,7 +3993,7 @@ app.get('/api/admin/inbox/summary', requireStoreScopedAccess('chat_admin'), asyn
 });
 app.get('/api/admin/inbox/:sessionId', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const sessionId = normalizeChatSessionId(req.params.sessionId);
-  const { storeId } = adminStoreScope(req);
+  const { storeId } = adminStoreScope(req, { allowAll: true });
   if (!CHAT_SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'รหัสห้องแชตไม่ถูกต้อง' });
   const messages = await listChatMessages(sessionId, 300, { storeId });
   if (!messages.length) return res.status(404).json({ error: 'ไม่พบห้องแชตนี้แล้ว' });
@@ -3996,7 +4003,7 @@ app.get('/api/admin/inbox/:sessionId', requireStoreScopedAccess('chat_admin'), a
 });
 app.delete('/api/admin/inbox/:sessionId', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const sessionId = normalizeChatSessionId(req.params.sessionId);
-  const { storeId } = adminStoreScope(req);
+  const { storeId } = adminStoreScope(req, { allowAll: true });
   if (!CHAT_SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'รหัสห้องแชตไม่ถูกต้อง' });
   const existing = await listChatMessages(sessionId, 1, { storeId });
   if (!existing.length) return res.status(404).json({ error: 'ไม่พบห้องแชตนี้แล้ว' });
@@ -4009,7 +4016,7 @@ app.delete('/api/admin/inbox/:sessionId', requireStoreScopedAccess('chat_admin')
 });
 app.post('/api/admin/inbox/:sessionId/reply', requireStoreScopedAccess('chat_admin'), async (req, res) => {
   const sessionId = normalizeChatSessionId(req.params.sessionId);
-  const { storeId } = adminStoreScope(req);
+  const { storeId } = adminStoreScope(req, { allowAll: true });
   const text = String(req.body?.text || '').trim().slice(0, 1000);
   if (!CHAT_SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'รหัสห้องแชตไม่ถูกต้อง' });
   if (!text) return res.status(400).json({ error: 'กรอกข้อความก่อนตอบกลับ' });

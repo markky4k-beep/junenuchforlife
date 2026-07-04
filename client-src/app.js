@@ -135,6 +135,7 @@ function userStoreRolesClient(user = currentUser) {
   return Array.isArray(user?.storeRoles) ? user.storeRoles : [];
 }
 function currentStoreRoleClient(user = currentUser) {
+  if (isFullAdminClient(user) && adminSelectedStoreId() === 'all') return 'owner';
   const roles = userStoreRolesClient(user);
   const selected = adminSelectedStoreId();
   return String((roles.find((role) => String(role.storeId || '') === selected) || roles[0] || {}).role || '').trim();
@@ -235,7 +236,7 @@ async function ensureAdminStoresContext(force = false) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data?.error || 'โหลดรายชื่อร้านไม่สำเร็จ');
   const stores = Array.isArray(data.stores) ? data.stores : [];
-  if (stores.length && !stores.some((store) => store.id === adminSelectedStoreId())) {
+  if (stores.length && !(isFullAdminClient(currentUser) && adminSelectedStoreId() === 'all') && !stores.some((store) => store.id === adminSelectedStoreId())) {
     setAdminSelectedStoreId(stores.find((store) => store.isDefault)?.id || stores[0].id || 'store_main');
   }
   _adminStoresContext = { ...data, stores };
@@ -243,6 +244,7 @@ async function ensureAdminStoresContext(force = false) {
   return _adminStoresContext;
 }
 function selectedAdminStore() {
+  if (isFullAdminClient(currentUser) && adminSelectedStoreId() === 'all') return { id: 'all', name: 'ทุกเว็บไซต์' };
   const stores = Array.isArray(_adminStoresContext?.stores) ? _adminStoresContext.stores : [];
   return stores.find((store) => store.id === adminSelectedStoreId()) || stores[0] || { id: adminSelectedStoreId(), name: adminSelectedStoreId() };
 }
@@ -251,9 +253,13 @@ function renderAdminStoreSwitcher() {
   const stores = Array.isArray(_adminStoresContext?.stores) ? _adminStoresContext.stores : [];
   const selected = adminSelectedStoreId();
   if (!stores.length) return '';
+  const allOption = isFullAdminClient(currentUser)
+    ? `<option value="all" ${selected === 'all' ? 'selected' : ''}>ทุกเว็บไซต์ (Inbox)</option>`
+    : '';
   return `<label class="admin-store-switcher">
     <span>ร้านที่จัดการ</span>
     <select id="adminStoreSwitcher">
+      ${allOption}
       ${stores.map((store) => `<option value="${esc(store.id)}" ${store.id === selected ? 'selected' : ''}>${esc(store.name || store.id)}</option>`).join('')}
     </select>
   </label>`;
@@ -11327,11 +11333,18 @@ document.body.addEventListener('change', async (e) => {
     return;
   }
   if (e.target.id === 'adminStoreSwitcher') {
-    setAdminSelectedStoreId(e.target.value || 'store_main');
+    const nextStoreId = e.target.value || 'store_main';
+    setAdminSelectedStoreId(nextStoreId);
     _adminSelectedProductIds.clear();
     adminInboxState.sessionId = '';
     _adminInboxUnreadTotal = 0;
-    toast('เปลี่ยนร้านที่จัดการแล้ว', 'ok');
+    if (nextStoreId === 'all' && currentPath() !== '/admin/inbox') {
+      toast('แสดง Inbox จากทุกเว็บไซต์', 'ok');
+      go('/admin/inbox');
+      return;
+    }
+    refreshAdminInboxSummary().catch(() => {});
+    toast(nextStoreId === 'all' ? 'แสดง Inbox จากทุกเว็บไซต์' : 'เปลี่ยนร้านที่จัดการแล้ว', 'ok');
     render();
     return;
   }

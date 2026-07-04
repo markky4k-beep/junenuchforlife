@@ -19,6 +19,15 @@ function isMissingTable(error) {
     || /schema cache/i.test(message)
     || /relation .* does not exist/i.test(message);
 }
+function isMissingColumn(error) {
+  const message = String(error?.message || '');
+  const code = String(error?.code || '');
+  return code === '42703'
+    || code === 'PGRST204'
+    || /column .* does not exist/i.test(message)
+    || /could not find .* column/i.test(message)
+    || /schema cache/i.test(message);
+}
 function failUnlessMissingTable(error, context) {
   if (!error) return false;
   if (isMissingTable(error)) return true;
@@ -635,6 +644,20 @@ export async function findLatestOrderBySessionId(sessionId, options = {}) {
 export async function createUser(u) {
   const row = { username: '', avatar: '', bio: '', line_id: '', phone: '', location: '', ...u, email: String(u.email).toLowerCase(), created_at: Date.now() };
   const { data, error } = await supabase.from('users').insert(row).select('*').single();
+  if (isMissingColumn(error)) {
+    const { username, avatar, bio, line_id, phone, location, ...legacyRow } = row;
+    const fallback = await supabase.from('users').insert(legacyRow).select('*').single();
+    fail(fallback.error, 'createUser');
+    return {
+      username: fallback.data?.name || '',
+      avatar: '',
+      bio: '',
+      line_id: '',
+      phone: '',
+      location: '',
+      ...(fallback.data || {}),
+    };
+  }
   fail(error, 'createUser');
   return data;
 }
@@ -653,6 +676,19 @@ export async function getUserById(id) {
 
 export async function listUsers() {
   const { data, error } = await supabase.from('users').select('id,email,name,username,avatar,bio,line_id,phone,location,role,created_at').order('created_at', { ascending: false });
+  if (isMissingColumn(error)) {
+    const fallback = await supabase.from('users').select('id,email,name,role,created_at').order('created_at', { ascending: false });
+    fail(fallback.error, 'listUsers');
+    return (fallback.data || []).map((user) => ({
+      username: user.name || '',
+      avatar: '',
+      bio: '',
+      line_id: '',
+      phone: '',
+      location: '',
+      ...user,
+    }));
+  }
   fail(error, 'listUsers');
   return data || [];
 }
@@ -662,6 +698,21 @@ export async function listAdminUsers(limit = 500, offset = 0, filters = {}) {
   let query = supabase.from('users').select('id,email,name,username,avatar,bio,line_id,phone,location,role,created_at').order('created_at', { ascending: false }).range(safeOffset, safeOffset + safeLimit - 1);
   query = applyAdminUserFilters(query, filters);
   const { data, error } = await query;
+  if (isMissingColumn(error)) {
+    let fallbackQuery = supabase.from('users').select('id,email,name,role,created_at').order('created_at', { ascending: false }).range(safeOffset, safeOffset + safeLimit - 1);
+    fallbackQuery = applyAdminUserFilters(fallbackQuery, filters);
+    const fallback = await fallbackQuery;
+    fail(fallback.error, 'listAdminUsers');
+    return (fallback.data || []).map((user) => ({
+      username: user.name || '',
+      avatar: '',
+      bio: '',
+      line_id: '',
+      phone: '',
+      location: '',
+      ...user,
+    }));
+  }
   fail(error, 'listAdminUsers');
   return data || [];
 }
@@ -705,7 +756,7 @@ export async function deleteToken(token) {
 export async function updateUser(id, patch) {
   const cur = await getUserById(id);
   if (!cur) return null;
-  const { data, error } = await supabase.from('users').update({
+  const payload = {
     name: patch.name ?? cur.name,
     username: patch.username ?? cur.username ?? '',
     avatar: patch.avatar ?? cur.avatar ?? '',
@@ -714,7 +765,22 @@ export async function updateUser(id, patch) {
     phone: patch.phone ?? cur.phone ?? '',
     location: patch.location ?? cur.location ?? '',
     role: patch.role ?? cur.role,
-  }).eq('id', id).select('*').single();
+  };
+  const { data, error } = await supabase.from('users').update(payload).eq('id', id).select('*').single();
+  if (isMissingColumn(error)) {
+    const { username, avatar, bio, line_id, phone, location, ...legacyPayload } = payload;
+    const fallback = await supabase.from('users').update(legacyPayload).eq('id', id).select('*').single();
+    fail(fallback.error, 'updateUser');
+    return {
+      username: fallback.data?.name || '',
+      avatar: '',
+      bio: '',
+      line_id: '',
+      phone: '',
+      location: '',
+      ...(fallback.data || {}),
+    };
+  }
   fail(error, 'updateUser');
   return data;
 }
