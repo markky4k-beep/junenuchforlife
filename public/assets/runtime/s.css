@@ -950,6 +950,11 @@ input.track-in { width: 140px; }
   .share-chat-bg { justify-items: center; }
 }
 /* ── หน้า "ข้อมูลร้าน" แบบแท็บ + preview ทุกหมวด ── */
+.store-editing-chip { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; padding: 9px 14px; border-radius: 999px; font-size: 12px; background: rgba(123,92,255,.08); border: 1px solid rgba(123,92,255,.18); color: #4b3aa6; }
+.store-editing-chip b { color: #2d1f6b; }
+.store-editing-chip span { font-size: 11px; color: var(--muted); }
+.store-editing-chip.scoped { background: rgba(56,180,120,.1); border-color: rgba(56,180,120,.28); color: #1f8a53; }
+.store-editing-chip.scoped b { color: #14663c; }
 .site-admin-tabs .site-tab-panel { display: none; }
 .site-admin-tabs .site-tab-panel.is-active { display: block; animation: siteTabIn .24s var(--ease); }
 @keyframes siteTabIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

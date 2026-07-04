@@ -4562,6 +4562,40 @@ app.get('/api/admin/settings', requireAdmin, async (_req, res) => {
 });
 app.put('/api/admin/settings', requireAdmin, async (req, res) => {
   const s = req.body?.settings || {};
+  // ── การ์ดกันข้ามร้าน: ถ้าเลือกร้านย่อยอยู่ (x-store-id) ห้ามเขียนค่ากลางเด็ดขาด ──
+  // ค่าใน STORE_SETTING_KEYS จะถูกเก็บเป็น override เฉพาะร้านนั้น ร้านหลัก/ร้านอื่นไม่กระทบ
+  const selectedStore = await getAdminSelectedStore(req);
+  if (selectedStore && selectedStore.isDefault !== true) {
+    if (!(await requireStoreAccess(req, res, selectedStore.id, 'admin'))) return;
+    const changedKeys = [];
+    for (const k of STORE_SETTING_KEYS) {
+      if (typeof s[k] !== 'string') continue;
+      const next = s[k].trim();
+      if (SECRET_KEYS.has(k) && !next) continue;
+      const current = String(await getStoreSetting(selectedStore.id, k).catch(() => '') ?? '');
+      if (current !== next) changedKeys.push(k);
+      await setStoreSetting(selectedStore.id, k, next);
+    }
+    siteStatsCache = null;
+    siteStatsCacheAt = 0;
+    shellRenderCache.clear();
+    await recordSystemEvent({
+      level: 'info',
+      source: 'multi_tenant',
+      type: 'store_settings_saved',
+      message: `บันทึกการตั้งค่าเฉพาะร้าน ${selectedStore.name || selectedStore.id} (ไม่กระทบร้านหลัก)`,
+      data: { storeId: selectedStore.id, changedKeys: changedKeys.slice(0, 20) },
+    });
+    return res.json({
+      ok: true,
+      storeScoped: true,
+      storeId: selectedStore.id,
+      storeName: selectedStore.name || selectedStore.id,
+      changedKeys,
+      verification: { status: 'ok', changedKeys, revisionId: '' },
+      rollbackRevision: null,
+    });
+  }
   const changedKeys = [];
   const actor = configActorFromRequest(req);
   const previousSnapshot = {};

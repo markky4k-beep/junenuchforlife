@@ -18,7 +18,8 @@
     "verify:release": "npm run build && npm run verify:hard-isolation && npm run verify:community && npm run verify:order && npm run verify:lineoa",
     "import:markky": "node server/scripts/import-markkyproduction-products.js",
     "migrate:supabase": "node server/scripts/migrate-sqlite-to-supabase.js",
-    "export:supabase-sql": "node server/scripts/export-sqlite-to-supabase-sql.js"
+    "export:supabase-sql": "node server/scripts/export-sqlite-to-supabase-sql.js",
+    "verify:store-settings": "node server/scripts/verify-store-settings-isolation.js"
   },
   "dependencies": {
     "@line/bot-sdk": "^9.5.0",

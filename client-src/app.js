@@ -239,10 +239,27 @@ async function ensureAdminStoresContext(force = false) {
   if (stores.length && !(isFullAdminClient(currentUser) && adminSelectedStoreId() === 'all') && !stores.some((store) => store.id === adminSelectedStoreId())) {
     setAdminSelectedStoreId(stores.find((store) => store.isDefault)?.id || stores[0].id || 'store_main');
   }
+  // เปิดหลังบ้านจากโดเมนของร้านย่อย → เริ่มที่ร้านนั้นเสมอ (ครั้งแรกของ session) กันแก้ข้ามร้านโดยไม่รู้ตัว
+  if (!_hostStoreSnapDone && stores.length) {
+    _hostStoreSnapDone = true;
+    const currentHost = String(data.currentHost || location.host).trim().toLowerCase().replace(/:\d+$/, '');
+    const hostStore = currentHost ? stores.find((store) => {
+      let publicHost = '';
+      try { publicHost = new URL(store.publicUrl).host.toLowerCase().replace(/:\d+$/, ''); } catch {}
+      const domainHosts = (Array.isArray(store.domains) ? store.domains : [])
+        .map((d) => String(d?.host || d?.domain || '').toLowerCase().replace(/:\d+$/, ''))
+        .filter(Boolean);
+      return publicHost === currentHost || domainHosts.includes(currentHost);
+    }) : null;
+    if (hostStore && !hostStore.isDefault && adminSelectedStoreId() !== hostStore.id) {
+      setAdminSelectedStoreId(hostStore.id);
+    }
+  }
   _adminStoresContext = { ...data, stores };
   _adminStoresContextAt = Date.now();
   return _adminStoresContext;
 }
+let _hostStoreSnapDone = false;
 function selectedAdminStore() {
   if (isFullAdminClient(currentUser) && adminSelectedStoreId() === 'all') return { id: 'all', name: 'ทุกเว็บไซต์' };
   const stores = Array.isArray(_adminStoresContext?.stores) ? _adminStoresContext.stores : [];
@@ -8154,7 +8171,12 @@ async function viewAdminSite() {
     activateSiteSection(savedSection);
     updateSiteAdminPreviews();
   };
-  return adminLayout('site', `<div class="admin-workspace admin-site-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Brand Settings</span><h2>ข้อมูลร้าน / เว็บไซต์</h2><p class="muted">เลือกหมวดจากแท็บด้านล่าง แก้ข้อความฝั่งซ้าย แล้วดูตัวอย่างจริงฝั่งขวาก่อนกดบันทึก</p></div></div>
+  const editingStore = selectedAdminStore();
+  const editingIsScoped = Boolean(editingStore && editingStore.id !== 'all' && editingStore.isDefault !== true);
+  let editingHost = '';
+  try { editingHost = new URL(editingStore?.publicUrl || '').host; } catch {}
+  const editingChip = `<div class="store-editing-chip ${editingIsScoped ? 'scoped' : ''}">${editingIsScoped ? '🏪' : '🏠'} กำลังแก้ไขร้าน: <b>${esc(editingStore?.name || 'ร้านหลัก')}</b>${editingHost ? ` · ${esc(editingHost)}` : ''}<span>${editingIsScoped ? 'บันทึกเป็นค่าเฉพาะร้านนี้ — ไม่กระทบร้านหลัก' : 'บันทึกเป็นค่ากลางของร้านหลัก'}</span></div>`;
+  return adminLayout('site', `<div class="admin-workspace admin-site-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Brand Settings</span><h2>ข้อมูลร้าน / เว็บไซต์</h2><p class="muted">เลือกหมวดจากแท็บด้านล่าง แก้ข้อความฝั่งซ้าย แล้วดูตัวอย่างจริงฝั่งขวาก่อนกดบันทึก</p>${editingChip}</div></div>
     <form id="settingsForm" class="set-form glass">
       <div class="site-admin-toolbar glass">
         <div class="site-admin-nav">${sectionNav}</div>
@@ -8968,20 +8990,15 @@ document.body.addEventListener('submit', async (e) => {
       for (const k of ['SITE_SHARE_TITLE', 'SITE_SHARE_DESC', 'SITE_SHARE_IMAGE']) {
         if (fd.has(k)) settings[k] = String(fd.get(k) ?? '');
       }
-      // ฟอร์มข้อมูลร้าน (มี SITE_NAME) ของร้านย่อย → บันทึกเป็น override ของร้านนั้น ไม่ทับค่าร้านหลัก
-      const isSiteForm = fd.has('SITE_NAME');
-      const selectedStoreId = adminSelectedStoreId();
-      const defaultStoreId = String((_adminStoresContext?.stores || []).find((store) => store.isDefault)?.id || 'store_main');
-      const saveToStore = isSiteForm && selectedStoreId && selectedStoreId !== defaultStoreId;
-      const r = saveToStore
-        ? await api('/api/admin/stores/' + encodeURIComponent(selectedStoreId) + '/settings', { method: 'PUT', body: JSON.stringify({ settings }) })
-        : await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) });
+      // เซิร์ฟเวอร์ตัดสินใจเองจาก x-store-id: ร้านย่อย → เขียน override เฉพาะร้านนั้น ไม่ทับค่าร้านหลัก
+      const r = await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || 'ผิดพลาด');
       const verifyStatus = String(d?.verification?.status || 'ok').trim();
-      if (verifyStatus === 'error') toast('บันทึกแล้ว แต่ระบบยังพบจุดผิดพลาดที่ต้องแก้', 'err');
+      if (d?.storeScoped) toast(`บันทึกเฉพาะร้าน "${d.storeName || d.storeId}" แล้ว (ไม่กระทบร้านหลัก)`, 'ok');
+      else if (verifyStatus === 'error') toast('บันทึกแล้ว แต่ระบบยังพบจุดผิดพลาดที่ต้องแก้', 'err');
       else if (verifyStatus === 'warn') toast('บันทึกแล้ว พร้อมคำเตือนที่ควรตรวจต่อ', 'ok');
-      else toast('บันทึกและตรวจสอบผ่านแล้ว', 'ok');
+      else toast('บันทึกและตรวจสอบผ่านแล้ว (ค่ากลางของร้านหลัก)', 'ok');
       localStorage.removeItem('cropLandingPreviewDraft');
       localStorage.removeItem(ADMIN_CROP_DRAFT_KEY);
       setCropDraftStatus('บันทึกขึ้นระบบแล้ว');
