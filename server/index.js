@@ -18,7 +18,7 @@ import {
   listAdminOrderSummaries, listAdminLeads, listAdminUsers, getAdminDashboardStats,
   listProducts, getProduct, createProduct, updateProduct, deleteProduct,
   listProductsByIds, countProducts, countUsers, countLeads, countOrders, listLeadIdentityRows, listUserIdentityRows, listOrderIdentityRows, listDeliveredOrderTimingRows,
-  getSetting, setSetting, allSettings, getStoreSetting, setStoreSetting, allStoreSettings, getDefaultStore, getStore, getStoreByHost, listStores, isStoreSubdomainAvailable, createStore, addStoreDomain, listStoreDomains, createStoreDatabase, listStoreDatabases, addUserStoreRole, listUserStoreRoles,
+  getSetting, setSetting, allSettings, getStoreSetting, setStoreSetting, allStoreSettings, getDefaultStore, getStore, getStoreByHost, listStores, isStoreSubdomainAvailable, createStore, addStoreDomain, listStoreDomains, createStoreDatabase, listStoreDatabases, addUserStoreRole, listUserStoreRoles, deleteStoreCascade,
   listCoupons, getCoupon, createCoupon, updateCoupon, deleteCoupon, incCouponUse,
   addReview, listReviews, reviewStats, allReviewStats, getAdminOrderAnalytics, userReviewed,
   adjustStock, reserveOrderResources, releaseOrderResources, getPaymentLog, upsertPaymentLog,
@@ -62,7 +62,7 @@ import { createOrderService } from './order-service.js';
 import { DEFAULT_ARTICLES } from './default-articles.js';
 import { createLineRuntime } from './lineoa-runtime.js';
 import { extractRequestHost, normalizeRequestedSubdomain, isValidStoreSubdomain, buildStoreId, rootDomainFromPublicUrl, buildStorePublicUrl, buildStoreBootstrapSettings } from './store-tenant.js';
-import { getVercelDomainConfig, provisionVercelProjectDomain, vercelDomainAutomationConfigured } from './vercel-domains.js';
+import { getVercelDomainConfig, provisionVercelProjectDomain, removeVercelProjectDomain, vercelDomainAutomationConfigured } from './vercel-domains.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '..', 'public');
@@ -4183,6 +4183,46 @@ app.post('/api/admin/stores', requireAdmin, async (req, res) => {
       domainProvision,
     },
   });
+});
+// ลบร้านย่อย (subdomain store) — เฉพาะ global admin, ต้องยืนยันด้วย subdomain/ชื่อร้าน, ห้ามลบร้านหลัก
+app.delete('/api/admin/stores/:id', requireAdmin, async (req, res) => {
+  const store = await getStore(req.params.id);
+  if (!store) return res.status(404).json({ error: 'ไม่พบร้านที่ต้องการลบ' });
+  if (store.isDefault === true || store.id === 'store_main') {
+    return res.status(400).json({ error: 'ลบร้านหลักไม่ได้' });
+  }
+  const confirm = String(req.query?.confirm || req.body?.confirm || '').trim().toLowerCase();
+  const accepted = [store.subdomain, store.id, store.name].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean);
+  if (!confirm || !accepted.includes(confirm)) {
+    return res.status(400).json({ error: `ต้องพิมพ์ subdomain ของร้าน (${store.subdomain || store.id}) เพื่อยืนยันการลบ` });
+  }
+  const domains = await listStoreDomains(store.id).catch(() => []);
+  const domainRemovals = [];
+  for (const domain of domains) {
+    if (!domain?.host) continue;
+    const result = await removeVercelProjectDomain(domain.host).catch((err) => ({ ok: false, status: 'error', domain: domain.host, message: err?.message || String(err) }));
+    domainRemovals.push(result);
+  }
+  const cascade = await deleteStoreCascade(store.id);
+  storeHostCache.clear();
+  siteStatsCache = null;
+  siteStatsCacheAt = 0;
+  shellRenderCache.clear();
+  await recordSystemEvent({
+    level: 'warn',
+    source: 'multi_tenant',
+    type: 'store_deleted',
+    message: `ลบร้าน ${store.name || store.id} (${store.subdomain || '-'}) พร้อมข้อมูลทั้งหมดแล้ว`,
+    data: {
+      storeId: store.id,
+      subdomain: store.subdomain || '',
+      clearedTables: cascade.cleared,
+      skippedTables: cascade.skipped.slice(0, 6),
+      domainRemovals: domainRemovals.map((item) => ({ domain: item.domain, status: item.status })),
+      deletedBy: req.user?.email || req.user?.id || '',
+    },
+  });
+  res.json({ ok: true, storeId: store.id, cascade, domainRemovals });
 });
 app.post('/api/admin/stores/:id/provision-domain', requireStoreParamAccess('admin'), async (req, res) => {
   const store = await getStore(req.params.id);

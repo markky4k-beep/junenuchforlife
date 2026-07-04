@@ -1292,6 +1292,26 @@ export async function listUserStoreRoles(userId = '') {
     createdAt: row.created_at || 0,
   }));
 }
+// ลบร้านย่อยพร้อมข้อมูล tenant ทั้งหมด — ห้ามใช้กับร้าน default (มี guard ซ้ำที่ endpoint)
+const STORE_CASCADE_TABLES = [
+  'products', 'orders', 'reviews', 'leads', 'payment_logs', 'messages', 'articles', 'coupons',
+  'community_posts', 'community_comments', 'community_reactions', 'community_saves', 'community_stories',
+  'chat_session_meta', 'store_settings', 'store_domains', 'store_databases', 'user_store_roles',
+];
+export async function deleteStoreCascade(storeId) {
+  const id = normalizeStoreId(storeId);
+  if (!id || id === 'store_main') throw new Error('ลบร้านหลักไม่ได้');
+  const cleared = [];
+  const skipped = [];
+  for (const table of STORE_CASCADE_TABLES) {
+    const { error } = await supabase.from(table).delete().eq('store_id', id);
+    if (error) skipped.push({ table, message: error.message });
+    else cleared.push(table);
+  }
+  const { error } = await supabase.from('stores').delete().eq('id', id).eq('is_default', false);
+  fail(error, 'deleteStoreCascade:stores');
+  return { storeId: id, cleared, skipped };
+}
 
 export async function addReview(productId, userId, name, rating, comment, options = {}) {
   const { error } = await supabase.from('reviews').insert({

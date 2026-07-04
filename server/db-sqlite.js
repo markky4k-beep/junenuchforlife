@@ -972,6 +972,28 @@ export function listUserStoreRoles(userId = '') {
   const rows = normalized ? db.prepare(`SELECT * FROM user_store_roles WHERE user_id=?`).all(normalized) : db.prepare(`SELECT * FROM user_store_roles`).all();
   return rows.map((row) => ({ userId: row.user_id, storeId: row.store_id, role: row.role || 'admin', createdAt: row.created_at || 0 }));
 }
+// ลบร้านย่อยพร้อมข้อมูล tenant ทั้งหมด — ห้ามใช้กับร้าน default (มี guard ซ้ำที่ endpoint)
+const STORE_CASCADE_TABLES = [
+  'products', 'orders', 'reviews', 'leads', 'payment_logs', 'messages', 'articles', 'coupons',
+  'community_posts', 'community_comments', 'community_reactions', 'community_saves', 'community_stories',
+  'store_settings', 'store_domains', 'store_databases', 'user_store_roles',
+];
+export function deleteStoreCascade(storeId) {
+  const id = normalizeStoreId(storeId);
+  if (!id || id === 'store_main') throw new Error('ลบร้านหลักไม่ได้');
+  const cleared = [];
+  const skipped = [];
+  for (const table of STORE_CASCADE_TABLES) {
+    try {
+      db.prepare(`DELETE FROM ${table} WHERE store_id=?`).run(id);
+      cleared.push(table);
+    } catch (err) {
+      skipped.push({ table, message: err?.message || String(err) });
+    }
+  }
+  db.prepare(`DELETE FROM stores WHERE id=? AND is_default=0`).run(id);
+  return { storeId: id, cleared, skipped };
+}
 
 function rowToProduct(r) {
   if (!r) return null;

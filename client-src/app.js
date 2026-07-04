@@ -7081,6 +7081,7 @@ async function viewAdminStores() {
           ${publicUrl ? `<a class="btn btn-glass" href="${esc(publicUrl)}" target="_blank" rel="noopener">เปิดหน้าเว็บร้านนี้</a>` : ''}
           ${publicUrl ? `<button class="btn btn-glass" type="button" data-copystoreurl="${esc(publicUrl)}">คัดลอก URL</button>` : ''}
           ${store?.subdomain && !domainVerified ? `<button class="btn btn-glass" type="button" data-provisionstore="${esc(store.id || '')}">Retry Vercel Domain</button>` : ''}
+          ${!store?.isDefault ? `<button class="btn btn-glass store-delete-btn" type="button" data-deletestore="${esc(store.id || '')}" data-deletestore-name="${esc(store.name || store.id || '')}" data-deletestore-confirm="${esc(store.subdomain || store.id || '')}">🗑 ลบร้านนี้</button>` : ''}
         </div>
       </article>`;
     }).join('')}</div>`
@@ -10182,6 +10183,35 @@ document.body.addEventListener('click', async (e) => {
     } catch (err) {
       toast(err.message || 'provision domain ไม่สำเร็จ', 'err');
       provisionStoreBtn.disabled = false;
+    }
+    return;
+  }
+  const deleteStoreBtn = e.target.closest('[data-deletestore]');
+  if (deleteStoreBtn) {
+    e.preventDefault();
+    const storeId = String(deleteStoreBtn.dataset.deletestore || '').trim();
+    const storeName = String(deleteStoreBtn.dataset.deletestoreName || storeId).trim();
+    const confirmWord = String(deleteStoreBtn.dataset.deletestoreConfirm || storeId).trim();
+    if (!storeId) return;
+    const typed = prompt(`⚠️ ลบร้าน "${storeName}" ถาวร?\n\nข้อมูลทั้งหมดของร้านนี้จะถูกลบ: สินค้า ออเดอร์ รีวิว บทความ คูปอง ตั้งค่า และโดเมน — กู้คืนไม่ได้\n\nพิมพ์ "${confirmWord}" เพื่อยืนยันการลบ:`);
+    if (typed === null) return;
+    if (String(typed).trim().toLowerCase() !== confirmWord.toLowerCase()) {
+      toast('ข้อความยืนยันไม่ตรง ยกเลิกการลบ', 'err');
+      return;
+    }
+    deleteStoreBtn.disabled = true;
+    try {
+      const r = await api(`/api/admin/stores/${encodeURIComponent(storeId)}?confirm=${encodeURIComponent(confirmWord)}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || 'ลบร้านไม่สำเร็จ');
+      if (adminSelectedStoreId() === storeId) setAdminSelectedStoreId('store_main');
+      _adminStoresContext = null;
+      _adminStoresContextAt = 0;
+      toast(`ลบร้าน "${storeName}" พร้อมข้อมูลทั้งหมดแล้ว`, 'ok');
+      await render();
+    } catch (err) {
+      toast(err.message || 'ลบร้านไม่สำเร็จ', 'err');
+      deleteStoreBtn.disabled = false;
     }
     return;
   }

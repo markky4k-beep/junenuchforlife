@@ -955,6 +955,8 @@ input.track-in { width: 140px; }
 .store-editing-chip span { font-size: 11px; color: var(--muted); }
 .store-editing-chip.scoped { background: rgba(56,180,120,.1); border-color: rgba(56,180,120,.28); color: #1f8a53; }
 .store-editing-chip.scoped b { color: #14663c; }
+.store-delete-btn { color: #d4383e !important; border-color: rgba(212,56,62,.35) !important; }
+.store-delete-btn:hover { background: rgba(212,56,62,.08) !important; }
 .site-admin-tabs .site-tab-panel { display: none; }
 .site-admin-tabs .site-tab-panel.is-active { display: block; animation: siteTabIn .24s var(--ease); }
 @keyframes siteTabIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

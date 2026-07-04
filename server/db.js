@@ -92,6 +92,10 @@ export const listStoreDomains = (...args) => (typeof active.listStoreDomains ===
 export const createStoreDatabase = (...args) => (typeof active.createStoreDatabase === 'function' ? active.createStoreDatabase(...args) : Promise.resolve(null));
 export const getStoreDatabase = (...args) => (typeof active.getStoreDatabase === 'function' ? active.getStoreDatabase(...args) : Promise.resolve(null));
 export const listStoreDatabases = (...args) => (typeof active.listStoreDatabases === 'function' ? active.listStoreDatabases(...args) : Promise.resolve([]));
+export const deleteStoreCascade = (...args) => {
+  if (typeof active.deleteStoreCascade !== 'function') return Promise.reject(new Error('provider นี้ยังไม่รองรับการลบร้าน'));
+  return active.deleteStoreCascade(...args);
+};
 export const addUserStoreRole = (...args) => (typeof active.addUserStoreRole === 'function' ? active.addUserStoreRole(...args) : Promise.resolve());
 export const listUserStoreRoles = (...args) => (typeof active.listUserStoreRoles === 'function' ? active.listUserStoreRoles(...args) : Promise.resolve([]));
 

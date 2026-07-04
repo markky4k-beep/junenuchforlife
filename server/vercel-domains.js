@@ -98,6 +98,26 @@ export async function getVercelDomainConfig(domain = '') {
   };
 }
 
+export async function removeVercelProjectDomain(domain = '') {
+  const host = clean(domain).toLowerCase();
+  const projectIdOrName = vercelProjectId();
+  if (!host) return { ok: false, status: 'error', domain: host, message: 'missing domain' };
+  if (!vercelToken() || !projectIdOrName) {
+    return { ok: false, status: 'skipped', domain: host, message: 'VERCEL automation is not configured' };
+  }
+  const result = await vercelFetch(`/v9/projects/${encodeURIComponent(projectIdOrName)}/domains/${encodeURIComponent(host)}`, {
+    method: 'DELETE',
+  });
+  // 404 = โดเมนไม่ได้ผูกกับโปรเจกต์ (เช่นใช้ wildcard อยู่แล้ว) ถือว่าสำเร็จ
+  const notFound = result.status === 404;
+  return {
+    ok: result.ok || notFound,
+    status: result.ok ? 'removed' : (notFound ? 'not_found' : 'error'),
+    domain: host,
+    message: result.message,
+  };
+}
+
 export async function provisionVercelProjectDomain(domain = '') {
   const host = clean(domain).toLowerCase();
   const projectIdOrName = vercelProjectId();
