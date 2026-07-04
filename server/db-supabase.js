@@ -11,6 +11,20 @@ function isMissingRpc(error) {
   const code = String(error?.code || '');
   return code === 'PGRST202' || /function .* does not exist/i.test(message);
 }
+function isMissingTable(error) {
+  const message = String(error?.message || '');
+  const code = String(error?.code || '');
+  return code === '42P01'
+    || /could not find the table/i.test(message)
+    || /schema cache/i.test(message)
+    || /relation .* does not exist/i.test(message);
+}
+function failUnlessMissingTable(error, context) {
+  if (!error) return false;
+  if (isMissingTable(error)) return true;
+  fail(error, context);
+  return false;
+}
 function normalizeSearchTerm(value = '') {
   return String(value || '').trim().replace(/[\r\n,()]/g, ' ').replace(/\s+/g, ' ').slice(0, 80);
 }
@@ -1523,6 +1537,9 @@ async function enrichCommunityPosts(rows = [], viewerId = '') {
     viewerId ? supabase.from('community_reactions').select('post_id').in('post_id', ids).eq('user_id', viewerId).eq('type', 'like') : Promise.resolve({ data: [], error: null }),
     viewerId ? supabase.from('community_saves').select('post_id').in('post_id', ids).eq('user_id', viewerId) : Promise.resolve({ data: [], error: null }),
   ]);
+  if ([reactions, comments, saves, viewerReactions, viewerSaves].some((result) => isMissingTable(result.error))) {
+    return rows.map((row) => rowToCommunityPost(row));
+  }
   fail(reactions.error, 'community reactions');
   fail(comments.error, 'community comments');
   fail(saves.error, 'community saves');
@@ -1565,6 +1582,7 @@ export async function createCommunityPost(post = {}) {
     updated_at: now,
   };
   const { data, error } = await supabase.from('community_posts').insert(row).select('*').single();
+  if (failUnlessMissingTable(error, 'createCommunityPost')) return null;
   fail(error, 'createCommunityPost');
   const [mapped] = await enrichCommunityPosts([data], post.userId || '');
   return mapped || rowToCommunityPost(data);
@@ -1574,6 +1592,7 @@ export async function getCommunityPost(id, options = {}) {
   let query = supabase.from('community_posts').select('*').eq('id', id);
   query = applyStoreScope(query, options.storeId);
   const { data, error } = await query.maybeSingle();
+  if (failUnlessMissingTable(error, 'getCommunityPost')) return null;
   fail(error, 'getCommunityPost');
   const [post] = await enrichCommunityPosts(data ? [data] : [], options.viewerId || '');
   return post || null;
@@ -1585,6 +1604,7 @@ export async function listCommunityPosts(options = {}) {
   query = applyStoreScope(query, options.storeId);
   if (!options.all) query = query.eq('status', 'approved');
   const { data, error } = await query;
+  if (failUnlessMissingTable(error, 'listCommunityPosts')) return [];
   fail(error, 'listCommunityPosts');
   return enrichCommunityPosts(data || [], options.viewerId || '');
 }
@@ -1599,6 +1619,7 @@ export async function updateCommunityPostStatus(id, patch = {}) {
   }).eq('id', id);
   query = applyStoreScope(query, patch.storeId || current.storeId);
   const { data, error } = await query.select('*').single();
+  if (failUnlessMissingTable(error, 'updateCommunityPostStatus')) return null;
   fail(error, 'updateCommunityPostStatus');
   const [post] = await enrichCommunityPosts([data], patch.viewerId || '');
   return post || rowToCommunityPost(data);
@@ -1608,6 +1629,7 @@ export async function deleteCommunityPost(id, options = {}) {
   let query = supabase.from('community_posts').delete().eq('id', id);
   query = applyStoreScope(query, options.storeId);
   const { error } = await query;
+  if (failUnlessMissingTable(error, 'deleteCommunityPost')) return;
   fail(error, 'deleteCommunityPost');
 }
 
@@ -1624,6 +1646,7 @@ export async function createCommunityComment(postId, comment = {}) {
     created_at: Date.now(),
   };
   const { data, error } = await supabase.from('community_comments').insert(row).select('*').single();
+  if (failUnlessMissingTable(error, 'createCommunityComment')) return null;
   fail(error, 'createCommunityComment');
   return rowToCommunityComment(data);
 }
@@ -1633,6 +1656,7 @@ export async function listCommunityComments(postId, options = {}) {
   const post = await getCommunityPost(postId, { storeId: options.storeId });
   if (!post) return [];
   const { data, error } = await supabase.from('community_comments').select('*').eq('post_id', postId).eq('status', 'approved').order('created_at', { ascending: true }).limit(limit);
+  if (failUnlessMissingTable(error, 'listCommunityComments')) return [];
   fail(error, 'listCommunityComments');
   return (data || []).map(rowToCommunityComment);
 }
@@ -1642,9 +1666,11 @@ export async function setCommunityReaction(postId, userId, type = 'like', active
   if (!post) return null;
   if (active) {
     const { error } = await supabase.from('community_reactions').upsert({ post_id: postId, user_id: userId, type, created_at: Date.now() }, { onConflict: 'post_id,user_id,type' });
+    if (failUnlessMissingTable(error, 'setCommunityReaction')) return post;
     fail(error, 'setCommunityReaction');
   } else {
     const { error } = await supabase.from('community_reactions').delete().eq('post_id', postId).eq('user_id', userId).eq('type', type);
+    if (failUnlessMissingTable(error, 'setCommunityReaction')) return post;
     fail(error, 'setCommunityReaction');
   }
   return getCommunityPost(postId, { storeId: options.storeId, viewerId: userId });
@@ -1655,9 +1681,11 @@ export async function setCommunitySave(postId, userId, active = true, options = 
   if (!post) return null;
   if (active) {
     const { error } = await supabase.from('community_saves').upsert({ post_id: postId, user_id: userId, created_at: Date.now() }, { onConflict: 'post_id,user_id' });
+    if (failUnlessMissingTable(error, 'setCommunitySave')) return post;
     fail(error, 'setCommunitySave');
   } else {
     const { error } = await supabase.from('community_saves').delete().eq('post_id', postId).eq('user_id', userId);
+    if (failUnlessMissingTable(error, 'setCommunitySave')) return post;
     fail(error, 'setCommunitySave');
   }
   return getCommunityPost(postId, { storeId: options.storeId, viewerId: userId });
@@ -1678,6 +1706,7 @@ export async function createCommunityStory(story = {}) {
     expires_at: story.expiresAt || (now + 24 * 60 * 60 * 1000),
   };
   const { data, error } = await supabase.from('community_stories').insert(row).select('*').single();
+  if (failUnlessMissingTable(error, 'createCommunityStory')) return null;
   fail(error, 'createCommunityStory');
   return rowToCommunityStory(data);
 }
@@ -1688,6 +1717,7 @@ export async function listCommunityStories(options = {}) {
   query = applyStoreScope(query, options.storeId);
   if (!options.all) query = query.eq('status', 'approved').gt('expires_at', Date.now());
   const { data, error } = await query;
+  if (failUnlessMissingTable(error, 'listCommunityStories')) return [];
   fail(error, 'listCommunityStories');
   return (data || []).map(rowToCommunityStory);
 }
@@ -1696,6 +1726,7 @@ export async function deleteCommunityStory(id, options = {}) {
   let query = supabase.from('community_stories').delete().eq('id', id);
   query = applyStoreScope(query, options.storeId);
   const { error } = await query;
+  if (failUnlessMissingTable(error, 'deleteCommunityStory')) return;
   fail(error, 'deleteCommunityStory');
 }
 
