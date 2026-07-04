@@ -4552,10 +4552,23 @@ function articleCommunityFallback(articles = []) {
     })),
   };
 }
+async function fetchCommunityJson(url, fallback, timeoutMs = 4500) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(url, { cache: 'no-store', signal: controller?.signal });
+    if (!response.ok) return fallback;
+    return await response.json().catch(() => fallback);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 async function loadCommunity() {
   const [feed, storyData] = await Promise.all([
-    fetch('/api/community', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ posts: [] })),
-    fetch('/api/community/stories', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ stories: [] })),
+    fetchCommunityJson('/api/community', { posts: [] }),
+    fetchCommunityJson('/api/community/stories', { stories: [] }),
   ]);
   let posts = asArray(feed.posts);
   let stories = asArray(storyData.stories);
@@ -8391,7 +8404,13 @@ async function render() {
     }
   }
   // ดึงข้อมูล/สร้าง HTML ขณะที่หน้าเดิมยังแสดงอยู่ (ไม่ทำให้จอว่างระหว่างรอ)
-  const html = await match.view(match.params);
+  let html = '';
+  try {
+    html = await match.view(match.params);
+  } catch (error) {
+    console.error('route render failed', path, error);
+    html = `<section class="section page-top"><div class="empty-state glass reveal"><h2>โหลดหน้านี้ไม่สำเร็จ</h2><p>ระบบเชื่อมต่อช้าชั่วคราว กรุณารีเฟรชอีกครั้ง หรือกลับไปเลือกเมนูอื่นก่อน</p><button class="btn btn-primary" type="button" onclick="location.reload()">รีเฟรช</button><a class="btn btn-glass" href="${routeHref('/')}">กลับหน้าแรก</a></div></section>`;
+  }
   const hadPrepaint = app.dataset.prepaint === '1';
   if (!hadPrepaint) app.classList.remove('view-in'); // รีเซ็ตเพื่อเล่นทรานสิชันใหม่หลังสลับเนื้อหา
   app.innerHTML = html;
