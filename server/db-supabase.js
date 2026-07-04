@@ -327,8 +327,10 @@ export async function getOrder(id) {
   return rowToOrder(data);
 }
 
-export async function listOrders(limit = 50) {
-  const { data, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false }).limit(limit);
+export async function listOrders(limit = 50, options = {}) {
+  let query = supabase.from('orders').select('*').order('created_at', { ascending: false }).limit(limit);
+  query = applyStoreScope(query, options.storeId);
+  const { data, error } = await query;
   fail(error, 'listOrders');
   return (data || []).map(rowToOrder);
 }

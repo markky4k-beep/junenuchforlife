@@ -4225,6 +4225,128 @@ app.get('/api/admin/stores/:id/domain-health', requireStoreParamAccess('staff'),
     vercel: domainConfig,
   });
 });
+async function buildProductionQaDomainHealth(req, store = {}) {
+  const domains = await listStoreDomains(store.id).catch(() => []);
+  const publicUrl = currentStorePublicUrl(req, store);
+  const host = storeHostFromPublicUrl(publicUrl, store.primaryDomain || domains.find((item) => item.isPrimary)?.host || '');
+  const domainConfig = host && vercelDomainAutomationConfigured()
+    ? await getVercelDomainConfig(host).catch((err) => ({ ok: false, message: err.message || 'domain check failed' }))
+    : { ok: store.isDefault || false, message: vercelDomainAutomationConfigured() ? 'missing host' : 'Vercel automation is not configured' };
+  const primary = domains.find((item) => item.host === host) || domains.find((item) => item.isPrimary) || domains[0] || null;
+  return {
+    ok: true,
+    store,
+    host,
+    publicUrl,
+    wildcardRecommended: store.subdomain ? 'CNAME * cname.vercel-dns.com' : '',
+    domainAutomationConfigured: vercelDomainAutomationConfigured(),
+    dns: {
+      ready: store.isDefault || primary?.verified === true || domainConfig.ok === true,
+      verified: primary?.verified === true,
+      message: domainConfig.message || '',
+    },
+    ssl: {
+      ready: store.isDefault || domainConfig.ok === true,
+      message: domainConfig.ok ? 'Vercel domain config is ready' : (domainConfig.message || 'Pending DNS/Vercel verification'),
+    },
+    domains,
+    vercel: domainConfig,
+  };
+}
+function productionQaStatus(ok, warn = false) {
+  if (ok) return 'ok';
+  return warn ? 'warn' : 'error';
+}
+function storeRuntimeValue(overrides = {}, key = '') {
+  const direct = overrides && Object.prototype.hasOwnProperty.call(overrides, key) ? overrides[key] : undefined;
+  if (direct !== undefined && direct !== null && direct !== '') return String(direct || '').trim();
+  return String(settingsCache[key] ?? process.env[key] ?? SITE_DEFAULTS[key] ?? '').trim();
+}
+function buildStoreSharePreview(req, store = {}, value = () => '') {
+  const siteName = value('SITE_NAME');
+  const tagline = value('SITE_TAGLINE');
+  const title = value('SITE_SHARE_TITLE') || [siteName, tagline].filter(Boolean).join(' | ');
+  const desc = value('SITE_SHARE_DESC') || value('SITE_HERO_SUB') || value('SITE_ANNOUNCE') || tagline;
+  const baseUrl = String(currentStorePublicUrl(req, store) || siteValue('PUBLIC_URL') || '').trim().replace(/\/+$/, '');
+  const rawImage = value('SITE_SHARE_IMAGE') || '/brand-share.jpg?v=20260628-1';
+  const image = /^https?:\/\//i.test(rawImage) ? rawImage : `${baseUrl}${rawImage.startsWith('/') ? '' : '/'}${rawImage}`;
+  return { title, desc, image, url: `${baseUrl || '/'}${baseUrl ? '/' : ''}` };
+}
+function buildStoreLaunchChecklist({ store = {}, value = () => '', productCount = 0, orderCount = 0, domainHealth = {}, webhookCounters = {} } = {}) {
+  const has = (key) => String(value(key) || '').trim().length > 0;
+  const shareReady = has('SITE_SHARE_TITLE') || has('SITE_SHARE_DESC') || has('SITE_SHARE_IMAGE');
+  const lineReady = has('CONTACT_LINE_ID') || has('CONTACT_LINE_OA_ID') || has('CONTACT_LINE_PERSONAL_URL') || has('LINE_CHANNEL_ACCESS_TOKEN');
+  const smtpReady = has('SMTP_HOST') && (has('SMTP_USER') || has('SMTP_FROM'));
+  const items = [
+    { key: 'name', label: 'ตั้งชื่อเว็บ', ok: has('SITE_NAME'), detail: has('SITE_NAME') ? value('SITE_NAME') : 'กรอกชื่อเว็บของร้านนี้', href: '/admin/site' },
+    { key: 'brand', label: 'ชื่อแบรนด์', ok: has('SITE_NAME'), detail: has('SITE_NAME') ? value('SITE_NAME') : 'ตั้งชื่อแบรนด์ของร้าน', href: '/admin/site' },
+    { key: 'hero', label: 'Hero หน้าแรก', ok: has('SITE_HERO_TITLE') && (has('SITE_HERO_SUB') || has('SITE_HERO_ACCENT')), detail: has('SITE_HERO_TITLE') ? 'มี hero พร้อมใช้งาน' : 'ตั้งหัวข้อและคำโปรยหน้าแรก', href: '/admin/site' },
+    { key: 'share', label: 'การ์ดแชร์ LINE/Facebook', ok: shareReady, warn: !shareReady, detail: shareReady ? 'ตั้งค่าแชร์ลิงก์รายร้านแล้ว' : 'ตั้งหัวข้อ คำอธิบาย หรือรูปแชร์ของร้าน', href: '/admin/site' },
+    { key: 'line', label: 'LINE สำหรับติดต่อ', ok: lineReady, detail: lineReady ? 'มี LINE ติดต่อหรือ token แล้ว' : 'ตั้ง LINE ID, LINE OA หรือ Channel token', href: '/admin/site' },
+    { key: 'promptpay', label: 'PromptPay', ok: has('PROMPTPAY_ID'), detail: has('PROMPTPAY_ID') ? 'พร้อมรับชำระเงิน' : 'ใส่ PromptPay ID ก่อนขายจริง', href: '/admin/site' },
+    { key: 'smtp', label: 'SMTP อีเมล', ok: smtpReady, warn: !smtpReady, detail: smtpReady ? 'พร้อมส่งอีเมลระบบ' : 'ยังไม่ตั้ง SMTP หรือ SMTP_FROM', href: '/admin/site' },
+    { key: 'product', label: 'เพิ่มสินค้าแรก', ok: productCount > 0, detail: productCount > 0 ? `มีสินค้า ${productCount} รายการ` : 'เพิ่มสินค้าอย่างน้อย 1 รายการ', href: '/admin/products' },
+    { key: 'checkout', label: 'ทดสอบสั่งซื้อ', ok: orderCount > 0, warn: orderCount <= 0, detail: orderCount > 0 ? `มีออเดอร์ ${orderCount} รายการล่าสุด` : 'ยังไม่พบออเดอร์ร้านนี้', href: '/admin/orders' },
+    { key: 'domain', label: 'DNS / SSL', ok: domainHealth?.dns?.ready === true && domainHealth?.ssl?.ready === true, detail: domainHealth?.host || store.primaryDomain || store.publicUrl || 'ยังไม่พบโดเมน', href: '/admin/stores' },
+    { key: 'webhook', label: 'LINE webhook ล่าสุด', ok: Math.max(0, Number(webhookCounters.failed || 0)) === 0, warn: Math.max(0, Number(webhookCounters.received || 0)) === 0, detail: `ok ${Math.max(0, Number(webhookCounters.success || 0))} / fail ${Math.max(0, Number(webhookCounters.failed || 0))}`, href: '/admin/diagnostics' },
+  ];
+  const done = items.filter((item) => item.ok).length;
+  return {
+    done,
+    total: items.length,
+    percent: Math.round((done / items.length) * 100),
+    status: done >= items.length - 1 ? 'ready' : (done >= Math.ceil(items.length * 0.65) ? 'almost' : 'setup'),
+    items: items.map((item) => ({ ...item, status: productionQaStatus(item.ok, item.warn === true) })),
+  };
+}
+app.get('/api/admin/production-qa', requireStoreScopedAccess('staff'), async (req, res) => {
+  await ensureSettingsFresh();
+  const store = await getAdminSelectedStore(req);
+  if (!store?.id) return res.status(404).json({ error: 'store not found' });
+  const storeId = store.id;
+  const overrides = await allStoreSettings(storeId).catch(() => ({}));
+  const value = (key) => storeRuntimeValue(overrides, key);
+  const [products, orders, leads, articles, coupons, domainHealth, audits] = await Promise.all([
+    listProducts(true, { storeId }).catch(() => []),
+    listOrders(10, { storeId }).catch(() => []),
+    listLeads(10, { storeId }).catch(() => []),
+    listArticles(true, { storeId }).catch(() => []),
+    listCoupons({ storeId }).catch(() => []),
+    buildProductionQaDomainHealth(req, store).catch((err) => ({ ok: false, host: '', publicUrl: currentStorePublicUrl(req, store), dns: { ready: false, message: err?.message || 'domain check failed' }, ssl: { ready: false, message: err?.message || 'domain check failed' } })),
+    listLineWebhookAudits(120).catch(() => []),
+  ]);
+  const health = buildHealthSnapshot();
+  const webhookCounters = summarizeLineWebhookAudits(audits);
+  const sharePreview = buildStoreSharePreview(req, store, value);
+  const checklist = buildStoreLaunchChecklist({ store, value, productCount: products.length, orderCount: orders.length, domainHealth, webhookCounters });
+  const smokeBaseUrl = String(domainHealth.publicUrl || sharePreview.url || '').replace(/\/+$/, '');
+  res.json({
+    ok: true,
+    generatedAt: Date.now(),
+    store,
+    health,
+    domain: domainHealth,
+    sharePreview,
+    checklist,
+    counts: { products: products.length, orders: orders.length, leads: leads.length, articles: articles.length, coupons: coupons.length },
+    latest: {
+      order: orders[0] || null,
+      lineWebhook: audits[0] || null,
+      lineWebhookFailed: audits.find((item) => !['success', 'duplicate', 'received'].includes(String(item?.result || ''))) || null,
+    },
+    systems: [
+      { key: 'storefront', label: 'Storefront URL', status: domainHealth.publicUrl ? 'ok' : 'warn', detail: domainHealth.publicUrl || 'missing public URL' },
+      { key: 'domain', label: 'DNS / Vercel', status: domainHealth?.dns?.ready ? 'ok' : 'warn', detail: domainHealth?.dns?.message || domainHealth?.wildcardRecommended || '' },
+      { key: 'ssl', label: 'SSL Certificate', status: domainHealth?.ssl?.ready ? 'ok' : 'warn', detail: domainHealth?.ssl?.message || '' },
+      { key: 'database', label: 'Supabase / DB', status: health.supabaseConfigured ? 'ok' : 'warn', detail: `${health.dbProvider || activeProvider} · ${health.supabaseConfigured ? 'service role ready' : 'service role missing or sqlite fallback'}` },
+      { key: 'line', label: 'LINE OA', status: health.lineConfigured ? 'ok' : 'warn', detail: health.lineConfigured ? 'token + secret configured' : 'missing LINE token or secret' },
+      { key: 'webhook', label: 'LINE Webhook', status: webhookCounters.failed > 0 ? 'error' : (webhookCounters.received > 0 ? 'ok' : 'warn'), detail: `received ${webhookCounters.received}, success ${webhookCounters.success}, failed ${webhookCounters.failed}` },
+      { key: 'payment', label: 'Payment', status: health.promptpayConfigured || health.stripeConfigured ? 'ok' : 'warn', detail: `promptpay ${health.promptpayConfigured ? 'on' : 'off'} · stripe ${health.stripeConfigured ? 'on' : 'off'}` },
+      { key: 'share', label: 'Share Preview', status: sharePreview.title && sharePreview.image ? 'ok' : 'warn', detail: sharePreview.title || 'missing share title' },
+    ],
+    smokeCommand: smokeBaseUrl ? `BASE_URL=${smokeBaseUrl} ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=*** npm run verify:multistore` : 'npm run verify:multistore',
+  });
+});
 app.get('/api/admin/stores/:id/export', requireStoreParamAccess('admin'), async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });

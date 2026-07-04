@@ -6847,13 +6847,17 @@ function renderSelectedStoreSettingsPanel(data = {}) {
       <input type="hidden" name="storeId" value="${esc(store?.id || adminSelectedStoreId())}">
       <div class="pf-grid">
         ${field('SITE_NAME', 'ชื่อเว็บ / ชื่อร้าน')}
-        ${field('SITE_LOGO_TEXT', 'ชื่อโลโก้')}
         ${field('SITE_HERO_TITLE', 'Hero title')}
-        ${field('SITE_HERO_SUBTITLE', 'Hero subtitle', 'area', 3)}
-        ${field('SITE_HERO_IMAGE', 'Hero image URL')}
-        ${field('SITE_CONTACT_PHONE', 'เบอร์ติดต่อ')}
-        ${field('SITE_CONTACT_LINE', 'LINE ID / LINE OA')}
-        ${field('SITE_CONTACT_EMAIL', 'อีเมลติดต่อ')}
+        ${field('SITE_HERO_ACCENT', 'Hero accent')}
+        ${field('SITE_HERO_SUB', 'Hero subtitle', 'area', 3)}
+        ${field('SITE_SHARE_TITLE', 'หัวข้อตอนแชร์ลิงก์')}
+        ${field('SITE_SHARE_DESC', 'คำอธิบายตอนแชร์ลิงก์', 'area', 3)}
+        ${field('SITE_SHARE_IMAGE', 'รูปการ์ดแชร์ URL')}
+        ${field('CONTACT_PRIMARY_LABEL', 'ชื่อ / ป้ายเบอร์หลัก')}
+        ${field('CONTACT_PRIMARY_PHONE', 'เบอร์ติดต่อหลัก')}
+        ${field('CONTACT_LINE_ID', 'LINE ID ส่วนตัว')}
+        ${field('CONTACT_LINE_OA_ID', 'LINE OA ID')}
+        ${field('CONTACT_LINE_PERSONAL_URL', 'ลิงก์ LINE ส่วนตัว')}
         ${field('PROMPTPAY_ID', 'PromptPay ID')}
         ${field('PROMPTPAY_NAME', 'ชื่อบัญชี PromptPay')}
         ${field('PUBLIC_URL', 'Public URL ของร้าน')}
@@ -6870,14 +6874,36 @@ function renderSelectedStoreSettingsPanel(data = {}) {
     </form>
   </section>`;
 }
-function renderStoreOnboardingPanel(store = {}, settingsData = {}) {
+function renderStoreOnboardingPanel(store = {}, settingsData = {}, qa = null) {
+  if (qa?.checklist?.items?.length) {
+    const checklist = qa.checklist;
+    return `<section class="glass store-onboarding" style="padding:18px;margin-top:18px">
+      <div class="adm-head" style="margin:0 0 12px">
+        <div><h3>Store Launch Checklist: ${esc(store?.name || store?.id || '-')}</h3><span class="muted">ตรวจจากข้อมูลจริงของร้านที่เลือก ทั้งสินค้า ออเดอร์ โดเมน LINE และการ์ดแชร์</span></div>
+        <span class="status-badge ${checklist.percent >= 85 ? 's-paid' : 's-awaiting_payment'}">${Math.max(0, Number(checklist.done || 0))}/${Math.max(0, Number(checklist.total || 0))} · ${Math.max(0, Number(checklist.percent || 0))}%</span>
+      </div>
+      <div class="launch-progress"><span style="width:${Math.max(0, Math.min(100, Number(checklist.percent || 0)))}%"></span></div>
+      <div class="store-checklist">
+        ${checklist.items.map((item) => `<a class="store-check-item ${item.status === 'ok' ? 'done' : item.status === 'warn' ? 'warn' : ''}" href="${routeHref(item.href || '/admin/stores')}">
+          <span>${item.status === 'ok' ? '✓' : item.status === 'warn' ? '!' : '○'}</span>
+          <b>${esc(item.label)}</b>
+          <small>${esc(item.detail || '')}</small>
+        </a>`).join('')}
+      </div>
+      <div class="pf-actions" style="margin-top:14px">
+        <a class="btn btn-primary" href="${esc(qa?.domain?.publicUrl || qa?.sharePreview?.url || '#')}" target="_blank" rel="noopener">เปิดหน้าร้าน</a>
+        <a class="btn btn-glass" href="${routeHref('/admin/diagnostics')}">ดู Production QA</a>
+      </div>
+    </section>`;
+  }
   const settings = Object.fromEntries((Array.isArray(settingsData.settings) ? settingsData.settings : []).map((item) => [item.key, item]));
   const hasValue = (key) => String(settings[key]?.value || settingsData.site?.[key] || '').trim().length > 0;
   const items = [
     ['ตั้งชื่อเว็บ', hasValue('SITE_NAME'), 'SITE_NAME'],
-    ['Logo / ชื่อแบรนด์', hasValue('SITE_LOGO_TEXT'), 'SITE_LOGO_TEXT'],
-    ['Hero หน้าแรก', hasValue('SITE_HERO_TITLE') && hasValue('SITE_HERO_SUBTITLE'), 'SITE_HERO_TITLE'],
-    ['LINE สำหรับติดต่อ', hasValue('SITE_CONTACT_LINE') || hasValue('LINE_CHANNEL_ACCESS_TOKEN'), 'SITE_CONTACT_LINE'],
+    ['ชื่อแบรนด์', hasValue('SITE_NAME'), 'SITE_NAME'],
+    ['Hero หน้าแรก', hasValue('SITE_HERO_TITLE') && (hasValue('SITE_HERO_SUB') || hasValue('SITE_HERO_ACCENT')), 'SITE_HERO_TITLE'],
+    ['การ์ดแชร์ลิงก์', hasValue('SITE_SHARE_TITLE') || hasValue('SITE_SHARE_DESC') || hasValue('SITE_SHARE_IMAGE'), 'SITE_SHARE_TITLE'],
+    ['LINE สำหรับติดต่อ', hasValue('CONTACT_LINE_ID') || hasValue('CONTACT_LINE_OA_ID') || hasValue('CONTACT_LINE_PERSONAL_URL') || hasValue('LINE_CHANNEL_ACCESS_TOKEN'), 'CONTACT_LINE_ID'],
     ['PromptPay', hasValue('PROMPTPAY_ID'), 'PROMPTPAY_ID'],
     ['SMTP อีเมล', hasValue('SMTP_HOST') && hasValue('SMTP_USER'), 'SMTP_HOST'],
     ['เพิ่มสินค้าแรก', false, 'products'],
@@ -7001,9 +7027,10 @@ async function viewAdminStores() {
   const selectedSettingsRes = await api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/settings`).catch(() => null);
   const selectedSettingsData = selectedSettingsRes ? await selectedSettingsRes.json().catch(() => ({})) : {};
   const selectedStore = stores.find((store) => store.id === selectedStoreId) || selectedSettingsData.store || selectedAdminStore();
-  const [selectedHealthData, selectedRolesData] = await Promise.all([
+  const [selectedHealthData, selectedRolesData, selectedQaData] = await Promise.all([
     api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/domain-health`).then((res) => res.json()).catch(() => ({})),
     api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/roles`).then((res) => res.json()).catch(() => ({})),
+    api('/api/admin/production-qa').then((res) => res.json()).catch(() => ({})),
   ]);
   const selectedStoreSettingsPanel = selectedSettingsRes?.ok ? renderSelectedStoreSettingsPanel(selectedSettingsData) : `<section class="glass" style="padding:18px;margin-top:18px"><b>ตั้งค่าร้านที่เลือก</b><p class="muted">โหลด settings ร้าน ${esc(selectedStoreId)} ไม่สำเร็จ</p></section>`;
   return adminLayout('stores', `<div class="admin-workspace admin-stores-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Multi-store Center</span><h2>Store Manager</h2><p class="muted">เปิดร้านใหม่ ตรวจโดเมน จัดสิทธิ์ และตั้งค่าร้านที่เลือกจากจุดเดียว</p></div><div class="admin-inline-actions"><button class="btn btn-glass" type="button" id="refreshStoresBtn">รีเฟรชรายการร้าน</button></div></div>
@@ -7044,7 +7071,7 @@ async function viewAdminStores() {
       </form>
       <div class="form-note" style="margin-top:12px">หลังสร้างแล้ว ร้านใหม่จะได้ค่าเริ่มต้นเช่นชื่อเว็บ, copy หน้าแรก, public URL และ database namespace ใหม่อัตโนมัติ ส่วนสินค้า/ออเดอร์/แชตของร้านใหม่จะเริ่มแยกว่างตาม <code>store_id</code></div>
     </section>
-    ${renderStoreOnboardingPanel(selectedStore, selectedSettingsData)}
+    ${renderStoreOnboardingPanel(selectedStore, selectedSettingsData, selectedQaData)}
     ${renderDomainHealthPanel(selectedStore, selectedHealthData)}
     ${selectedStoreSettingsPanel}
     ${renderStoreRolesPanel(selectedStore, selectedRolesData)}
@@ -7189,12 +7216,74 @@ function diagnosticsAuditRows(items = []) {
     <div class="meta-row"><small>${esc(item.messageType || 'no-message-type')}</small><small>${esc(item.sourceKey || '-')}</small><small>${Math.max(0, Number(item.durationMs || 0))} ms</small>${item.error ? `<small>${esc(item.error)}</small>` : ''}</div>
   </article>`).join('')}</div>`;
 }
+function productionQaDashboard(qa = {}) {
+  if (!qa?.ok) return `<div class="glass" style="padding:18px">โหลด Live Production QA ไม่สำเร็จ${qa?.error ? `: ${esc(qa.error)}` : ''}</div>`;
+  const checklist = qa.checklist || {};
+  const systems = Array.isArray(qa.systems) ? qa.systems : [];
+  const items = Array.isArray(checklist.items) ? checklist.items : [];
+  const counts = qa.counts || {};
+  const share = qa.sharePreview || {};
+  const domain = qa.domain || {};
+  const latest = qa.latest || {};
+  const score = Math.max(0, Math.min(100, Number(checklist.percent || 0)));
+  const statusLabel = checklist.status === 'ready' ? 'พร้อมเปิดจริง' : checklist.status === 'almost' ? 'เกือบพร้อม' : 'ต้องตั้งค่าต่อ';
+  const systemCards = systems.map((item) => diagnosticsMetricCard(item.label || item.key, diagnosticsStateBadge(item.status || 'info'), item.detail || '-', item.key || '')).join('');
+  const checklistRows = items.map((item) => `<a class="qa-check-row ${item.status === 'ok' ? 'done' : item.status === 'warn' ? 'warn' : 'error'}" href="${routeHref(item.href || '/admin/diagnostics')}">
+    <span>${item.status === 'ok' ? '✓' : item.status === 'warn' ? '!' : '×'}</span>
+    <b>${esc(item.label || item.key)}</b>
+    <small>${esc(item.detail || '')}</small>
+  </a>`).join('');
+  const shareCard = `<div class="qa-share-card">
+    <div class="qa-share-image">${share.image ? `<img src="${esc(share.image)}" alt="share preview">` : '<span>ไม่มีรูปแชร์</span>'}</div>
+    <div class="qa-share-body"><b>${esc(share.title || 'ยังไม่มีหัวข้อแชร์')}</b><p>${esc(share.desc || 'ยังไม่มีคำอธิบาย')}</p><small>${esc(share.url || domain.publicUrl || '-')}</small></div>
+  </div>`;
+  return `<section class="qa-dashboard">
+    <div class="qa-hero glass">
+      <div>
+        <span class="eyebrow">Live Production QA</span>
+        <h3>${esc(qa.store?.name || 'ร้านที่เลือก')}</h3>
+        <p class="muted">ตรวจสถานะเว็บจริงของร้านที่เลือก: โดเมน SSL LINE webhook ฐานข้อมูล สินค้า ออเดอร์ และการ์ดแชร์</p>
+      </div>
+      <div class="qa-score">
+        <strong>${score}%</strong>
+        <span>${esc(statusLabel)}</span>
+        <div class="launch-progress"><span style="width:${score}%"></span></div>
+      </div>
+    </div>
+    <div class="qa-counts">
+      ${diagnosticsMetricCard('Products', diagnosticsStateBadge(counts.products > 0 ? 'ok' : 'warn'), `${Math.max(0, Number(counts.products || 0))} รายการ`, 'ควรมีสินค้าอย่างน้อย 1 รายการ')}
+      ${diagnosticsMetricCard('Orders', diagnosticsStateBadge(counts.orders > 0 ? 'ok' : 'warn'), `${Math.max(0, Number(counts.orders || 0))} รายการล่าสุด`, latest.order?.id ? `ล่าสุด ${latest.order.id}` : 'ยังไม่พบออเดอร์')}
+      ${diagnosticsMetricCard('Leads / Inbox', diagnosticsStateBadge(counts.leads > 0 ? 'ok' : 'info'), `${Math.max(0, Number(counts.leads || 0))} leads`, 'ใช้ดูความพร้อมด้านลูกค้าทักเข้ามา')}
+      ${diagnosticsMetricCard('Share Link', diagnosticsStateBadge(share.title && share.image ? 'ok' : 'warn'), share.title || 'missing title', share.url || domain.publicUrl || '')}
+    </div>
+    <div class="qa-two-col">
+      <article class="glass" style="padding:18px">
+        <div class="adm-head" style="margin:0 0 12px"><h3>Launch Checklist</h3><span class="muted">${Math.max(0, Number(checklist.done || 0))}/${Math.max(0, Number(checklist.total || 0))} ผ่านแล้ว</span></div>
+        <div class="qa-check-list">${checklistRows || '<div class="form-note">ยังไม่มี checklist</div>'}</div>
+      </article>
+      <article class="glass" style="padding:18px">
+        <div class="adm-head" style="margin:0 0 12px"><h3>Share Preview</h3><span class="muted">สิ่งที่ LINE/Facebook จะเห็นจาก HTML source</span></div>
+        ${shareCard}
+        <div class="pf-actions" style="margin-top:14px">
+          ${domain.publicUrl ? `<a class="btn btn-primary" href="${esc(domain.publicUrl)}" target="_blank" rel="noopener">เปิดหน้าร้าน</a>` : ''}
+          <a class="btn btn-glass" href="${routeHref('/admin/site')}">แก้ข้อมูลร้าน</a>
+        </div>
+      </article>
+    </div>
+    ${diagnosticsSection('Live System Status', 'สถานะระบบที่ต้องดูหลัง deploy และก่อนเปิดร้านใหม่', `<div class="adm-list">${systemCards}</div>`)}
+    <section class="glass" style="padding:18px;margin-top:18px">
+      <div class="adm-head" style="margin:0 0 12px"><h3>Smoke Test Command</h3><span class="muted">รันกับ preview/production ก่อนเปิดขายจริง</span></div>
+      <code class="qa-command">${esc(qa.smokeCommand || 'npm run verify:multistore')}</code>
+    </section>
+  </section>`;
+}
 async function viewAdminDiagnostics() {
   if (!adminGuard()) return loadingView();
   await ensureAdminStoresContext();
-  const [data, richMenu] = await Promise.all([
+  const [data, richMenu, productionQa] = await Promise.all([
     (await api('/api/admin/diagnostics')).json(),
     api('/api/admin/line/rich-menu/status').then((r) => r.json()).catch(() => ({ ok: false, error: 'load rich menu failed' })),
+    api('/api/admin/production-qa').then((r) => r.json()).catch((err) => ({ ok: false, error: err?.message || 'load production qa failed' })),
   ]);
   const health = data.health || {};
   const startup = data.startupValidation || {};
@@ -7235,6 +7324,7 @@ async function viewAdminDiagnostics() {
   <div class="pf-actions" style="margin-top:14px"><button class="btn btn-primary" type="button" id="deployLineRichMenuBtn">Deploy LINE Rich Menu</button></div>`;
   return adminLayout('diagnostics', `<div class="admin-workspace admin-diagnostics-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Health Center</span><h2>System Diagnostics</h2><p class="muted">ตรวจสุขภาพระบบ, config guard, alert ล่าสุด และ LINE webhook audit จากหลังบ้าน</p></div></div>
     <div class="pf-actions" style="margin-bottom:16px"><button class="btn btn-primary" type="button" id="runDiagnosticsRecheckBtn">Re-check Config</button><button class="btn btn-glass" type="button" id="refreshDiagnosticsBtn">รีเฟรชหน้านี้</button><a class="btn btn-glass" href="${routeHref('/admin/settings')}">ไปหน้าตั้งค่า</a></div>
+    ${diagnosticsSection('Live Production QA', 'หน้าเดียวสำหรับเช็กความพร้อมหลัง deploy และก่อนเปิดร้านใหม่', productionQaDashboard(productionQa))}
     ${diagnosticsSection('ภาพรวมระบบ', 'สรุปสถานะหลักที่ต้องดูทุกวัน', `<div class="adm-list">${overviewCards}</div>`)}
     ${diagnosticsSection('การตรวจตั้งค่า', 'แยกผลตอนบูตกับผลตรวจล่าสุด เพื่อดูว่า config เสถียรหรือไม่', validationGrid)}
     ${diagnosticsSection('LINE Rich Menu', 'Check assets and deploy Home/Catalog rich menus directly from admin', richMenuBody)}
