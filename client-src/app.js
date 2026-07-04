@@ -799,12 +799,13 @@ function absoluteMetaUrl(value = '') {
   return `${window.location.origin}${raw.startsWith('/') ? raw : `/${raw}`}`;
 }
 function setPageMeta(title, desc, image = '') {
-  const brandLead = 'คุณจูนนุชฟอร์ไลฟ์';
-  const baseTitle = title ? `${title} | ${S('SITE_NAME')}` : `${S('SITE_NAME')} — ${S('SITE_TAGLINE')}`;
-  const fullTitle = `${brandLead} | ${baseTitle}`;
-  const rawDescription = desc || `${S('SITE_NAME')} — ${S('SITE_HERO_SUB') || S('SITE_ANNOUNCE') || S('SITE_TAGLINE')}`;
-  const description = rawDescription.includes(brandLead) ? rawDescription : `${brandLead} · ${rawDescription}`;
-  const socialImage = absoluteMetaUrl(image || '/brand-share.jpg?v=20260628-1');
+  // ใช้ค่าตั้งได้ต่อร้าน (SITE_SHARE_*) — เว้นว่าง = ประกอบจากชื่อร้าน/คำโปรยของร้านนั้น
+  const siteName = S('SITE_NAME');
+  const shareTitleDefault = S('SITE_SHARE_TITLE') || [siteName, S('SITE_TAGLINE')].filter(Boolean).join(' | ');
+  const fullTitle = title ? `${title} | ${siteName}` : shareTitleDefault;
+  const description = desc || S('SITE_SHARE_DESC') || `${siteName} — ${S('SITE_HERO_SUB') || S('SITE_ANNOUNCE') || S('SITE_TAGLINE')}`;
+  const socialImage = absoluteMetaUrl(image || S('SITE_SHARE_IMAGE') || '/brand-share.jpg?v=20260628-1');
+  const imageAlt = `ภาพแบรนด์${siteName}`;
   _baseDocumentTitle = fullTitle;
   document.title = fullTitle;
   refreshAttentionTitle();
@@ -812,11 +813,11 @@ function setPageMeta(title, desc, image = '') {
   setMeta('meta[property="og:title"]', fullTitle);
   setMeta('meta[property="og:description"]', description);
   setMeta('meta[property="og:image"]', socialImage);
-  setMeta('meta[property="og:image:alt"]', 'ภาพแบรนด์คุณจูนนุชฟอร์ไลฟ์');
+  setMeta('meta[property="og:image:alt"]', imageAlt);
   setMeta('meta[name="twitter:title"]', fullTitle);
   setMeta('meta[name="twitter:description"]', description);
   setMeta('meta[name="twitter:image"]', socialImage);
-  setMeta('meta[name="twitter:image:alt"]', 'ภาพแบรนด์คุณจูนนุชฟอร์ไลฟ์');
+  setMeta('meta[name="twitter:image:alt"]', imageAlt);
 }
 function applySite() {
   marketingReady = false;
@@ -7367,6 +7368,16 @@ function setCropPreviewDevice(device = 'desktop') {
   document.querySelectorAll('[data-previewdevice]').forEach((btn) => btn.classList.toggle('on', btn.dataset.previewdevice === device));
 }
 function jumpToSiteSection(sectionId = '') {
+  // โหมดแท็บ (หน้าข้อมูลร้านแบบใหม่) — สลับหมวดแทนการ scroll
+  if (document.querySelector('.site-admin-tabs')) {
+    activateSiteSection(sectionId);
+    const toolbar = document.querySelector('.site-admin-toolbar');
+    if (toolbar) {
+      const top = window.scrollY + toolbar.getBoundingClientRect().top - 14;
+      if (window.scrollY > top) window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    }
+    return;
+  }
   const target = document.getElementById(sectionId);
   if (!target) return;
   if (target.matches('.site-panel')) target.open = true;
@@ -7378,6 +7389,94 @@ function jumpToSiteSection(sectionId = '') {
   window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
   target.classList.add('is-focused');
   setTimeout(() => target.classList.remove('is-focused'), 1600);
+}
+const SITE_ADMIN_ACTIVE_SECTION_KEY = 'adminSiteActiveSection:v1';
+function activateSiteSection(sectionId = '') {
+  const panels = [...document.querySelectorAll('.site-admin-tabs .site-tab-panel')];
+  if (!panels.length) return;
+  let target = String(sectionId || '').replace(/^site-section-/, '');
+  if (!panels.some((panel) => panel.dataset.section === target)) target = panels[0].dataset.section;
+  panels.forEach((panel) => panel.classList.toggle('is-active', panel.dataset.section === target));
+  document.querySelectorAll('[data-sitejump]').forEach((btn) => {
+    btn.classList.toggle('on', String(btn.dataset.sitejump || '').replace(/^site-section-/, '') === target);
+  });
+  try { localStorage.setItem(SITE_ADMIN_ACTIVE_SECTION_KEY, target); } catch {}
+}
+function sitePreviewLines(raw = '') {
+  return String(raw || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+function updateSiteAdminPreviews() {
+  const form = document.getElementById('settingsForm');
+  if (!form || !document.querySelector('.site-admin-tabs')) return;
+  const val = (name) => String(form.querySelector(`[name="${name}"]`)?.value || '').trim();
+  document.querySelectorAll('.site-admin-tabs [data-pv]').forEach((el) => {
+    el.textContent = val(el.dataset.pv) || el.dataset.pvEmpty || '';
+  });
+  const shipRows = document.getElementById('pvShipRows');
+  if (shipRows) {
+    const home = val('SHIP_HOME') || 'ไทย';
+    const fee = parseInt(val('SHIP_FEE'), 10) || 0;
+    const intl = parseInt(val('SHIP_INTL_FEE'), 10) || 0;
+    const freeOver = parseInt(val('SHIP_FREE_OVER'), 10) || 0;
+    const sample = 500;
+    const sampleFree = freeOver > 0 && sample >= freeOver;
+    shipRows.innerHTML = [
+      `<div class="mock-li">🚚 ส่งใน${esc(home)}: <b>฿${fee.toLocaleString()}</b></div>`,
+      `<div class="mock-li">✈️ ส่งต่างประเทศ: <b>฿${intl.toLocaleString()}</b></div>`,
+      freeOver > 0
+        ? `<div class="mock-li">🎁 สั่งครบ <b>฿${freeOver.toLocaleString()}</b> ส่งฟรีทันที</div>`
+        : '<div class="mock-li muted">ยังไม่เปิดโปรส่งฟรี (ใส่ 0)</div>',
+      `<div class="mock-li muted">ตัวอย่าง: ลูกค้าใน${esc(home)} สั่ง ฿${sample.toLocaleString()} → ${sampleFree ? 'ส่งฟรี' : `ค่าส่ง ฿${fee.toLocaleString()}`} รวม ฿${(sample + (sampleFree ? 0 : fee)).toLocaleString()}</div>`,
+    ].join('');
+  }
+  const saleBanner = document.getElementById('pvSaleBanner');
+  if (saleBanner) {
+    const pct = Math.max(0, Math.min(90, parseInt(val('SALE_PERCENT'), 10) || 0));
+    const live = val('SALE_ACTIVE') === '1' && pct > 0;
+    saleBanner.classList.toggle('off', !live);
+    saleBanner.textContent = live ? `${val('SALE_TEXT') || 'FLASH SALE ⚡'} ลด ${pct}% ทั้งร้าน` : 'ปิดอยู่ — เว็บแสดงราคาปกติ';
+    const price = document.getElementById('pvSalePrice');
+    if (price) {
+      const after = Math.max(1, Math.round(1000 * (1 - pct / 100)));
+      price.innerHTML = live
+        ? `ตัวอย่างสินค้าราคา ฿1,000 → เหลือ <b>฿${after.toLocaleString()}</b> <s>฿1,000</s>${val('SALE_ENDS') ? `<br><span class="muted">นับถอยหลังถึง ${esc(val('SALE_ENDS').replace('T', ' '))}</span>` : ''}`
+        : 'สินค้าทุกชิ้นแสดงราคาเต็มตามปกติ';
+    }
+  }
+  const chips = document.getElementById('pvMarketingChips');
+  if (chips) {
+    chips.innerHTML = [['GA4_ID', 'Google Analytics'], ['META_PIXEL_ID', 'Meta Pixel'], ['TIKTOK_PIXEL_ID', 'TikTok Pixel']]
+      .map(([key, label]) => `<span class="mock-chip ${val(key) ? 'on' : ''}">${val(key) ? '✓' : '·'} ${label} ${val(key) ? 'ติดตั้งแล้ว' : 'ยังไม่ตั้ง'}</span>`)
+      .join('');
+  }
+  const statGrid = document.getElementById('pvStatsGrid');
+  if (statGrid) {
+    const autoLabel = (raw) => (String(raw).toLowerCase() === 'auto' ? 'อัตโนมัติ' : (esc(raw) || '0'));
+    statGrid.innerHTML = [
+      [`${(parseInt(val('SITE_STAT_FARMERS'), 10) || 0).toLocaleString()}+`, 'เกษตรกรไว้วางใจ'],
+      [autoLabel(val('SITE_STAT_PRODUCTS')), 'ผลิตภัณฑ์'],
+      [autoLabel(val('SITE_STAT_RATING')), 'คะแนนรีวิวเฉลี่ย'],
+      [`${parseInt(val('SITE_STAT_ONTIME'), 10) || 0}%`, 'ส่งตรงเวลา'],
+    ].map(([num, label]) => `<div class="mock-stat"><b>${num}</b><span>${label}</span></div>`).join('');
+  }
+  const trust = document.getElementById('pvTrustList');
+  if (trust) {
+    trust.innerHTML = sitePreviewLines(val('SITE_TRUST_ITEMS')).slice(0, 6).map((line) => `<div class="mock-li">✓ ${esc(line)}</div>`).join('')
+      || '<div class="mock-li muted">ยังไม่มีข้อมูล</div>';
+  }
+  const cases = document.getElementById('pvCaseList');
+  if (cases) {
+    cases.innerHTML = sitePreviewLines(val('SITE_CASE_STUDIES')).slice(0, 4).map((line) => {
+      const [title, detail = ''] = line.split('::').map((part) => part.trim());
+      return `<div class="mock-li"><b>${esc(title)}</b>${detail ? ` — ${esc(detail)}` : ''}</div>`;
+    }).join('') || '<div class="mock-li muted">ยังไม่มีข้อมูล</div>';
+  }
+  const checkout = document.getElementById('pvCheckoutList');
+  if (checkout) {
+    checkout.innerHTML = sitePreviewLines(val('SITE_CHECKOUT_POINTS')).slice(0, 5).map((line) => `<div class="mock-li">🛡️ ${esc(line)}</div>`).join('')
+      || '<div class="mock-li muted">ยังไม่มีข้อมูล</div>';
+  }
+  if (typeof updateShareCardPreview === 'function') updateShareCardPreview();
 }
 let cropDraftTimer = null;
 async function scheduleCropDraftSave(wait = 600) {
@@ -7675,14 +7774,20 @@ async function viewAdminSite() {
     : `<input name="${k}" value="${esc(s[k] || '')}">`}${note ? `<small>${note}</small>` : ''}</label>`;
   const grid = (items, extraClass = '') => `<div class="site-fields-grid${extraClass ? ` ${extraClass}` : ''}">${items.join('')}</div>`;
   const group = (title, desc, body) => `<section class="site-field-group"><div class="site-field-group-head"><b>${title}</b><span>${desc}</span></div>${body}</section>`;
-  const siteSection = (id, title, desc, body, open = false) => `<details class="site-panel glass" id="site-section-${id}" ${open ? 'open' : ''}>
-    <summary class="site-panel-head">
+  const siteSection = (id, title, desc, body) => `<section class="site-panel glass site-tab-panel" id="site-section-${id}" data-section="${id}">
+    <div class="site-panel-head site-tab-head">
       <div><b>${title}</b><span>${desc}</span></div>
-      <span class="site-panel-toggle">เปิด / ปิด</span>
-    </summary>
+    </div>
     <div class="site-panel-body">${body}</div>
-  </details>`;
-  const brand = [
+  </section>`;
+  const withPreview = (fieldsHtml, previewHtml, note = 'อัปเดตสดขณะพิมพ์') => `<div class="site-panel-cols">
+    <div class="site-panel-fields">${fieldsHtml}</div>
+    <aside class="site-panel-preview">
+      <div class="share-preview-label"><b>ตัวอย่างบนเว็บ</b><span>${note}</span></div>
+      ${previewHtml}
+    </aside>
+  </div>`;
+  const brand = withPreview([
     group('ตัวตนแบรนด์', 'ข้อความที่ใช้ทั้งหน้าเว็บและหลังบ้าน', grid([
       field('SITE_NAME', 'ชื่อร้าน / แบรนด์'),
       field('SITE_TAGLINE', 'คำโปรยใต้ชื่อ'),
@@ -7695,8 +7800,63 @@ async function viewAdminSite() {
       field('SITE_HERO_TITLE2', 'หัวข้อใหญ่ (ส่วนที่ 2)'),
       field('SITE_HERO_SUB', 'ข้อความรองใต้หัวข้อ', 'area'),
     ])),
-  ].join('');
-  const homepage = [
+  ].join(''), `<div class="mock-site">
+      <div class="mock-announce" data-pv="SITE_ANNOUNCE"></div>
+      <div class="mock-nav"><span class="mock-dot"></span><b data-pv="SITE_NAME" data-pv-empty="ชื่อร้าน"></b><span class="mock-nav-links">หน้าแรก · สินค้า · รีวิว</span></div>
+      <div class="mock-hero">
+        <h3><span data-pv="SITE_HERO_TITLE"></span> <em data-pv="SITE_HERO_ACCENT"></em><br><span data-pv="SITE_HERO_TITLE2"></span></h3>
+        <p data-pv="SITE_HERO_SUB"></p>
+        <div class="mock-btn-row"><span class="mock-btn primary">ดูสินค้า</span><span class="mock-btn">ขอคำแนะนำฟรี</span></div>
+      </div>
+      <div class="mock-footer" data-pv="SITE_FOOTER"></div>
+    </div>`);
+  const share = (() => {
+    const fallbackShareTitle = [s.SITE_NAME, s.SITE_TAGLINE].map((v) => String(v || '').trim()).filter(Boolean).join(' | ');
+    const fallbackShareDesc = String(s.SITE_HERO_SUB || s.SITE_ANNOUNCE || '').trim();
+    const shareTitleNow = String(s.SITE_SHARE_TITLE || '').trim() || fallbackShareTitle;
+    const shareDescNow = String(s.SITE_SHARE_DESC || '').trim() || fallbackShareDesc;
+    const shareImageNow = String(s.SITE_SHARE_IMAGE || '').trim();
+    const shareImageSrc = shareImageNow || '/brand-share.jpg?v=20260628-1';
+    let shareDomain = location.host;
+    try { shareDomain = new URL(selectedAdminStore()?.publicUrl || location.origin).host; } catch {}
+    return `<div class="share-editor">
+        <div class="share-editor-fields">
+          <label class="set-field"><span>1. หัวข้อตอนแชร์</span>
+            <input name="SITE_SHARE_TITLE" value="${esc(s.SITE_SHARE_TITLE || '')}" placeholder="${esc(fallbackShareTitle || 'เช่น ร้านของฉัน | สินค้าเกษตรครบวงจร')}" maxlength="120">
+            <small>เว้นว่าง = ใช้ "ชื่อร้าน | คำโปรย" ของร้านนี้อัตโนมัติ</small>
+          </label>
+          <label class="set-field"><span>2. คำอธิบายตอนแชร์</span>
+            <textarea name="SITE_SHARE_DESC" rows="3" placeholder="${esc((fallbackShareDesc || 'ข้อความสั้น ๆ ชวนให้กดเข้าเว็บ').slice(0, 140))}" maxlength="300">${esc(s.SITE_SHARE_DESC || '')}</textarea>
+            <small>เว้นว่าง = ใช้ข้อความรองของฮีโร่ / แถบประกาศของร้านนี้</small>
+          </label>
+          <label class="set-field"><span>3. รูปการ์ด (แนะนำ 1200×630 px, ไม่เกิน 5MB)</span>
+            <input type="hidden" name="SITE_SHARE_IMAGE" id="shareImageValue" value="${esc(shareImageNow)}">
+            <div class="share-upload-row">
+              <input type="file" id="shareImageFile" accept="image/*" hidden>
+              <button class="btn btn-primary" type="button" id="shareImageUploadBtn">อัปโหลดรูปของร้านนี้</button>
+              <button class="btn btn-glass" type="button" id="shareImageClearBtn">กลับไปใช้รูปหลัก</button>
+            </div>
+            <small id="shareImageStatus">${shareImageNow ? 'ใช้รูปที่อัปโหลดของร้านนี้' : 'ยังไม่ได้ตั้งรูปของร้านนี้ — ตอนนี้ใช้รูปแบรนด์หลักของระบบ'}</small>
+          </label>
+          <p class="form-note">อัปโหลด/แก้ข้อความแล้วต้องกด <b>"บันทึกทั้งหมด"</b> เพื่อให้มีผลจริง · ถ้าแชร์ใน LINE แล้วยังเห็นการ์ดเก่า เป็นเพราะ LINE แคชไว้ ลองส่งลิงก์ในห้องแชตอื่น</p>
+        </div>
+        <div class="share-preview-pane">
+          <div class="share-preview-label"><b>ตัวอย่างจริงเวลาส่งลิงก์</b><span>อัปเดตสดขณะพิมพ์</span></div>
+          <div class="share-chat-bg">
+            <div class="share-chat-url">https://${esc(shareDomain)}/#/</div>
+            <div class="share-card">
+              <img id="sharePrevImg" class="share-card-img" src="${esc(shareImageSrc)}" alt="ตัวอย่างรูปตอนแชร์">
+              <div class="share-card-body">
+                <div id="sharePrevTitle" class="share-card-title">${esc(shareTitleNow || 'ชื่อร้านของคุณ')}</div>
+                <div id="sharePrevDesc" class="share-card-desc">${esc(shareDescNow)}</div>
+                <div class="share-card-domain">${esc(shareDomain)}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  })();
+  const homepage = withPreview([
     group('หัวข้อแต่ละบล็อกบนหน้าแรก', 'ใช้เปลี่ยนคำหัว section โดยไม่ต้องแก้โค้ด', grid([
       field('SITE_HOME_FEATURED_EYEBROW', 'ป้ายเหนือส่วนสินค้าแนะนำ'),
       field('SITE_HOME_FEATURED_TITLE', 'หัวข้อสินค้าแนะนำ'),
@@ -7709,8 +7869,13 @@ async function viewAdminSite() {
       field('SITE_HOME_CONSULT_BODY', 'ข้อความอธิบายใต้หัวข้อ', 'area-lg'),
       field('SITE_HOME_CONTACT_NOTE', 'ข้อความสรุปท้ายบล็อกติดต่อ', 'area'),
     ])),
-  ].join('');
-  const contact = [
+  ].join(''), `<div class="mock-site">
+      <div class="mock-block"><div class="mock-eyebrow" data-pv="SITE_HOME_FEATURED_EYEBROW"></div><div class="mock-title" data-pv="SITE_HOME_FEATURED_TITLE"></div><div class="mock-thumbs"><span></span><span></span><span></span></div></div>
+      <div class="mock-block"><div class="mock-eyebrow" data-pv="SITE_HOME_CROP_EYEBROW"></div><div class="mock-title" data-pv="SITE_HOME_CROP_TITLE"></div></div>
+      <div class="mock-block"><div class="mock-eyebrow" data-pv="SITE_HOME_CONSULT_EYEBROW"></div><div class="mock-title" data-pv="SITE_HOME_CONSULT_TITLE"></div><div class="mock-body" data-pv="SITE_HOME_CONSULT_BODY"></div></div>
+      <div class="mock-block"><div class="mock-body" data-pv="SITE_HOME_CONTACT_NOTE"></div></div>
+    </div>`);
+  const contact = withPreview([
     group('ข้อมูลติดต่อหลัก', 'ใช้กับ contact block และส่วนช่วยตัดสินใจบนหน้าแรก', grid([
       field('CONTACT_PRIMARY_LABEL', 'ชื่อ / ป้ายเบอร์หลัก'),
       field('CONTACT_PRIMARY_PHONE', 'เบอร์หลัก'),
@@ -7729,8 +7894,20 @@ async function viewAdminSite() {
       field('SITE_HOME_CONTACT_PERSONAL_LABEL', 'ข้อความปุ่ม LINE ส่วนตัว'),
       field('SITE_HOME_CONTACT_OA_LABEL', 'ข้อความปุ่ม LINE OA'),
     ])),
-  ].join('');
-  const dock = [
+  ].join(''), `<div class="mock-card">
+      <div class="mock-title" data-pv="SITE_HOME_CONTACT_TITLE"></div>
+      <div class="mock-body" data-pv="SITE_HOME_CONTACT_BODY"></div>
+      <div class="mock-btn-row">
+        <span class="mock-btn primary">📞 <span data-pv="SITE_HOME_CONTACT_CALL_PRIMARY_LABEL"></span></span>
+        <span class="mock-btn">📞 <span data-pv="SITE_HOME_CONTACT_CALL_SECONDARY_LABEL"></span></span>
+        <span class="mock-btn">💬 <span data-pv="SITE_HOME_CONTACT_PERSONAL_LABEL"></span></span>
+        <span class="mock-btn">🟢 <span data-pv="SITE_HOME_CONTACT_OA_LABEL"></span></span>
+      </div>
+      <div class="mock-meta" style="margin-top:8px"><span data-pv="CONTACT_PRIMARY_LABEL"></span> · <b data-pv="CONTACT_PRIMARY_PHONE"></b></div>
+      <div class="mock-meta"><span data-pv="CONTACT_SECONDARY_LABEL"></span> · <b data-pv="CONTACT_SECONDARY_PHONE"></b></div>
+      <div class="mock-meta">LINE: <b data-pv="CONTACT_LINE_ID"></b> · OA: <b data-pv="CONTACT_LINE_OA_ID"></b></div>
+    </div>`);
+  const dock = withPreview([
     group('ข้อความ dock ลอยมุมจอ', 'ใช้กับแถบลอยสำหรับมือถือ/เดสก์ท็อป', grid([
       field('SITE_DOCK_TITLE', 'หัวข้อ dock'),
       field('SITE_DOCK_BODY', 'คำอธิบาย dock', 'area'),
@@ -7741,22 +7918,46 @@ async function viewAdminSite() {
       field('SITE_DOCK_PERSONAL_LABEL', 'ข้อความปุ่ม LINE ส่วนตัว'),
       field('SITE_DOCK_OA_LABEL', 'ข้อความปุ่ม LINE OA'),
     ])),
-  ].join('');
-  const ship = group('การจัดส่ง', 'ค่าส่ง ประเทศหลัก และยอดส่งฟรี', grid([
+  ].join(''), `<div class="mock-card mock-dock-float">
+      <div class="mock-title" data-pv="SITE_DOCK_TITLE"></div>
+      <div class="mock-body" data-pv="SITE_DOCK_BODY"></div>
+      <div class="mock-btn-row">
+        <span class="mock-btn primary">💬 <span data-pv="SITE_DOCK_LIVECHAT_LABEL"></span></span>
+        <span class="mock-btn">📞 <span data-pv="SITE_DOCK_CALL_LABEL"></span></span>
+        <span class="mock-btn">💚 <span data-pv="SITE_DOCK_PERSONAL_LABEL"></span></span>
+        <span class="mock-btn">🟢 <span data-pv="SITE_DOCK_OA_LABEL"></span></span>
+      </div>
+    </div>
+    <p class="mock-note">แถบนี้ลอยอยู่มุมจอทุกหน้า ทั้งมือถือและคอมพิวเตอร์</p>`);
+  const ship = withPreview(group('การจัดส่ง', 'ค่าส่ง ประเทศหลัก และยอดส่งฟรี', grid([
     field('SHIP_HOME', 'ประเทศของร้าน (= จัดส่งในประเทศ)'),
     field('SHIP_FEE', 'ค่าส่งในประเทศ (บาท)'),
     field('SHIP_INTL_FEE', 'ค่าส่งต่างประเทศ (บาท)'),
     field('SHIP_FREE_OVER', 'ส่งฟรีเมื่อยอดเกิน (บาท · 0=ปิด)'),
-  ]));
+  ])), `<div class="mock-card">
+      <div class="mock-title">ค่าส่งที่ลูกค้าเห็นตอนสั่งซื้อ</div>
+      <div class="mock-list" id="pvShipRows"></div>
+    </div>`, 'คำนวณให้ดูอัตโนมัติ');
   const saleSel = `<label class="set-field"><span>สถานะ Flash Sale</span><select name="SALE_ACTIVE"><option value="0" ${s.SALE_ACTIVE !== '1' ? 'selected' : ''}>ปิด</option><option value="1" ${s.SALE_ACTIVE === '1' ? 'selected' : ''}>เปิด</option></select></label>`;
-  const sale = group('Flash Sale', 'เปิด/ปิดโปรลดราคาทั้งร้านและนับถอยหลัง', grid([
+  const sale = withPreview(group('Flash Sale', 'เปิด/ปิดโปรลดราคาทั้งร้านและนับถอยหลัง', grid([
     saleSel,
     field('SALE_PERCENT', 'ลดกี่ % (ทั้งร้าน)'),
     field('SALE_TEXT', 'ข้อความแบนเนอร์'),
     field('SALE_ENDS', 'สิ้นสุดเมื่อ (เว้นว่าง = ไม่จำกัด)', 'datetime'),
-  ]));
-  const marketing = grid([field('GA4_ID', 'GA4 Measurement ID'), field('META_PIXEL_ID', 'Meta Pixel ID'), field('TIKTOK_PIXEL_ID', 'TikTok Pixel ID')]);
-  const stats = [
+  ])), `<div class="mock-card">
+      <div class="mock-banner" id="pvSaleBanner"></div>
+      <div class="mock-price" id="pvSalePrice"></div>
+    </div>`);
+  const marketing = withPreview(group('รหัสติดตามโฆษณา', 'ใส่ ID จากแต่ละแพลตฟอร์มเพื่อวัดผลโฆษณาและยอดขาย', grid([
+    field('GA4_ID', 'GA4 Measurement ID'),
+    field('META_PIXEL_ID', 'Meta Pixel ID'),
+    field('TIKTOK_PIXEL_ID', 'TikTok Pixel ID'),
+  ])), `<div class="mock-card">
+      <div class="mock-title">สถานะการติดตั้ง</div>
+      <div class="mock-chips" id="pvMarketingChips"></div>
+      <p class="mock-note" style="margin:8px 0 0">ตัวที่ติดตั้งแล้วจะเริ่มเก็บข้อมูลทันทีหลังบันทึก</p>
+    </div>`, 'สถานะอัปเดตตามที่กรอก');
+  const stats = withPreview(grid([
     ['SITE_STAT_FARMERS', 'เกษตรกรไว้วางใจ baseline เดิม'],
     ['SITE_STAT_PRODUCTS', 'ผลิตภัณฑ์ (ใส่ auto = นับสินค้าจริง หรือใส่ตัวเลขเอง)'],
     ['SITE_STAT_RATING', 'คะแนนเฉลี่ย (ใส่ auto = เฉลี่ยรีวิวจริง หรือใส่ตัวเลขเอง)'],
@@ -7764,52 +7965,64 @@ async function viewAdminSite() {
     ['SITE_STAT_ONTIME_BASE_TOTAL', 'ส่งตรงเวลา baseline: จำนวนออเดอร์ส่งสำเร็จเดิม'],
     ['SITE_STAT_ONTIME_BASE_ONTIME', 'ส่งตรงเวลา baseline: จำนวนที่ส่งตรงเวลาเดิม'],
     ['SITE_STAT_ONTIME_TARGET_DAYS', 'นับว่าส่งตรงเวลาเมื่อส่งสำเร็จภายในกี่วัน'],
-  ].map((a) => field(...a)).join('');
-  const conversion = [
+  ].map((a) => field(...a))), `<div class="mock-card">
+      <div class="mock-title">การ์ดสถิติหน้า "เกี่ยวกับเรา"</div>
+      <div class="mock-stat-grid" id="pvStatsGrid" style="margin-top:8px"></div>
+      <p class="mock-note" style="margin:8px 0 0">ค่าที่ใส่ auto จะคำนวณจากข้อมูลจริงตอนแสดงบนเว็บ</p>
+    </div>`);
+  const conversion = withPreview([
     ['SITE_TRUST_ITEMS', 'จุดแข็ง / Trust Point (บรรทัดละ 1 ข้อ)', 'area-lg'],
     ['SITE_CASE_STUDIES', 'Use Case / หลักฐานการใช้งาน (รูปแบบ: หัวข้อ :: รายละเอียด)', 'area-lg'],
     ['SITE_CHECKOUT_POINTS', 'ข้อความสร้างความมั่นใจก่อนชำระเงิน (บรรทัดละ 1 ข้อ)', 'area-lg'],
-  ].map((a) => field(...a)).join('');
+  ].map((a) => field(...a)).join(''), `<div class="mock-card">
+      <div class="mock-title">จุดแข็งที่โชว์บนเว็บ</div>
+      <div class="mock-list" id="pvTrustList"></div>
+      <div class="mock-title" style="margin-top:12px">Use Case</div>
+      <div class="mock-list" id="pvCaseList"></div>
+      <div class="mock-title" style="margin-top:12px">ก่อนชำระเงิน</div>
+      <div class="mock-list" id="pvCheckoutList"></div>
+    </div>`);
   const reviews = group('แก้ caption รีวิวทีละรูป', 'จัดการข้อความใต้ภาพ ป้ายสั้น และเลือกรีวิวเด่นได้จากหลังบ้านโดยตรง', `${reviewAdminEditor(reviewData.items || [])}<p class="form-note">ข้อความหลักที่ระบบใช้ตอนนี้คือ “ภาพรีวิวและผลงานจริงจากลูกค้าของคุณจูนนุชฟอร์ไลฟ์” และจะถูกใช้เป็น fallback อัตโนมัติเมื่อรูปใดยังไม่ได้แก้เอง</p>`);
   const draftRaw = localStorage.getItem(ADMIN_CROP_DRAFT_KEY) || '';
   const cropMap = cropLandingMapFromRaw(draftRaw || s.SITE_CROP_LANDING_DATA || cropData);
   const cropCards = sortCropLandingEntries(Object.values(cropMap)).map((entry, idx) => cropLandingAdminCard(entry, idx)).join('');
   const sectionNav = [
-    ['brand', 'แบรนด์'],
-    ['home', 'หน้าแรก'],
-    ['contact', 'ติดต่อ'],
-    ['dock', 'Dock'],
-    ['shipping', 'จัดส่ง'],
-    ['sale', 'Flash Sale'],
-    ['marketing', 'Marketing'],
-    ['stats', 'About'],
-    ['conversion', 'Conversion'],
-    ['reviews', 'รีวิวลูกค้า'],
-    ['calc', 'เครื่องคำนวณ'],
-    ['crop', 'หน้าเฉพาะพืช'],
+    ['brand', '🏷️ แบรนด์ & ฮีโร่'],
+    ['share', '🔗 ตอนแชร์ลิงก์'],
+    ['home', '🏠 หน้าแรก'],
+    ['contact', '📞 ติดต่อ'],
+    ['dock', '📌 Dock'],
+    ['shipping', '🚚 จัดส่ง'],
+    ['sale', '⚡ Flash Sale'],
+    ['marketing', '📈 Marketing'],
+    ['stats', '📊 About'],
+    ['conversion', '🤝 Conversion'],
+    ['reviews', '⭐ รีวิวลูกค้า'],
+    ['calc', '🧮 เครื่องคำนวณ'],
+    ['crop', '🌱 หน้าเฉพาะพืช'],
   ].map(([id, label]) => `<button class="btn-mini site-admin-jump" type="button" data-sitejump="site-section-${id}">${label}</button>`).join('');
-  const overviewCards = [
-    ['brand', 'แบรนด์หลัก', 'ชื่อร้าน แถบประกาศ หัวฮีโร่ และ footer'],
-    ['home', 'ข้อความหน้าแรก', 'หัวข้อแต่ละบล็อกและ wording ฝั่งหน้าแรก'],
-    ['contact', 'ข้อมูลติดต่อ', 'เบอร์คุณจูน LINE และปุ่มในกล่องติดต่อ'],
-    ['dock', 'Dock ลอยมุมจอ', 'หัวข้อ คำอธิบาย และชื่อปุ่ม LIVECHAT / LINE'],
-    ['reviews', 'รีวิวลูกค้า', 'แก้ caption ใต้ภาพและเลือก spotlight รีวิวเด่น'],
-  ].map(([id, title, desc]) => `<button class="site-admin-card glass" type="button" data-sitejump="site-section-${id}"><b>${title}</b><span>${desc}</span></button>`).join('');
-  return adminLayout('site', `<div class="admin-workspace admin-site-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Brand Settings</span><h2>ข้อมูลร้าน / เว็บไซต์</h2><p class="muted">ปรับชื่อเว็บ Hero ติดต่อ LINE รีวิว และข้อความสำคัญของร้านแบบเป็นหมวด</p></div></div>
+  _afterRender = () => {
+    let savedSection = 'brand';
+    try { savedSection = localStorage.getItem(SITE_ADMIN_ACTIVE_SECTION_KEY) || 'brand'; } catch {}
+    activateSiteSection(savedSection);
+    updateSiteAdminPreviews();
+  };
+  return adminLayout('site', `<div class="admin-workspace admin-site-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Brand Settings</span><h2>ข้อมูลร้าน / เว็บไซต์</h2><p class="muted">เลือกหมวดจากแท็บด้านล่าง แก้ข้อความฝั่งซ้าย แล้วดูตัวอย่างจริงฝั่งขวาก่อนกดบันทึก</p></div></div>
     <form id="settingsForm" class="set-form glass">
-      <div class="site-admin-overview">${overviewCards}</div>
       <div class="site-admin-toolbar glass">
         <div class="site-admin-nav">${sectionNav}</div>
-        <div class="site-admin-actions"><button class="btn btn-glass" type="button" data-siteopenall>ขยายทุกส่วน</button><button class="btn btn-glass" type="button" data-sitecloseall>ย่อส่วนยาว</button><button class="btn btn-primary" type="submit">บันทึกทั้งหมด</button></div>
+        <div class="site-admin-actions"><button class="btn btn-primary" type="submit">บันทึกทั้งหมด</button></div>
       </div>
-      ${siteSection('brand', 'แบรนด์ & ฮีโร่', 'ตัวตนหลักของร้านและข้อความแรกที่ผู้ใช้เห็น', brand, true)}
-      ${siteSection('home', 'ข้อความหน้าแรก', 'หัวข้อ section และ wording ฝั่งหน้าแรกทั้งหมด', homepage, true)}
-      ${siteSection('contact', 'ข้อมูลติดต่อ', 'เบอร์โทร LINE และปุ่มในกล่องติดต่อหน้าแรก', contact, true)}
+      <div class="site-admin-tabs">
+      ${siteSection('brand', 'แบรนด์ & ฮีโร่', 'ตัวตนหลักของร้านและข้อความแรกที่ผู้ใช้เห็น', brand)}
+      ${siteSection('share', 'ตัวอย่างตอนแชร์ลิงก์ (LINE / Facebook)', 'รูปการ์ดและข้อความที่ขึ้นเวลาส่งลิงก์ร้านนี้ในแชต — ตั้งแยกของแต่ละร้านได้', share)}
+      ${siteSection('home', 'ข้อความหน้าแรก', 'หัวข้อ section และ wording ฝั่งหน้าแรกทั้งหมด', homepage)}
+      ${siteSection('contact', 'ข้อมูลติดต่อ', 'เบอร์โทร LINE และปุ่มในกล่องติดต่อหน้าแรก', contact)}
       ${siteSection('dock', 'Dock ลอยมุมจอ', 'จัดการข้อความและชื่อปุ่มของ contact dock', dock)}
       ${siteSection('shipping', 'การจัดส่ง', 'ค่าส่ง ประเทศหลัก และยอดส่งฟรี', ship)}
       ${siteSection('sale', 'Flash Sale ⚡', 'เปิด/ปิดโปรลดราคาทั้งร้านและนับถอยหลัง', sale)}
       ${siteSection('marketing', 'Marketing & Pixel', 'รหัสติดตามโฆษณาและการตลาด', marketing)}
-      ${siteSection('stats', 'สถิติหน้า "เกี่ยวกับเรา"', `สูตร hybrid ปัจจุบัน: เกษตรกรไว้วางใจ = baseline เดิม + ผู้ติดต่อจริงในระบบแบบไม่ซ้ำ, และส่งตรงเวลา = (baseline ที่ส่งตรงเวลา + ออเดอร์ที่ส่งทันจริง) / (baseline ส่งสำเร็จ + ออเดอร์ที่ส่งสำเร็จจริง)`, `${stats}<p class="form-note">สูตร hybrid ปัจจุบัน: <b>เกษตรกรไว้วางใจ</b> = baseline เดิม + ผู้ติดต่อจริงในระบบแบบไม่ซ้ำ, และ <b>ส่งตรงเวลา</b> = (baseline ที่ส่งตรงเวลา + ออเดอร์ที่ส่งทันจริง) / (baseline ส่งสำเร็จ + ออเดอร์ที่ส่งสำเร็จจริง) หากยังไม่มีข้อมูลส่งจริงจะ fallback ไปใช้ค่า % ที่กรอกไว้</p>`)}
+      ${siteSection('stats', 'สถิติหน้า "เกี่ยวกับเรา"', 'ตัวเลขความน่าเชื่อถือบนหน้า About — ใส่ auto เพื่อคำนวณจากข้อมูลจริง', `${stats}<p class="form-note">สูตร hybrid ปัจจุบัน: <b>เกษตรกรไว้วางใจ</b> = baseline เดิม + ผู้ติดต่อจริงในระบบแบบไม่ซ้ำ, และ <b>ส่งตรงเวลา</b> = (baseline ที่ส่งตรงเวลา + ออเดอร์ที่ส่งทันจริง) / (baseline ส่งสำเร็จ + ออเดอร์ที่ส่งสำเร็จจริง) หากยังไม่มีข้อมูลส่งจริงจะ fallback ไปใช้ค่า % ที่กรอกไว้</p>`)}
       ${siteSection('conversion', 'Trust / Conversion Content', 'ข้อความเพิ่มความน่าเชื่อถือและช่วยปิดการขาย', conversion)}
       ${siteSection('reviews', 'รีวิวลูกค้า / Spotlight', 'แก้ caption รีวิวทีละรูปและกำหนดรีวิวเด่นด้านบนหน้ารีวิว', reviews)}
       ${siteSection('calc', 'ฐานความรู้เครื่องคำนวณ', 'จัดการสูตรพื้นฐานและคำอธิบายสำหรับเครื่องคำนวณ', `<textarea name="SITE_CALC_KNOWLEDGE" id="calcKnowledgeJson" hidden>${esc(calcKnowledgeRaw)}</textarea>${calcKnowledgeEditorHTML(calcKnowledgeRaw)}<p class="form-note">บันทึกครั้งเดียวแล้วหน้าเครื่องคำนวณจะอัปเดตทั้งสูตรตามระยะพืช คำอธิบายสินค้า และค่าพื้นฐานน้ำต่อไร่ทันที</p>`)}
@@ -7839,6 +8052,7 @@ async function viewAdminSite() {
         <div id="cropLandingAdminList" class="crop-admin-list">${cropCards}</div>
         <button class="btn btn-glass" type="button" id="addCropLandingBtn">+ เพิ่มหน้าเฉพาะพืช</button>
       </div>`)}
+      </div>
       <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึกทั้งหมด</button></div>
     </form>
     <p class="form-note" style="margin-top:12px">บันทึกแล้วมีผลทันทีทุกหน้า · Flash Sale จะลดราคาทุกสินค้า + ขึ้นแบนเนอร์นับถอยหลัง</p></div>`);
@@ -8597,7 +8811,18 @@ document.body.addEventListener('submit', async (e) => {
       const fd = new FormData(form);
       const settings = {};
       for (const [k, v] of fd.entries()) if (v !== '') settings[k] = v;
-      const r = await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) });
+      // ค่าตอนแชร์ลิงก์ต้องส่งแม้ว่าง เพื่อให้ "ล้างรูป/ล้างข้อความ" มีผลจริง
+      for (const k of ['SITE_SHARE_TITLE', 'SITE_SHARE_DESC', 'SITE_SHARE_IMAGE']) {
+        if (fd.has(k)) settings[k] = String(fd.get(k) ?? '');
+      }
+      // ฟอร์มข้อมูลร้าน (มี SITE_NAME) ของร้านย่อย → บันทึกเป็น override ของร้านนั้น ไม่ทับค่าร้านหลัก
+      const isSiteForm = fd.has('SITE_NAME');
+      const selectedStoreId = adminSelectedStoreId();
+      const defaultStoreId = String((_adminStoresContext?.stores || []).find((store) => store.isDefault)?.id || 'store_main');
+      const saveToStore = isSiteForm && selectedStoreId && selectedStoreId !== defaultStoreId;
+      const r = saveToStore
+        ? await api('/api/admin/stores/' + encodeURIComponent(selectedStoreId) + '/settings', { method: 'PUT', body: JSON.stringify({ settings }) })
+        : await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || 'ผิดพลาด');
       const verifyStatus = String(d?.verification?.status || 'ok').trim();
@@ -8838,6 +9063,61 @@ async function uploadAdminAssetSource(source) {
   if (!r.ok) throw new Error(d.error || 'อัปโหลดไฟล์ไม่สำเร็จ');
   return d.url || '';
 }
+// ── รูปตอนแชร์ลิงก์ (Social Share) ในหน้า /admin/site — พรีวิวการ์ดอัปเดตสด ──
+function updateShareCardPreview() {
+  const titleEl = document.getElementById('sharePrevTitle');
+  const form = document.getElementById('settingsForm');
+  if (!titleEl || !form) return;
+  const val = (name) => String(form.querySelector(`[name="${name}"]`)?.value || '').trim();
+  const shareImage = val('SITE_SHARE_IMAGE');
+  const title = val('SITE_SHARE_TITLE') || [val('SITE_NAME'), val('SITE_TAGLINE')].filter(Boolean).join(' | ') || 'ชื่อร้านของคุณ';
+  const desc = val('SITE_SHARE_DESC') || val('SITE_HERO_SUB') || val('SITE_ANNOUNCE');
+  titleEl.textContent = title;
+  const descEl = document.getElementById('sharePrevDesc');
+  if (descEl) descEl.textContent = desc;
+  const img = document.getElementById('sharePrevImg');
+  const nextSrc = shareImage || '/brand-share.jpg?v=20260628-1';
+  if (img && img.getAttribute('src') !== nextSrc) img.setAttribute('src', nextSrc);
+  const status = document.getElementById('shareImageStatus');
+  if (status) status.textContent = shareImage ? 'ใช้รูปที่อัปโหลดของร้านนี้' : 'ยังไม่ได้ตั้งรูปของร้านนี้ — ตอนนี้ใช้รูปแบรนด์หลักของระบบ';
+}
+function updateShareImagePreview(url = '') {
+  const hidden = document.getElementById('shareImageValue');
+  if (hidden) hidden.value = String(url || '').trim();
+  updateShareCardPreview();
+}
+document.addEventListener('input', (e) => {
+  if (e.target?.closest?.('#settingsForm')) updateSiteAdminPreviews();
+});
+document.addEventListener('change', (e) => {
+  if (e.target?.id !== 'shareImageFile' && e.target?.closest?.('#settingsForm')) updateSiteAdminPreviews();
+});
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#shareImageUploadBtn')) {
+    e.preventDefault();
+    document.getElementById('shareImageFile')?.click();
+  } else if (e.target.closest('#shareImageClearBtn')) {
+    e.preventDefault();
+    updateShareImagePreview('');
+    toast('กลับไปใช้รูปหลักแล้ว กด "บันทึกทั้งหมด" เพื่อยืนยัน', 'ok');
+  }
+});
+document.addEventListener('change', async (e) => {
+  if (e.target?.id !== 'shareImageFile') return;
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  const btn = document.getElementById('shareImageUploadBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'กำลังอัปโหลด...'; }
+  try {
+    const url = await uploadAdminAssetSource(file);
+    updateShareImagePreview(url);
+    toast('อัปโหลดรูปแล้ว กด "บันทึกทั้งหมด" เพื่อให้มีผลจริง', 'ok');
+  } catch (err) {
+    toast(err.message || 'อัปโหลดรูปไม่สำเร็จ', 'err');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'อัปโหลดรูปใหม่'; }
+});
 function readAdminMediaValue(scope, inputSelector, hiddenSelector) {
   const hidden = scope?.querySelector(hiddenSelector);
   const input = scope?.querySelector(inputSelector);

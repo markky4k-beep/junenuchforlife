@@ -159,12 +159,17 @@ const [stylesHash, appHash, clientCoreHash, bg3dHash, adminAppHash] = await Prom
   contentHash(path.join(projectRoot, 'public', 'bg3d.js')),
   contentHash(path.join(projectRoot, 'private-build', 'admin-app.js')),
 ]);
-await stampAssetVersions(path.join(projectRoot, 'public', 'index.html'), {
+// shell สาธารณะไม่วางใน public/ แล้ว — เซิร์ฟผ่านฟังก์ชันเพื่อ inject meta (og:image/title) รายร้าน
+const shellDest = path.join(projectRoot, 'private-build', 'shell.html');
+await fs.copyFile(path.join(projectRoot, 'client-src', 'index.html'), shellDest);
+await stampAssetVersions(shellDest, {
   '/styles.css': stylesHash,
   '/client-core.js': clientCoreHash,
   '/app.js': appHash,
   '/bg3d.js': bg3dHash,
 });
+// กันไฟล์ index.html เก่าค้างใน public/ แล้วแย่งเสิร์ฟ static ตัดหน้า dynamic shell
+await fs.rm(path.join(projectRoot, 'public', 'index.html'), { force: true });
 await stampAssetVersions(path.join(projectRoot, 'private-build', 'admin.html'), {
   '/styles.css': stylesHash,
   '/client-core.js': clientCoreHash,

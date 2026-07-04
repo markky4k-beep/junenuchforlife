@@ -5,7 +5,7 @@
   "outputDirectory": "public",
   "regions": ["sin1"],
   "functions": {
-    "api/index.js": { "maxDuration": 30 }
+    "api/index.js": { "maxDuration": 30, "includeFiles": "{private-build,client-src}/**" }
   },
   "headers": [
     {
@@ -84,6 +84,7 @@
     { "source": "/webhook/(.*)", "destination": "/api/index.js" },
     { "source": "/robots.txt", "destination": "/api/index.js" },
     { "source": "/sitemap.xml", "destination": "/api/index.js" },
-    { "source": "/((?!.*\\.).*)", "destination": "/index.html" }
+    { "source": "/", "destination": "/api/index.js" },
+    { "source": "/((?!.*\\.).*)", "destination": "/api/index.js" }
   ]
 }

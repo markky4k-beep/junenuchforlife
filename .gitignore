@@ -10,6 +10,7 @@ lineoa_bot/legacy/credentials/
 # ───── dependencies / build ─────
 node_modules/
 .vercel/
+.vs/
 __pycache__/
 *.pyc
 
@@ -30,6 +31,7 @@ backup_*.csv
 debug-*.md
 trae-debug-log-*.ndjson
 lineoa_bot/
+private-build/shell.html
 data-hygiene-audit.json
 *-cookie.txt
 debug-cookies.txt

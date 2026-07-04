@@ -2764,6 +2764,10 @@ const SITE_DEFAULTS = {
   SITE_CHECKOUT_POINTS: 'รองรับการชำระเงินผ่าน PromptPay และบัตรเครดิต\nลูกค้าทัก LINE หรือกรอกฟอร์มเพื่อขอคำแนะนำก่อนซื้อได้\nหลังสั่งซื้อสามารถติดตามสถานะออเดอร์และเลขพัสดุได้จากเว็บไซต์',
   SITE_CROP_LANDING_DATA: '',
   SITE_CALC_KNOWLEDGE: '',
+  // ตัวอย่างตอนแชร์ลิงก์ (Open Graph) — เว้นว่าง = สร้างจากชื่อร้าน/คำโปรย และใช้ /brand-share.jpg
+  SITE_SHARE_TITLE: '',
+  SITE_SHARE_DESC: '',
+  SITE_SHARE_IMAGE: '',
   // จัดส่ง (บาท)
   SHIP_HOME: 'ไทย',
   SHIP_FEE: '50',
@@ -4361,6 +4365,7 @@ app.put('/api/admin/stores/:id/settings', requireStoreParamAccess('admin'), asyn
   }
   siteStatsCache = null;
   siteStatsCacheAt = 0;
+  shellRenderCache.clear();
   await recordSystemEvent({
     level: 'info',
     source: 'multi_tenant',
@@ -4445,6 +4450,7 @@ app.put('/api/admin/settings', requireAdmin, async (req, res) => {
   await refreshSettingsCache();
   siteStatsCache = null;
   siteStatsCacheAt = 0;
+  shellRenderCache.clear();
   const verification = await buildConfigCenterVerification({
     reason: 'settings_update',
     changedKeys,
@@ -4507,6 +4513,7 @@ app.post('/api/admin/settings/rollback/:revisionId', requireAdmin, async (req, r
   await refreshSettingsCache();
   siteStatsCache = null;
   siteStatsCacheAt = 0;
+  shellRenderCache.clear();
   const verification = await buildConfigCenterVerification({
     reason: 'settings_rollback',
     changedKeys: snapshotKeys,
@@ -4806,7 +4813,83 @@ app.use((req, res, next) => {
   }
   return next();
 });
-app.get('*', (_req, res) => { setSensitiveNoStore(res); res.sendFile(path.join(publicDir, 'index.html')); });  // SPA fallback + ซ่อนหน้า 404 ของเซิร์ฟเวอร์
+// ──────────── SPA shell แบบ dynamic — inject meta ตอนแชร์ลิงก์ (Open Graph) รายร้าน ────────────
+// บอทของ LINE/Facebook ไม่รัน JS จึงต้อง render title/og:image จากฝั่งเซิร์ฟเวอร์ตามร้านของโดเมนนั้น
+const shellHtmlFile = path.join(privateBuildDir, 'shell.html');
+const shellSourceFile = path.join(__dirname, '..', 'client-src', 'index.html');
+let shellTemplateCache = '';
+function loadShellTemplate() {
+  if (shellTemplateCache) return shellTemplateCache;
+  const file = fs.existsSync(shellHtmlFile) ? shellHtmlFile : shellSourceFile;
+  shellTemplateCache = fs.readFileSync(file, 'utf8');
+  return shellTemplateCache;
+}
+function escapeHtmlAttribute(value = '') {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function setShellMeta(html, attrName, attrValue, content) {
+  const re = new RegExp(`(<meta\\s+${attrName}="${attrValue.replace(/[.:]/g, '\\$&')}"\\s+content=")[^"]*(")`);
+  return html.replace(re, `$1${escapeHtmlAttribute(content)}$2`);
+}
+const SHELL_RENDER_TTL_MS = 30000;
+const shellRenderCache = new Map();
+async function renderSiteShell(req) {
+  const store = await getRequestStore(req).catch(() => null);
+  const requestBase = `${req.secure || String(req.headers['x-forwarded-proto'] || '').includes('https') ? 'https' : 'http'}://${extractRequestHost(req) || req.get('host') || ''}`;
+  const cacheKey = `${store?.id || 'default'}|${requestBase}`;
+  const cached = shellRenderCache.get(cacheKey);
+  if (cached && (Date.now() - cached.at) < SHELL_RENDER_TTL_MS) return cached.html;
+
+  const overrides = await siteOverridesForRequest(req).catch(() => ({}));
+  const S = (k) => String(siteValueFromOverrides(k, overrides) || '').trim();
+  const siteName = S('SITE_NAME');
+  const tagline = S('SITE_TAGLINE');
+  const shareTitle = S('SITE_SHARE_TITLE') || [siteName, tagline].filter(Boolean).join(' | ');
+  const shareDesc = S('SITE_SHARE_DESC') || S('SITE_HERO_SUB') || S('SITE_ANNOUNCE') || tagline;
+  const baseUrl = String(currentStorePublicUrl(req, store) || requestBase).trim().replace(/\/+$/, '');
+  const shareImageRaw = S('SITE_SHARE_IMAGE') || '/brand-share.jpg?v=20260628-1';
+  const shareImage = /^https?:\/\//i.test(shareImageRaw) ? shareImageRaw : `${baseUrl}${shareImageRaw.startsWith('/') ? '' : '/'}${shareImageRaw}`;
+  const imageAlt = `ภาพแบรนด์${siteName}`;
+
+  let html = loadShellTemplate();
+  html = html.replace(/<title>[\s\S]*?<\/title>/, `<title>${escapeHtmlAttribute(shareTitle)}</title>`);
+  html = setShellMeta(html, 'name', 'description', shareDesc);
+  html = setShellMeta(html, 'property', 'og:title', shareTitle);
+  html = setShellMeta(html, 'property', 'og:description', shareDesc);
+  html = setShellMeta(html, 'property', 'og:image', shareImage);
+  html = setShellMeta(html, 'property', 'og:image:alt', imageAlt);
+  html = setShellMeta(html, 'name', 'twitter:title', shareTitle);
+  html = setShellMeta(html, 'name', 'twitter:description', shareDesc);
+  html = setShellMeta(html, 'name', 'twitter:image', shareImage);
+  html = setShellMeta(html, 'name', 'twitter:image:alt', imageAlt);
+  html = html.replace(
+    /<meta property="og:type" content="website" \/>/,
+    `<meta property="og:type" content="website" />\n  <meta property="og:url" content="${escapeHtmlAttribute(`${baseUrl}/`)}" />`
+  );
+  html = html.replace(
+    /<script type="application\/ld\+json">[\s\S]*?<\/script>/,
+    `<script type="application/ld+json">${JSON.stringify({ '@context': 'https://schema.org', '@type': 'Store', name: siteName, description: shareDesc, slogan: tagline })}</script>`
+  );
+  shellRenderCache.set(cacheKey, { html, at: Date.now() });
+  if (shellRenderCache.size > 200) {
+    const oldestKey = shellRenderCache.keys().next().value;
+    shellRenderCache.delete(oldestKey);
+  }
+  return html;
+}
+app.get('*', async (req, res) => {  // SPA fallback + ซ่อนหน้า 404 ของเซิร์ฟเวอร์
+  setSensitiveNoStore(res);
+  try {
+    res.type('html').send(await renderSiteShell(req));
+  } catch (err) {
+    console.error('[shell] render failed:', err?.message || err);
+    res.sendFile(fs.existsSync(shellHtmlFile) ? shellHtmlFile : shellSourceFile);
+  }
+});
 app.use((err, req, res, _next) => {
   // #region debug-point F:error-middleware
   reportServerDebug('F', 'server/index.js:error-middleware', '[DEBUG] request failed in express error middleware', {
