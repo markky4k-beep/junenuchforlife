@@ -9498,6 +9498,570 @@ body .admin-stores-ui .adm-prod {
   align-items: start;
 }
 
+body .store-manager-ui {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+
+body .admin-stores-ui.store-manager-ui {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body .store-manager-head {
+  margin-bottom: 0;
+}
+
+body .store-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+body .store-overview-grid > .glass {
+  padding: 14px !important;
+  border-radius: 22px;
+}
+
+body .store-manager-shell {
+  display: grid;
+  grid-template-columns: minmax(320px, .54fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+body .store-manager-rail {
+  display: grid;
+  gap: 12px;
+  position: sticky;
+  top: 152px;
+}
+
+body .store-quick-card,
+body .store-selected-card,
+body .store-work-panel {
+  border: 1px solid rgba(40,30,90,.08);
+  border-radius: 26px;
+  background:
+    linear-gradient(145deg, rgba(255,255,255,.94), rgba(249,247,255,.82));
+  box-shadow: 0 26px 70px -58px rgba(34,26,70,.44);
+}
+
+body .store-quick-card {
+  padding: 14px;
+}
+
+body .store-card-head,
+body .store-selected-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+body .store-card-head h3,
+body .store-selected-main h3 {
+  margin: 2px 0 0;
+  line-height: 1.15;
+}
+
+body .store-create-form {
+  padding: 0 !important;
+  margin-top: 12px;
+  border: 0 !important;
+  background: transparent !important;
+  gap: 10px;
+}
+
+body .store-create-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+body .store-create-grid .set-field {
+  min-width: 0;
+}
+
+body .store-create-actions {
+  margin-top: 0;
+}
+
+body .store-switch-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(430px, calc(100dvh - 460px));
+  overflow: auto;
+  padding-right: 2px;
+}
+
+body .store-switch-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid rgba(40,30,90,.08);
+  border-radius: 20px;
+  background: rgba(255,255,255,.76);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+}
+
+body .store-switch-card:hover,
+body .store-switch-card.is-active {
+  transform: translateY(-1px);
+  border-color: rgba(124,92,255,.32);
+  box-shadow: 0 18px 44px -36px rgba(77,54,150,.46);
+}
+
+body .store-switch-card.is-active {
+  background: linear-gradient(135deg, rgba(255,255,255,.96), rgba(242,238,255,.88));
+}
+
+body .store-switch-mark {
+  width: 10px;
+  height: 38px;
+  border-radius: 999px;
+  background: rgba(124,92,255,.20);
+}
+
+body .store-switch-card.is-active .store-switch-mark {
+  background: linear-gradient(180deg, #8b5cf6, #5f45d8);
+}
+
+body .store-switch-body {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+body .store-switch-body b,
+body .store-switch-body small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body .store-switch-badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+body .store-switch-badges em {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(44,181,125,.10);
+  color: #116b47;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+body .store-switch-badges em.warn {
+  background: rgba(245,158,11,.12);
+  color: #8a5200;
+}
+
+body .store-empty-note {
+  padding: 14px;
+  border: 1px dashed rgba(40,30,90,.16);
+  border-radius: 18px;
+  color: var(--muted);
+}
+
+body .store-manager-detail {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+body .store-selected-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 16px;
+}
+
+body .store-selected-main {
+  min-width: 0;
+}
+
+body .store-selected-main p {
+  margin: 6px 0 10px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+body .store-selected-status,
+body .store-selected-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+body .store-selected-actions {
+  grid-column: 1 / -1;
+  padding-top: 4px;
+}
+
+body .store-work-tabs {
+  position: sticky;
+  top: 152px;
+  z-index: 14;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px;
+  border: 1px solid rgba(40,30,90,.08);
+  border-radius: 24px;
+  background: rgba(255,255,255,.86);
+  backdrop-filter: blur(16px);
+}
+
+body .store-work-tabs a,
+body .store-work-tabs button {
+  flex: 0 0 auto;
+  padding: 10px 13px;
+  border: 1px solid rgba(40,30,90,.08);
+  border-radius: 999px;
+  background: rgba(255,255,255,.70);
+  color: var(--text);
+  font-weight: 800;
+  text-decoration: none;
+  cursor: pointer;
+  font: inherit;
+}
+
+body .store-work-stack {
+  display: grid;
+  gap: 10px;
+}
+
+body .store-work-panel {
+  overflow: hidden;
+}
+
+body .store-work-panel > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 15px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+body .store-work-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+body .store-work-panel > summary span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+body .store-work-panel > summary small {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+body .store-work-panel > summary i {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(124,92,255,.10);
+  position: relative;
+  flex: 0 0 auto;
+}
+
+body .store-work-panel > summary i::before,
+body .store-work-panel > summary i::after {
+  content: "";
+  position: absolute;
+  inset: 16px 10px auto;
+  height: 2px;
+  border-radius: 999px;
+  background: #7357ea;
+}
+
+body .store-work-panel > summary i::after {
+  transform: rotate(90deg);
+  transition: transform .18s ease;
+}
+
+body .store-work-panel[open] > summary i::after {
+  transform: rotate(0deg);
+}
+
+body .store-work-panel-body {
+  padding: 0 14px 14px;
+}
+
+body .store-work-panel-body > section,
+body .store-work-panel-body > .glass {
+  margin: 0 !important;
+  padding: 14px !important;
+  border-radius: 20px !important;
+  box-shadow: none !important;
+}
+
+body .store-work-panel-body .pf-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body .store-work-panel-body #adminStoreSettingsForm .pf-grid {
+  max-height: min(560px, calc(100dvh - 360px));
+  overflow: auto;
+  padding-right: 4px;
+}
+
+body .store-work-panel-body .adm-list {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+body .admin:has(.store-manager-ui) {
+  width: min(100% - 34px, 1160px);
+  gap: 16px;
+}
+
+body .admin:has(.store-manager-ui) .admin-side {
+  margin-bottom: 14px;
+  padding: 14px;
+  border-radius: 34px;
+  background: rgba(255,255,255,.80);
+  box-shadow: 0 30px 90px -72px rgba(34,26,70,.40);
+}
+
+body .admin:has(.store-manager-ui) .admin-brand {
+  padding-bottom: 6px;
+}
+
+body .admin:has(.store-manager-ui) .admin-store-switcher {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  border-radius: 18px;
+}
+
+body .admin:has(.store-manager-ui) .admin-side > a {
+  min-height: 34px;
+  padding: 8px 10px;
+  border-radius: 15px;
+  font-size: 12px;
+}
+
+body .admin:has(.store-manager-ui) .admin-exit {
+  margin-top: 6px;
+  padding-top: 10px !important;
+}
+
+body .store-manager-ui {
+  max-width: 1100px;
+  margin: 0 auto;
+  gap: 12px;
+}
+
+body .store-manager-head {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 124px;
+  padding: 22px 120px;
+  text-align: center;
+  border: 1px solid rgba(40,30,90,.08);
+  border-radius: 32px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(124,92,255,.10), transparent 42%),
+    linear-gradient(135deg, rgba(255,255,255,.95), rgba(249,248,253,.86));
+  box-shadow: 0 34px 90px -72px rgba(34,26,70,.48);
+}
+
+body .store-manager-head h2 {
+  margin: 6px 0 4px;
+  font-size: clamp(1.85rem, 3.2vw, 2.9rem);
+}
+
+body .store-manager-head .muted {
+  max-width: 620px;
+  margin: 0 auto;
+}
+
+body .store-manager-head .admin-inline-actions {
+  position: absolute;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+body .store-overview-grid {
+  gap: 8px;
+}
+
+body .store-overview-grid > .glass {
+  min-height: 76px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 12px !important;
+  text-align: center;
+  border-radius: 20px;
+  background: rgba(255,255,255,.78);
+  box-shadow: 0 22px 54px -48px rgba(34,26,70,.38);
+}
+
+body .store-overview-grid .adm-prod-top {
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+}
+
+body .store-overview-grid .muted {
+  margin-top: 4px !important;
+  font-size: .88rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+body .store-overview-grid .meta-row {
+  justify-content: center;
+  margin-top: 7px !important;
+}
+
+body .store-manager-shell {
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid rgba(40,30,90,.08);
+  border-radius: 32px;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.70), rgba(245,250,252,.56)),
+    radial-gradient(circle at 18% 24%, rgba(124,92,255,.08), transparent 34%);
+  box-shadow: 0 34px 90px -74px rgba(34,26,70,.44);
+}
+
+body .store-manager-rail {
+  gap: 10px;
+  top: 132px;
+}
+
+body .store-quick-card,
+body .store-selected-card,
+body .store-work-panel {
+  border-radius: 24px;
+  background: rgba(255,255,255,.84);
+  box-shadow: 0 20px 58px -52px rgba(34,26,70,.42);
+}
+
+body .store-quick-card {
+  padding: 15px;
+}
+
+body .store-card-head {
+  align-items: center;
+}
+
+body .store-card-head h3 {
+  font-size: 1.28rem;
+}
+
+body .store-create-grid {
+  grid-template-columns: 1fr;
+}
+
+body .store-create-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+body .store-switch-list {
+  max-height: min(360px, calc(100dvh - 430px));
+}
+
+body .store-switch-card {
+  grid-template-columns: 8px minmax(0, 1fr);
+  padding: 12px 13px;
+}
+
+body .store-switch-badges {
+  grid-column: 2;
+  justify-content: flex-start;
+}
+
+body .store-selected-card {
+  align-items: start;
+  padding: 18px;
+}
+
+body .store-selected-main h3 {
+  font-size: 1.55rem;
+}
+
+body .store-selected-status {
+  max-width: 360px;
+}
+
+body .store-selected-actions {
+  justify-content: flex-end;
+  padding-top: 8px;
+}
+
+body .store-work-tabs {
+  justify-content: center;
+  padding: 8px;
+  border-radius: 26px;
+  top: 132px;
+}
+
+body .store-work-tabs a,
+body .store-work-tabs button {
+  min-width: 108px;
+  padding: 10px 13px;
+  text-align: center;
+}
+
+body .store-work-tabs button.is-active,
+body .store-work-tabs button:hover {
+  border-color: rgba(124,92,255,.26);
+  background: linear-gradient(135deg, rgba(124,92,255,.14), rgba(255,255,255,.92));
+  box-shadow: 0 14px 32px -26px rgba(77,54,150,.48);
+}
+
+body .store-work-panel > summary {
+  padding: 14px 16px;
+}
+
+body .store-work-panel > summary span {
+  text-align: left;
+}
+
+body .store-work-panel[open] {
+  background: rgba(255,255,255,.90);
+}
+
+body .store-work-panel-body {
+  padding: 0 16px 16px;
+}
+
+body .store-work-panel-body > section,
+body .store-work-panel-body > .glass {
+  background: rgba(255,255,255,.76) !important;
+}
+
+body .store-work-panel-body #adminStoreSettingsForm .pf-grid {
+  gap: 12px;
+  max-height: min(520px, calc(100dvh - 340px));
+}
+
+body .store-work-panel-body .set-field span {
+  font-size: .82rem;
+}
+
 body .admin-diagnostics-ui .pf-actions {
   position: sticky;
   top: 176px;
@@ -9643,15 +10207,43 @@ body .admin-products-ui textarea {
   }
 
   body .admin-stores-ui,
+  body .store-manager-shell,
   body .admin-site-ui .site-admin-overview,
   body .admin-site-ui .site-fields-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  body .admin-stores-ui.store-manager-ui {
+    grid-template-columns: 1fr;
+  }
+
+  body .admin-stores-ui.store-manager-ui .store-manager-shell {
+    grid-template-columns: minmax(320px, .52fr) minmax(0, 1fr);
+  }
+
+  body .store-overview-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  body .store-manager-rail,
+  body .store-work-tabs {
+    position: static;
   }
 
   body .admin-lux-head,
   body .admin-diagnostics-ui .pf-actions,
   body .admin-site-ui .site-admin-toolbar {
     position: static;
+  }
+}
+
+@media (max-width: 980px) {
+  body .store-overview-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  body .admin-stores-ui.store-manager-ui .store-manager-shell {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -9672,10 +10264,34 @@ body .admin-products-ui textarea {
 
   body .admin-main .stat-cards,
   body .admin-stores-ui,
+  body .store-manager-shell,
+  body .store-overview-grid,
+  body .store-create-grid,
+  body .store-selected-card,
   body .admin-site-ui .site-admin-overview,
   body .admin-site-ui .site-fields-grid,
   body .admin-products-ui .category-bulk-grid,
   body .admin-product-list .adm-prod {
+    grid-template-columns: 1fr;
+  }
+
+  body .admin-stores-ui.store-manager-ui,
+  body .admin-stores-ui.store-manager-ui .store-manager-shell {
+    grid-template-columns: 1fr;
+  }
+
+  body .store-switch-list,
+  body .store-work-panel-body #adminStoreSettingsForm .pf-grid {
+    max-height: none;
+    overflow: visible;
+  }
+
+  body .store-selected-status,
+  body .store-selected-actions {
+    justify-content: flex-start;
+  }
+
+  body .store-work-panel-body .pf-grid {
     grid-template-columns: 1fr;
   }
 
@@ -9790,4 +10406,75 @@ body .brand-dot::after {
   .qa-counts,.qa-two-col,.qa-check-list,.diagnostics-fold-grid{grid-template-columns:1fr}
   .diagnostics-fold[open]{grid-column:auto}
   .diagnostics-compact .diagnostics-actions{top:80px}
+}
+
+/* ════════════════════ ✦ ADMIN AI LOOK — โฉมใหม่หลังบ้าน ✦ ════════════════════ */
+/* layer สุดท้าย: ธีมหลังบ้านทั้งระบบ — sidebar จัดหมวด, การ์ดนุ่ม, ปุ่ม/ฟอร์ม/ป้ายสถานะโทนเดียวกัน */
+body .admin-side { gap: 4px; padding: 16px 14px 14px; border-color: rgba(123,92,255,.16); }
+body .admin-brand { font-size: 17px; font-weight: 800; letter-spacing: .01em; padding: 6px 10px 14px;
+  background: linear-gradient(100deg, #3b2b8f, #7b5cff 55%, #b45cff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+body .admin-brand .brand-dot { width: 10px; height: 10px; flex: none; border-radius: 999px;
+  background: linear-gradient(135deg, #7b5cff, #c061ff); animation: adminBrandPulse 2.8s var(--ease) infinite; }
+@keyframes adminBrandPulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(123,92,255,.14), 0 0 12px rgba(123,92,255,.45); }
+  50% { box-shadow: 0 0 0 7px rgba(123,92,255,.08), 0 0 22px rgba(123,92,255,.7); }
+}
+body .admin-nav-group { display: flex; flex-direction: column; gap: 3px; }
+body .admin-nav-label { display: block; margin: 13px 10px 5px; font-size: 10px; font-weight: 800; letter-spacing: .24em; text-transform: uppercase; color: rgba(109,104,144,.72); }
+body .admin-nav-group:first-of-type .admin-nav-label { margin-top: 4px; }
+body .admin-side a:not(.admin-exit) { position: relative; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px;
+  font-size: 13px; font-weight: 600; letter-spacing: .01em; text-transform: none; color: var(--muted); border: 1px solid transparent;
+  transition: transform .18s var(--ease), background .18s, color .18s, box-shadow .18s; }
+body .admin-side a:not(.admin-exit) > span:first-child { width: 30px; height: 30px; display: grid; place-items: center; flex: none;
+  border-radius: 10px; background: rgba(123,92,255,.08); font-size: 15px; transition: background .18s; }
+body .admin-side a:not(.admin-exit):hover { background: rgba(123,92,255,.08); color: var(--text); transform: translateX(3px); }
+body .admin-side a:not(.admin-exit):hover > span:first-child { background: rgba(123,92,255,.16); }
+body .admin-side a.on { background: linear-gradient(120deg, #6c4cf5, #9b5cff); color: #fff; box-shadow: 0 14px 30px -16px rgba(108,76,245,.6); }
+body .admin-side a.on > span:first-child { background: rgba(255,255,255,.2); }
+body .admin-side a.on:hover { background: linear-gradient(120deg, #6c4cf5, #9b5cff); color: #fff; transform: none; }
+body .admin-exit { font-size: 12px; letter-spacing: .04em; color: var(--muted); border-radius: 12px; }
+body .admin-exit:hover { color: var(--accent-deep); }
+body .admin-store-switcher { border-radius: 14px; border-color: rgba(123,92,255,.18);
+  background: linear-gradient(135deg, rgba(123,92,255,.09), rgba(76,196,255,.06)); }
+/* เนื้อหา: เข้าแบบ fade-up นุ่ม ๆ ทุกครั้งที่เปลี่ยนหน้า */
+body .admin-main { animation: adminPageIn .3s var(--ease) both; }
+@keyframes adminPageIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+body .adm-head h2, body .admin-lux-head h2 { font-weight: 800; letter-spacing: -.01em;
+  background: linear-gradient(95deg, #241b52 20%, #6c4cf5 75%, #b45cff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+/* การ์ดทุกแบบ: มุมนุ่ม เงาบาง hover ยกเบา ๆ */
+body .dash-card { border-radius: 22px; border-color: rgba(123,92,255,.12); box-shadow: 0 18px 44px -38px rgba(36,28,82,.4);
+  transition: box-shadow .2s var(--ease), border-color .2s; }
+body .dash-card:hover { border-color: rgba(123,92,255,.2); box-shadow: 0 24px 54px -36px rgba(88,60,200,.42); }
+body .adm-prod, body .adm-row { border-radius: 18px; border-color: rgba(123,92,255,.1);
+  transition: transform .18s var(--ease), box-shadow .18s var(--ease), border-color .18s; }
+body .adm-prod:hover, body .adm-row:hover { transform: translateY(-1px); border-color: rgba(123,92,255,.24); box-shadow: 0 18px 34px -26px rgba(88,60,200,.35); }
+body .adm-prod-img { border-radius: 14px; background: linear-gradient(135deg, #f1edff, #f8f7fd); border-color: rgba(123,92,255,.14); }
+/* ป้ายสถานะ: เม็ดสีนุ่มอ่านง่าย แทนกรอบเส้น */
+body .status-badge { border: 0; border-radius: 999px; padding: 6px 13px; font-weight: 700; letter-spacing: .05em;
+  background: rgba(40,30,90,.07); color: var(--muted); }
+body .status-badge.s-awaiting_payment { background: rgba(240,177,90,.18); color: #a86f1e; }
+body .status-badge.s-paid { background: rgba(123,92,255,.15); color: #5a3fe0; }
+body .status-badge.s-preparing { background: rgba(76,196,255,.17); color: #0f7db8; }
+body .status-badge.s-shipped { background: rgba(192,97,255,.15); color: #8b2fd6; }
+body .status-badge.s-delivered { background: rgba(56,180,120,.17); color: #1f8a53; }
+body .status-badge.s-cancelled { background: rgba(212,56,62,.13); color: #c23a40; }
+body .status-badge.s-expired { background: rgba(150,150,160,.18); color: #6b7280; }
+/* ปุ่ม/ฟิลเตอร์/ฟอร์ม */
+body .btn-mini { border-radius: 999px; text-transform: none; letter-spacing: .02em; font-weight: 700; font-size: 12px;
+  background: rgba(255,255,255,.72); transition: transform .16s var(--ease), background .16s, border-color .16s, color .16s; }
+body .btn-mini:hover { background: rgba(123,92,255,.1); border-color: rgba(123,92,255,.4); color: var(--accent-deep); transform: translateY(-1px); }
+body .admin-filter-bar { border-radius: 20px; border-color: rgba(123,92,255,.14); backdrop-filter: blur(10px);
+  box-shadow: 0 16px 38px -34px rgba(36,28,82,.45); }
+body .admin-main input, body .admin-main select, body .admin-main textarea { transition: border-color .15s, box-shadow .15s; }
+body .admin-main input:focus, body .admin-main select:focus, body .admin-main textarea:focus {
+  border-color: rgba(123,92,255,.55); box-shadow: 0 0 0 4px rgba(123,92,255,.12); }
+/* กราฟ/แถบสถิติ */
+body .bar { height: 8px; border-radius: 6px; }
+body .bar i { background: linear-gradient(90deg, #6c4cf5, #c061ff); }
+body .chip { border-radius: 999px; }
+/* มือถือ: กลุ่มเมนูสลายเป็น grid เดิม (ไม่กินพื้นที่) */
+@media (max-width: 1180px) {
+  body .admin-nav-group { display: contents; }
+  body .admin-nav-label { display: none; }
+  body .admin-side a:not(.admin-exit):hover { transform: none; }
 }

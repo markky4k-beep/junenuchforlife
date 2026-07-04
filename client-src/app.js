@@ -5529,10 +5529,19 @@ function adminLayout(active, content) {
     : (isFullAdminClient(currentUser)
       ? [['', 'แดชบอร์ด', '◴'], ['products', 'จัดการสินค้า', '❑'], ['community', 'ชุมชน', '◎'], ['articles', 'บทความเดิม', '✐'], ['inbox', 'Inbox แชต', '✉'], ['leads', 'ลีดลูกค้า', '◎'], ['orders', 'ออเดอร์', '❯'], ['coupons', 'คูปองส่วนลด', '٪'], ['users', 'ผู้ใช้', '◇'], ['stores', 'หลายเว็บไซต์', '◪'], ['site', 'ข้อมูลร้าน', '✎'], ['diagnostics', 'Diagnostics', '◫'], ['settings', 'ตั้งค่า API', '⚙']]
       : storeScopedTabs);
-  const nav = tabs.map(([k, l, ic]) => {
+  // ไอคอน + หมวดหมู่เมนู — จัดกลุ่มให้หาง่าย (มือถือจะยุบเป็น grid เดิมผ่าน display:contents)
+  const NAV_ICONS = { '': '📊', products: '📦', community: '🌱', articles: '📝', inbox: '💬', leads: '🎯', orders: '🧾', coupons: '🏷️', users: '👥', stores: '🌐', site: '🎨', diagnostics: '🩺', settings: '⚙️' };
+  const NAV_GROUP_OF = { '': 'ภาพรวม', orders: 'ภาพรวม', inbox: 'ภาพรวม', leads: 'ภาพรวม', products: 'ร้านค้า', coupons: 'ร้านค้า', site: 'ร้านค้า', stores: 'ร้านค้า', community: 'คอนเทนต์', articles: 'คอนเทนต์', users: 'ระบบ', settings: 'ระบบ', diagnostics: 'ระบบ' };
+  const navLink = ([k, l, ic]) => {
     const isInbox = k === 'inbox';
     const badge = isInbox && _adminInboxUnreadTotal ? `<span class="admin-nav-badge">${_adminInboxUnreadTotal > 99 ? '99+' : _adminInboxUnreadTotal}</span>` : '';
-    return `<a href="${routeHref('/admin' + (k ? '/' + k : ''))}" data-admin-nav="${esc(k || 'dashboard')}" class="${active === k ? 'on' : ''}"><span>${ic}</span>${l}${badge}</a>`;
+    return `<a href="${routeHref('/admin' + (k ? '/' + k : ''))}" data-admin-nav="${esc(k || 'dashboard')}" class="${active === k ? 'on' : ''}"><span>${NAV_ICONS[k] ?? ic}</span>${l}${badge}</a>`;
+  };
+  const showNavLabels = tabs.length > 3;
+  const nav = ['ภาพรวม', 'ร้านค้า', 'คอนเทนต์', 'ระบบ'].map((groupName) => {
+    const items = tabs.filter(([k]) => (NAV_GROUP_OF[k] || 'ภาพรวม') === groupName);
+    if (!items.length) return '';
+    return `<div class="admin-nav-group">${showNavLabels ? `<span class="admin-nav-label">${groupName}</span>` : ''}${items.map(navLink).join('')}</div>`;
   }).join('');
   const storeSwitcher = renderAdminStoreSwitcher();
   const currentStore = selectedAdminStore();
@@ -6891,13 +6900,16 @@ function renderStoreSubdomainCheck(state = {}) {
 }
 function renderSelectedStoreSettingsPanel(data = {}) {
   const store = data.store || selectedAdminStore();
+  const isolated = data.isolated === true || (store && store.isDefault !== true);
   const settings = Object.fromEntries((Array.isArray(data.settings) ? data.settings : []).map((item) => [item.key, item]));
   const value = (key) => String(settings[key]?.value ?? data.site?.[key] ?? '').trim();
   const field = (key, label, type = 'text', rows = 2) => {
     const secret = settings[key]?.secret === true;
     const inherited = settings[key]?.inherited === true;
     const display = String(settings[key]?.display || '').trim();
-    const help = inherited ? '<em class="ok">ใช้ค่า global อยู่</em>' : '<em class="ok">ตั้งค่าแยกร้านแล้ว</em>';
+    const help = inherited
+      ? `<em class="ok">${isolated ? 'ใช้ค่าเริ่มต้นร้านนี้อยู่' : 'ใช้ค่า global อยู่'}</em>`
+      : '<em class="ok">ตั้งค่าแยกร้านแล้ว</em>';
     if (type === 'area') {
       return `<label class="set-field"><span>${esc(label)} ${help}</span><textarea name="${esc(key)}" rows="${rows}">${esc(value(key))}</textarea></label>`;
     }
@@ -7031,6 +7043,90 @@ function renderStoreRolesPanel(store = {}, rolesData = {}) {
     <div class="adm-list" style="margin-top:12px">${roles.length ? roles.map((role) => `<article class="adm-prod glass"><div class="adm-prod-top"><b>${esc(role.user?.email || role.userId)}</b><span class="status-badge s-paid">${esc(role.role)}</span></div><div class="muted">${esc(role.user?.name || '')}</div></article>`).join('') : '<div class="form-note">ยังไม่มี role รายร้านเพิ่มเติม</div>'}</div>
   </section>`;
 }
+function adminStoreHostLabel(store = {}, rootDomain = '') {
+  const domains = Array.isArray(store?.domains) ? store.domains : [];
+  const primaryDomain = domains.find((item) => item?.isPrimary) || domains[0] || null;
+  if (store?.subdomain && rootDomain) return `${store.subdomain}.${rootDomain}`;
+  return store?.primaryDomain || primaryDomain?.host || store?.publicUrl || '-';
+}
+function adminStoreReadiness(store = {}) {
+  const domains = Array.isArray(store?.domains) ? store.domains : [];
+  const primaryDomain = domains.find((item) => item?.isPrimary) || domains[0] || null;
+  const database = store?.database || null;
+  const databaseReady = store?.isDefault || String(database?.status || '').toLowerCase() === 'ready';
+  const domainReady = store?.isDefault || primaryDomain?.verified === true;
+  return { database, databaseReady, domainReady, primaryDomain };
+}
+function renderAdminStoreCreateCard(stores = []) {
+  return `<section class="store-quick-card store-create-card">
+    <div class="store-card-head">
+      <div><span class="eyebrow">New Store</span><h3>สร้างเว็บไซต์ใหม่</h3></div>
+      <span class="status-badge">Wizard</span>
+    </div>
+    <form id="adminStoreCreateForm" class="set-form store-create-form">
+      <div class="store-create-grid">
+        <label class="set-field">
+          <span>ชื่อร้าน</span>
+          <input id="storeNameInput" name="name" placeholder="เช่น June Glow Atelier" maxlength="80" required>
+        </label>
+        <label class="set-field">
+          <span>Subdomain</span>
+          <input id="storeSubdomainInput" name="subdomain" placeholder="june-glow" maxlength="32" autocomplete="off" required>
+        </label>
+        <label class="set-field">
+          <span>Template</span>
+          <select name="templateKey">
+            <option value="blank">ร้านว่าง</option>
+            <option value="agri">อาหารเสริมพืช</option>
+            <option value="pod">พอต</option>
+            <option value="course">คอร์สเรียน / แหล่งเรียนรู้</option>
+          </select>
+        </label>
+        <label class="set-field">
+          <span>Clone จากร้าน</span>
+          <select name="cloneFromStoreId">
+            <option value="">ไม่ clone</option>
+            ${stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name || store.id)}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <div id="storeSubdomainCheckResult">${renderStoreSubdomainCheck()}</div>
+      <div class="pf-actions store-create-actions">
+        <button class="btn btn-glass" type="button" id="checkStoreSubdomainBtn">เช็ก subdomain</button>
+        <button class="btn btn-primary" type="submit">สร้างร้านใหม่</button>
+      </div>
+    </form>
+  </section>`;
+}
+function renderAdminStoreList(stores = [], rootDomain = '', selectedStoreId = '') {
+  if (!stores.length) return '<div class="store-empty-note">ยังไม่มีร้านที่สร้างเพิ่มจากหลังบ้าน</div>';
+  return `<div class="store-switch-list">${stores.map((store) => {
+    const ready = adminStoreReadiness(store);
+    const active = store?.id === selectedStoreId;
+    const host = adminStoreHostLabel(store, rootDomain);
+    return `<button class="store-switch-card ${active ? 'is-active' : ''}" type="button" data-admin-store-pick="${esc(store?.id || '')}">
+      <span class="store-switch-mark"></span>
+      <span class="store-switch-body">
+        <b>${esc(store?.name || 'ร้านใหม่')}</b>
+        <small>${esc(host)}</small>
+      </span>
+      <span class="store-switch-badges">
+        ${store?.isDefault ? '<em>Main</em>' : '<em>Sub</em>'}
+        ${ready.databaseReady ? '<em>DB</em>' : '<em class="warn">DB</em>'}
+        ${ready.domainReady ? '<em>DNS</em>' : '<em class="warn">DNS</em>'}
+      </span>
+    </button>`;
+  }).join('')}</div>`;
+}
+function renderStoreWorkspacePanel(title, desc, content, open = false) {
+  return `<details class="store-work-panel" ${open ? 'open' : ''}>
+    <summary>
+      <span><b>${esc(title)}</b><small>${esc(desc || '')}</small></span>
+      <i></i>
+    </summary>
+    <div class="store-work-panel-body">${content}</div>
+  </details>`;
+}
 async function viewAdminStores() {
   if (!adminGuard()) return loadingView();
   await ensureAdminStoresContext(true).catch(() => null);
@@ -7086,7 +7182,9 @@ async function viewAdminStores() {
       </article>`;
     }).join('')}</div>`
     : '<div class="glass" style="padding:18px">ยังไม่มีร้านที่สร้างเพิ่มจากหลังบ้าน</div>';
-  const selectedStoreId = adminSelectedStoreId();
+  const rawSelectedStoreId = adminSelectedStoreId();
+  const selectedStoreId = rawSelectedStoreId === 'all' ? (defaultStore?.id || stores[0]?.id || 'store_main') : rawSelectedStoreId;
+  if (rawSelectedStoreId === 'all' && selectedStoreId !== rawSelectedStoreId) setAdminSelectedStoreId(selectedStoreId);
   const selectedSettingsRes = await api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/settings`).catch(() => null);
   const selectedSettingsData = selectedSettingsRes ? await selectedSettingsRes.json().catch(() => ({})) : {};
   const selectedStore = stores.find((store) => store.id === selectedStoreId) || selectedSettingsData.store || selectedAdminStore();
@@ -7096,56 +7194,75 @@ async function viewAdminStores() {
     api('/api/admin/production-qa').then((res) => res.json()).catch(() => ({})),
   ]);
   const selectedStoreSettingsPanel = selectedSettingsRes?.ok ? renderSelectedStoreSettingsPanel(selectedSettingsData) : `<section class="glass" style="padding:18px;margin-top:18px"><b>ตั้งค่าร้านที่เลือก</b><p class="muted">โหลด settings ร้าน ${esc(selectedStoreId)} ไม่สำเร็จ</p></section>`;
-  return adminLayout('stores', `<div class="admin-workspace admin-stores-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Multi-store Center</span><h2>Store Manager</h2><p class="muted">เปิดร้านใหม่ ตรวจโดเมน จัดสิทธิ์ และตั้งค่าร้านที่เลือกจากจุดเดียว</p></div><div class="admin-inline-actions"><button class="btn btn-glass" type="button" id="refreshStoresBtn">รีเฟรชรายการร้าน</button></div></div>
-    <p class="form-note" style="margin:0 0 16px">ส่วนนี้ใช้สำหรับเปิดเว็บไซต์ใหม่จาก template เดิม โดย clone theme และ site settings เริ่มต้นจากเว็บหลัก แต่ให้ข้อมูลร้านใหม่เริ่มต้นว่าง พร้อมผูก subdomain ให้ทันทีในระดับ foundation</p>
-    ${diagnosticsSection('ภาพรวมการเปิดร้าน', 'เช็กความพร้อมเรื่องโดเมนและจำนวนร้านก่อนกดสร้าง', setupCards)}
-    <section class="glass" style="padding:18px;margin-top:18px">
-      <div class="adm-head" style="margin:0 0 10px"><h3>สร้างร้านใหม่</h3><span class="muted">สร้างเสร็จจะได้ public URL ทันที</span></div>
-      <form id="adminStoreCreateForm" class="set-form" style="padding:0;background:transparent;border:0">
-        <label class="set-field">
-          <span>ชื่อร้าน</span>
-          <input id="storeNameInput" name="name" placeholder="เช่น June Glow Atelier" maxlength="80" required>
-        </label>
-        <label class="set-field">
-          <span>Subdomain <em class="ok">ระบบจะช่วยแปลงจากชื่อร้านให้ แต่คุณแก้เองได้</em></span>
-          <input id="storeSubdomainInput" name="subdomain" placeholder="june-glow" maxlength="32" autocomplete="off" required>
-        </label>
-        <label class="set-field">
-          <span>Template / Clone</span>
-          <select name="templateKey">
-            <option value="blank">ร้านว่าง</option>
-            <option value="agri">อาหารเสริมพืช</option>
-            <option value="pod">พอต</option>
-            <option value="course">คอร์สเรียน / แหล่งเรียนรู้</option>
-          </select>
-        </label>
-        <label class="set-field">
-          <span>Clone settings จากร้าน</span>
-          <select name="cloneFromStoreId">
-            <option value="">ไม่ clone</option>
-            ${stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name || store.id)}</option>`).join('')}
-          </select>
-        </label>
-        <div id="storeSubdomainCheckResult">${renderStoreSubdomainCheck()}</div>
-        <div class="pf-actions">
-          <button class="btn btn-glass" type="button" id="checkStoreSubdomainBtn">เช็ก subdomain</button>
-          <button class="btn btn-primary" type="submit">สร้างร้านใหม่</button>
+  const selectedReady = adminStoreReadiness(selectedStore);
+  const selectedHost = adminStoreHostLabel(selectedStore, rootDomain);
+  const qaChecklist = selectedQaData?.checklist || {};
+  const launchPercent = Math.max(0, Number(qaChecklist.percent || 0));
+  const quickCards = `<div class="store-overview-grid">
+    ${diagnosticsMetricCard('Root Domain', diagnosticsStateBadge(rootDomain ? 'ok' : 'warn'), rootDomain || 'ยังจับ root domain ไม่ได้', currentHost ? `host ปัจจุบัน ${currentHost}` : '')}
+    ${diagnosticsMetricCard('ร้านทั้งหมด', diagnosticsStateBadge(stores.length ? 'ok' : 'info'), `${stores.length} ร้าน`, defaultStore?.name ? `ร้านหลัก ${defaultStore.name}` : 'ยังไม่มีร้านหลัก')}
+    ${diagnosticsMetricCard('ร้านที่เลือก', diagnosticsStateBadge(selectedReady.databaseReady ? 'ok' : 'warn'), selectedStore?.name || selectedStoreId, selectedHost)}
+    ${diagnosticsMetricCard('Launch', diagnosticsStateBadge(launchPercent >= 85 ? 'ok' : 'warn'), launchPercent ? `${launchPercent}% พร้อมใช้งาน` : 'รอข้อมูล checklist', selectedReady.domainReady ? 'Domain พร้อม' : 'Domain รอตรวจ')}
+  </div>`;
+  const selectedPublicUrl = String(selectedStore?.publicUrl || selectedHealthData?.publicUrl || '').trim();
+  const deleteConfirm = selectedStore?.subdomain || selectedStore?.id || '';
+  const selectedActions = `<div class="store-selected-actions">
+    <button class="btn btn-primary" type="button" data-open-site-section="brand">แก้แบรนด์ & ฮีโร่</button>
+    ${selectedPublicUrl ? `<a class="btn btn-primary" href="${esc(selectedPublicUrl)}" target="_blank" rel="noopener">เปิดหน้าเว็บร้าน</a>` : ''}
+    ${selectedPublicUrl ? `<button class="btn btn-glass" type="button" data-copystoreurl="${esc(selectedPublicUrl)}">คัดลอก URL</button>` : ''}
+    ${selectedStore?.id && selectedStore?.subdomain ? `<button class="btn btn-glass" type="button" data-provisionstore="${esc(selectedStore.id)}">Retry Domain</button>` : ''}
+    ${selectedStore?.id && !selectedStore?.isDefault ? `<button class="btn btn-glass store-delete-btn" type="button" data-deletestore="${esc(selectedStore.id)}" data-deletestore-name="${esc(selectedStore.name || selectedStore.id)}" data-deletestore-confirm="${esc(deleteConfirm)}">ลบร้าน</button>` : ''}
+  </div>`;
+  return adminLayout('stores', `<div class="admin-workspace admin-stores-ui store-manager-ui">
+    <div class="adm-head admin-lux-head store-manager-head">
+      <div><span class="eyebrow">Multi-store Center</span><h2>หลายเว็บไซต์</h2><p class="muted">สร้างร้าน เลือกร้าน แก้ settings ตรวจโดเมน จัดสิทธิ์ และ backup ได้จากหน้าสั้นลงกว่าเดิม</p></div>
+      <div class="admin-inline-actions"><button class="btn btn-glass" type="button" id="refreshStoresBtn">รีเฟรช</button></div>
+    </div>
+    ${quickCards}
+    <div class="store-manager-shell">
+      <aside class="store-manager-rail">
+        ${renderAdminStoreCreateCard(stores)}
+        <section class="store-quick-card">
+          <div class="store-card-head"><div><span class="eyebrow">Store List</span><h3>เลือกร้านเพื่อแก้ไข</h3></div><span class="status-badge">${stores.length}</span></div>
+          ${renderAdminStoreList(stores, rootDomain, selectedStoreId)}
+        </section>
+      </aside>
+      <main class="store-manager-detail">
+        <section class="store-selected-card">
+          <div class="store-selected-main">
+            <span class="eyebrow">Selected Website</span>
+            <h3>${esc(selectedStore?.name || selectedStoreId)}</h3>
+            <p>${esc(selectedHost)}</p>
+            <div class="meta-row">
+              <small>storeId: ${esc(selectedStore?.id || selectedStoreId)}</small>
+              ${selectedReady.database?.databaseKey ? `<small>database: ${esc(selectedReady.database.databaseKey)}</small>` : ''}
+              ${selectedReady.primaryDomain?.host ? `<small>domain: ${esc(selectedReady.primaryDomain.host)}</small>` : ''}
+            </div>
+          </div>
+          <div class="store-selected-status">
+            ${storeStatusBadge(selectedStore)}
+            ${selectedReady.databaseReady ? '<span class="status-badge s-paid">Database Ready</span>' : '<span class="status-badge s-awaiting_payment">Database Pending</span>'}
+            ${selectedReady.domainReady ? '<span class="status-badge s-paid">Domain Ready</span>' : '<span class="status-badge s-awaiting_payment">Domain Pending</span>'}
+          </div>
+          ${selectedActions}
+        </section>
+        <div class="store-work-tabs" aria-label="Store edit sections">
+          <button type="button" data-store-panel-target="store-launch">Checklist</button>
+          <button type="button" data-store-panel-target="store-domain">Domain</button>
+          <button type="button" data-store-panel-target="store-settings">Brand & API</button>
+          <button type="button" data-store-panel-target="store-roles">Permission</button>
+          <button type="button" data-store-panel-target="store-backup">Backup</button>
         </div>
-      </form>
-      <div class="form-note" style="margin-top:12px">หลังสร้างแล้ว ร้านใหม่จะได้ค่าเริ่มต้นเช่นชื่อเว็บ, copy หน้าแรก, public URL และ database namespace ใหม่อัตโนมัติ ส่วนสินค้า/ออเดอร์/แชตของร้านใหม่จะเริ่มแยกว่างตาม <code>store_id</code></div>
-    </section>
-    ${renderStoreOnboardingPanel(selectedStore, selectedSettingsData, selectedQaData)}
-    ${renderDomainHealthPanel(selectedStore, selectedHealthData)}
-    ${selectedStoreSettingsPanel}
-    ${renderStoreRolesPanel(selectedStore, selectedRolesData)}
-    ${renderStoreBackupPanel(selectedStore)}
-    ${diagnosticsSection('รายการร้าน', 'ดูร้านหลักและร้านที่สร้างเพิ่ม พร้อมเปิด URL ได้ทันที', storesHtml)}
-    <section class="glass" style="padding:18px;margin-top:18px">
-      <div class="adm-head" style="margin:0 0 10px"><h3>หมายเหตุ rollout</h3><span class="muted">สถานะของเฟส multi-tenant ตอนนี้</span></div>
-      <div class="form-note" style="margin:0 0 10px">พร้อมแล้ว: registry ร้าน, domain mapping, per-store settings, public API ฝั่ง <code>site/products</code> และ API สร้างร้านจากหลังบ้าน</div>
-      <div class="form-note" style="margin:0 0 10px">กำลังต่อในเฟสถัดไป: store switcher, scope หลังบ้านสินค้า/ออเดอร์/Inbox ต่อร้าน, และการแยก LINE OA / Payment / SMTP ต่อร้าน</div>
-      <div class="form-note" style="margin:0">ถ้าใช้ production จริง ควรเปิด wildcard subdomain บน Vercel และ apply migration <code>003_multi_tenant_foundation.sql</code> ลง Supabase ก่อน</div>
-    </section></div>`);
+        <div class="store-work-stack">
+          <div id="store-launch">${renderStoreWorkspacePanel('Launch Checklist', 'ตั้งค่าพื้นฐานก่อนเปิดร้าน', renderStoreOnboardingPanel(selectedStore, selectedSettingsData, selectedQaData), false)}</div>
+          <div id="store-domain">${renderStoreWorkspacePanel('Domain Health', 'DNS, SSL และ Vercel provision', renderDomainHealthPanel(selectedStore, selectedHealthData), false)}</div>
+          <div id="store-settings">${renderStoreWorkspacePanel('ข้อมูลร้านและ API', 'ชื่อเว็บ hero contact LINE PromptPay SMTP', selectedStoreSettingsPanel, true)}</div>
+          <div id="store-roles">${renderStoreWorkspacePanel('Permission รายร้าน', 'owner admin staff chat_admin', renderStoreRolesPanel(selectedStore, selectedRolesData), false)}</div>
+          <div id="store-backup">${renderStoreWorkspacePanel('Backup / Restore', 'export และ import เฉพาะร้านนี้', renderStoreBackupPanel(selectedStore), false)}</div>
+        </div>
+      </main>
+    </div>
+  </div>`);
 }
 function renderConfigCenterStatus(lastApply = null, history = [], revisions = []) {
   const changedKeys = Array.isArray(lastApply?.changedKeys) ? lastApply.changedKeys : [];
@@ -8986,17 +9103,20 @@ document.body.addEventListener('submit', async (e) => {
       await syncCropLandingSettings(form);
       const fd = new FormData(form);
       const settings = {};
-      for (const [k, v] of fd.entries()) if (v !== '') settings[k] = v;
+      for (const [k, v] of fd.entries()) settings[k] = String(v ?? '');
       // ค่าตอนแชร์ลิงก์ต้องส่งแม้ว่าง เพื่อให้ "ล้างรูป/ล้างข้อความ" มีผลจริง
       for (const k of ['SITE_SHARE_TITLE', 'SITE_SHARE_DESC', 'SITE_SHARE_IMAGE']) {
         if (fd.has(k)) settings[k] = String(fd.get(k) ?? '');
       }
-      // เซิร์ฟเวอร์ตัดสินใจเองจาก x-store-id: ร้านย่อย → เขียน override เฉพาะร้านนั้น ไม่ทับค่าร้านหลัก
-      const r = await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) });
+      const selectedStoreId = adminSelectedStoreId();
+      const savePath = selectedStoreId && selectedStoreId !== 'all' && selectedStoreId !== 'store_main'
+        ? `/api/admin/stores/${encodeURIComponent(selectedStoreId)}/settings`
+        : '/api/admin/settings';
+      const r = await api(savePath, { method: 'PUT', body: JSON.stringify({ settings }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || 'ผิดพลาด');
       const verifyStatus = String(d?.verification?.status || 'ok').trim();
-      if (d?.storeScoped) toast(`บันทึกเฉพาะร้าน "${d.storeName || d.storeId}" แล้ว (ไม่กระทบร้านหลัก)`, 'ok');
+      if (d?.storeScoped || savePath !== '/api/admin/settings') toast(`บันทึกเฉพาะร้าน "${d.storeName || d.store?.name || selectedStoreId}" แล้ว (ไม่กระทบร้านหลัก)`, 'ok');
       else if (verifyStatus === 'error') toast('บันทึกแล้ว แต่ระบบยังพบจุดผิดพลาดที่ต้องแก้', 'err');
       else if (verifyStatus === 'warn') toast('บันทึกแล้ว พร้อมคำเตือนที่ควรตรวจต่อ', 'ok');
       else toast('บันทึกและตรวจสอบผ่านแล้ว (ค่ากลางของร้านหลัก)', 'ok');
@@ -10133,6 +10253,45 @@ document.body.addEventListener('click', async (e) => {
     try { await render(); toast('รีเฟรชรายการร้านแล้ว', 'ok'); }
     catch (err) { toast(err.message || 'รีเฟรชรายการร้านไม่สำเร็จ', 'err'); }
     e.target.disabled = false; return;
+  }
+  const openSiteSectionBtn = e.target.closest('[data-open-site-section]');
+  if (openSiteSectionBtn) {
+    e.preventDefault();
+    const section = String(openSiteSectionBtn.dataset.openSiteSection || 'brand').trim() || 'brand';
+    try { localStorage.setItem(SITE_ADMIN_ACTIVE_SECTION_KEY, section); } catch {}
+    go('/admin/site');
+    return;
+  }
+  const storePickBtn = e.target.closest('[data-admin-store-pick]');
+  if (storePickBtn) {
+    e.preventDefault();
+    const nextStoreId = String(storePickBtn.dataset.adminStorePick || '').trim();
+    if (!nextStoreId || nextStoreId === adminSelectedStoreId()) return;
+    setAdminSelectedStoreId(nextStoreId);
+    _adminSelectedProductIds.clear();
+    adminInboxState.sessionId = '';
+    _adminInboxUnreadTotal = 0;
+    refreshAdminInboxSummary().catch(() => {});
+    toast('เปลี่ยนร้านที่แก้ไขแล้ว', 'ok');
+    await render();
+    return;
+  }
+  const storePanelBtn = e.target.closest('[data-store-panel-target]');
+  if (storePanelBtn) {
+    e.preventDefault();
+    const targetId = String(storePanelBtn.dataset.storePanelTarget || '').trim();
+    const target = targetId ? document.getElementById(targetId) : null;
+    const panel = target?.querySelector('details.store-work-panel');
+    if (!target || !panel) return;
+    document.querySelectorAll('.store-work-panel').forEach((item) => {
+      item.open = item === panel;
+    });
+    document.querySelectorAll('[data-store-panel-target]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn === storePanelBtn);
+    });
+    const top = Math.max(0, target.getBoundingClientRect().top + window.scrollY - 112);
+    window.scrollTo({ top, behavior: 'smooth' });
+    return;
   }
   if (id === 'checkStoreSubdomainBtn') {
     e.target.disabled = true;
