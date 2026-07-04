@@ -29,7 +29,8 @@
     "nodemailer": "^9.0.1",
     "qrcode": "^1.5.4",
     "socket.io": "^4.7.5",
-    "stripe": "^22.2.3"
+    "stripe": "^22.2.3",
+    "three": "^0.160.0"
   },
   "devDependencies": {
     "terser": "^5.48.0"

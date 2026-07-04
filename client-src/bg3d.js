@@ -6,7 +6,7 @@
 // เป็น progressive enhancement: ถ้า WebGL/CDN ใช้ไม่ได้ จะไม่ทำอะไร
 // แล้วปล่อยให้ background CSS (.bg-aurora) ทำงานต่อตามปกติ
 // ════════════════════════════════════════════════════════════════
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import * as THREE from '/assets/runtime/v2.js';
 
 (function initBackground3D() {
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;

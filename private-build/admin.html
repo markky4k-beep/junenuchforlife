@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css?v=d9dbd58c2c" />
+  <link rel="stylesheet" href="/assets/runtime/s.css?v=d9dbd58c2c" />
   <style>
     .admin-boot-shell { opacity: 1; }
     .admin-boot-shell .admin-main { display: grid; gap: 22px; }
@@ -137,9 +137,22 @@
     <div class="brand"><span class="brand-dot"></span>Admin Console</div>
     <p>Restricted area · noindex · secured session</p>
   </footer>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-  <script src="/client-core.js?v=1fbafa900a"></script>
-  <script src="/api/admin/client/app.js?v=9bdd12be91"></script>
-  <script type="module" src="/bg3d.js?v=e49223e6b3"></script>
+  <script src="/assets/runtime/c.js?v=1fbafa900a"></script>
+  <script src="/api/admin/client/app.js?v=401e14b061"></script>
+  <script>
+    (() => {
+      try {
+        const enabled = /[?&]fx=3d\b/.test(location.search) || localStorage.getItem('enable3dBg') === '1';
+        if (!enabled) return;
+        const load = () => {
+          const script = document.createElement('script');
+          script.type = 'module';
+          script.src = '/assets/runtime/b.js?v=f843bc9ae2';
+          document.head.appendChild(script);
+        };
+        (window.requestIdleCallback || ((fn) => setTimeout(fn, 1400)))(load);
+      } catch {}
+    })();
+  </script>
 </body>
 </html>

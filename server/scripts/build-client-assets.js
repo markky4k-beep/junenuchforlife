@@ -108,14 +108,48 @@ async function buildTask(task) {
   });
   if (!result.code) throw new Error(`build_failed:${path.basename(task.src)}`);
   const banner = '/* generated file: edit client-src sources, not public output */\n';
-  await fs.mkdir(path.dirname(task.dest), { recursive: true });
-  await fs.writeFile(task.dest, banner + result.code + '\n', 'utf8');
+  const destinations = Array.isArray(task.dest) ? task.dest : [task.dest];
+  for (const dest of destinations) {
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.writeFile(dest, banner + result.code + '\n', 'utf8');
+  }
+}
+
+async function minifyVendor(src, dest, { module = false } = {}) {
+  const source = await fs.readFile(src, 'utf8');
+  const result = await minify(source, {
+    module,
+    compress: {
+      passes: 2,
+      drop_debugger: true,
+      pure_getters: true,
+    },
+    mangle: {
+      safari10: true,
+    },
+    format: {
+      comments: false,
+      ascii_only: true,
+    },
+    sourceMap: false,
+  });
+  if (!result.code) throw new Error(`vendor_build_failed:${path.basename(src)}`);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.writeFile(dest, result.code + '\n', 'utf8');
+}
+
+async function copyAsset(src, dest) {
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.copyFile(src, dest);
 }
 
 const tasks = [
   {
     src: path.join(projectRoot, 'client-src', 'app.js'),
-    dest: path.join(projectRoot, 'public', 'app.js'),
+    dest: [
+      path.join(projectRoot, 'public', 'app.js'),
+      path.join(projectRoot, 'public', 'assets', 'runtime', 'a.js'),
+    ],
     module: false,
     transform: transformPublicApp,
   },
@@ -126,17 +160,35 @@ const tasks = [
   },
   {
     src: path.join(projectRoot, 'client-src', 'modules', 'core.js'),
-    dest: path.join(projectRoot, 'public', 'client-core.js'),
+    dest: [
+      path.join(projectRoot, 'public', 'client-core.js'),
+      path.join(projectRoot, 'public', 'assets', 'runtime', 'c.js'),
+    ],
     module: false,
   },
   {
     src: path.join(projectRoot, 'client-src', 'bg3d.js'),
-    dest: path.join(projectRoot, 'public', 'bg3d.js'),
+    dest: [
+      path.join(projectRoot, 'public', 'bg3d.js'),
+      path.join(projectRoot, 'public', 'assets', 'runtime', 'b.js'),
+    ],
     module: true,
   },
 ];
 
 await Promise.all(tasks.map(buildTask));
+await Promise.all([
+  copyAsset(path.join(projectRoot, 'public', 'styles.css'), path.join(projectRoot, 'public', 'assets', 'runtime', 's.css')),
+  minifyVendor(
+    path.join(projectRoot, 'node_modules', '@supabase', 'supabase-js', 'dist', 'umd', 'supabase.js'),
+    path.join(projectRoot, 'public', 'assets', 'runtime', 'v1.js'),
+  ),
+  minifyVendor(
+    path.join(projectRoot, 'node_modules', 'three', 'build', 'three.module.js'),
+    path.join(projectRoot, 'public', 'assets', 'runtime', 'v2.js'),
+    { module: true },
+  ),
+]);
 
 async function contentHash(file) {
   const buf = await fs.readFile(file);
@@ -152,17 +204,25 @@ async function stampAssetVersions(htmlFile, hashByAsset) {
   await fs.writeFile(htmlFile, html, 'utf8');
 }
 
-const [stylesHash, appHash, clientCoreHash, bg3dHash, adminAppHash] = await Promise.all([
-  contentHash(path.join(projectRoot, 'public', 'styles.css')),
-  contentHash(path.join(projectRoot, 'public', 'app.js')),
-  contentHash(path.join(projectRoot, 'public', 'client-core.js')),
-  contentHash(path.join(projectRoot, 'public', 'bg3d.js')),
+const [stylesHash, appHash, clientCoreHash, bg3dHash, supabaseHash, threeHash, adminAppHash] = await Promise.all([
+  contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 's.css')),
+  contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 'a.js')),
+  contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 'c.js')),
+  contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 'b.js')),
+  contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 'v1.js')),
+  contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 'v2.js')),
   contentHash(path.join(projectRoot, 'private-build', 'admin-app.js')),
 ]);
 // shell สาธารณะไม่วางใน public/ แล้ว — เซิร์ฟผ่านฟังก์ชันเพื่อ inject meta (og:image/title) รายร้าน
 const shellDest = path.join(projectRoot, 'private-build', 'shell.html');
 await fs.copyFile(path.join(projectRoot, 'client-src', 'index.html'), shellDest);
 await stampAssetVersions(shellDest, {
+  '/assets/runtime/s.css': stylesHash,
+  '/assets/runtime/c.js': clientCoreHash,
+  '/assets/runtime/a.js': appHash,
+  '/assets/runtime/b.js': bg3dHash,
+  '/assets/runtime/v1.js': supabaseHash,
+  '/assets/runtime/v2.js': threeHash,
   '/styles.css': stylesHash,
   '/client-core.js': clientCoreHash,
   '/app.js': appHash,
@@ -171,9 +231,14 @@ await stampAssetVersions(shellDest, {
 // กันไฟล์ index.html เก่าค้างใน public/ แล้วแย่งเสิร์ฟ static ตัดหน้า dynamic shell
 await fs.rm(path.join(projectRoot, 'public', 'index.html'), { force: true });
 await stampAssetVersions(path.join(projectRoot, 'private-build', 'admin.html'), {
+  '/assets/runtime/s.css': stylesHash,
+  '/assets/runtime/c.js': clientCoreHash,
+  '/assets/runtime/b.js': bg3dHash,
+  '/assets/runtime/v1.js': supabaseHash,
+  '/assets/runtime/v2.js': threeHash,
   '/styles.css': stylesHash,
   '/client-core.js': clientCoreHash,
   '/api/admin/client/app.js': adminAppHash,
   '/bg3d.js': bg3dHash,
 });
-console.log(`built ${tasks.length} client assets (styles=${stylesHash} core=${clientCoreHash} app=${appHash} bg3d=${bg3dHash} admin=${adminAppHash})`);
+console.log(`built ${tasks.length} client assets (styles=${stylesHash} core=${clientCoreHash} app=${appHash} bg3d=${bg3dHash} sb=${supabaseHash} three=${threeHash} admin=${adminAppHash})`);

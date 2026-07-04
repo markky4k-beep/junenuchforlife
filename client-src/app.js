@@ -109,6 +109,7 @@ let _chatHistoryLoadedSessionId = '';
 let _chatUnreadCount = 0;
 let _supabaseBrowser = null;
 let _supabaseBrowserKey = '';
+let _supabaseBrowserLoader = null;
 let _socketClientLoader = null;
 let _baseDocumentTitle = typeof document !== 'undefined' ? document.title : '';
 const ROLE_ADMIN = 'admin';
@@ -295,6 +296,29 @@ async function ensureSocketClientLoaded() {
 function hasSupabaseClient() {
   return typeof window !== 'undefined' && typeof window.supabase?.createClient === 'function';
 }
+async function ensureSupabaseClientLoaded() {
+  if (hasSupabaseClient()) return true;
+  if (typeof document === 'undefined') return false;
+  if (_supabaseBrowserLoader) return _supabaseBrowserLoader;
+  _supabaseBrowserLoader = new Promise((resolve) => {
+    const existing = document.getElementById('supabaseRuntimeScript');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(hasSupabaseClient()), { once: true });
+      existing.addEventListener('error', () => resolve(false), { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.id = 'supabaseRuntimeScript';
+    script.src = '/assets/runtime/v1.js';
+    script.async = true;
+    script.onload = () => resolve(hasSupabaseClient());
+    script.onerror = () => resolve(false);
+    document.head.appendChild(script);
+  }).finally(() => {
+    _supabaseBrowserLoader = null;
+  });
+  return _supabaseBrowserLoader;
+}
 function realtimeConfig() {
   return {
     url: String(SITE.SUPABASE_URL || '').trim(),
@@ -304,11 +328,13 @@ function realtimeConfig() {
 }
 function chatRealtimeEnabled() {
   const config = realtimeConfig();
-  return config.mode === 'supabase-broadcast' && Boolean(config.url && config.key && hasSupabaseClient());
+  return config.mode === 'supabase-broadcast' && Boolean(config.url && config.key);
 }
-function getSupabaseBrowser() {
+async function getSupabaseBrowser() {
   const config = realtimeConfig();
   if (!chatRealtimeEnabled()) return null;
+  const ready = await ensureSupabaseClientLoaded();
+  if (!ready) return null;
   const cacheKey = `${config.url}|${config.key}`;
   if (_supabaseBrowser && _supabaseBrowserKey === cacheKey) return _supabaseBrowser;
   _supabaseBrowser = window.supabase.createClient(config.url, config.key, {
@@ -6048,10 +6074,10 @@ async function deleteAdminInboxSession(sessionId = '') {
   await refreshAdminInboxDom();
   toast(`ลบห้อง #${normalizedSessionId} แล้ว`, 'ok');
 }
-function ensureAdminInboxRealtime() {
+async function ensureAdminInboxRealtime() {
   if (!chatRealtimeEnabled() || !canAccessAdminInboxClient(currentUser)) return null;
   if (_adminInboxRealtimeChannel) return _adminInboxRealtimeChannel;
-  const supabase = getSupabaseBrowser();
+  const supabase = await getSupabaseBrowser();
   if (!supabase) return null;
   const channel = supabase.channel('realtime:admin:inbox', { config: { broadcast: { self: false } } });
   channel.on('broadcast', { event: 'inbox_update' }, ({ payload } = {}) => {
@@ -6134,7 +6160,7 @@ function initAdminInboxLive() {
     stopAdminInboxNotifier();
     return;
   }
-  ensureAdminInboxRealtime();
+  ensureAdminInboxRealtime().catch(() => {});
   ensureAdminInboxSocket();
   refreshAdminInboxSummary().catch(() => {});
   if (!_adminInboxSummaryTimer) {
@@ -10820,12 +10846,12 @@ function disconnectChatRealtime() {
   _chatRealtimeReady = false;
   _chatRealtimeSessionId = '';
 }
-function ensureChatRealtime() {
+async function ensureChatRealtime() {
   const sessionId = normalizedChatSessionId(currentSessionId);
   if (!chatRealtimeEnabled() || !sessionId) return null;
   if (_chatRealtimeChannel && _chatRealtimeSessionId === sessionId) return _chatRealtimeChannel;
   disconnectChatRealtime();
-  const supabase = getSupabaseBrowser();
+  const supabase = await getSupabaseBrowser();
   if (!supabase) return null;
   const channel = supabase.channel(`realtime:chat:${sessionId}`, { config: { broadcast: { self: false } } });
   channel.on('broadcast', { event: 'admin_message' }, ({ payload } = {}) => {
@@ -10885,7 +10911,7 @@ function startChat() {
   requestChatNotificationPermission();
   hydrateChatHistory().catch(() => {});
   if (currentSessionId) {
-    ensureChatRealtime();
+    ensureChatRealtime().catch(() => {});
     pollChat().catch(() => {});
   }
   const socket = ensureChatSocket();
@@ -10916,7 +10942,7 @@ async function sendChat(text) {
       const d = await r.json();
       if (d.sessionId) {
         adoptCurrentChatSession(d.sessionId);
-        ensureChatRealtime();
+        ensureChatRealtime().catch(() => {});
       }
     }
     startChat();
