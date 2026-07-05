@@ -146,6 +146,41 @@ function rowToOrder(r) {
     updatedAt: r.updated_at,
   };
 }
+function normalizeVariantRows(raw = []) {
+  return (Array.isArray(raw) ? raw : []).map((item, index) => {
+    const price = Number(item?.price ?? item?.salePrice ?? 0);
+    const comparePrice = Number(item?.comparePrice ?? 0);
+    const stock = Math.max(0, parseInt(item?.stock, 10) || 0);
+    const id = String(item?.id || item?.key || `variant_${index + 1}`).trim();
+    const label = String(item?.label || item?.name || id).trim();
+    const options = item?.options && typeof item.options === 'object' && !Array.isArray(item.options) ? item.options : {};
+    return {
+      id,
+      label,
+      price: Number.isFinite(price) && price > 0 ? price : 0,
+      comparePrice: Number.isFinite(comparePrice) && comparePrice > 0 ? comparePrice : 0,
+      stock,
+      options,
+    };
+  }).filter((item) => item.id && item.label);
+}
+function patchVariantInventory(extra = {}, variantId = '', qty = 0) {
+  const normalizedId = String(variantId || '').trim();
+  const delta = parseInt(qty, 10) || 0;
+  const nextExtra = extra && typeof extra === 'object' && !Array.isArray(extra) ? { ...extra } : {};
+  if (!normalizedId || !delta) return nextExtra;
+  const variants = normalizeVariantRows(nextExtra.variants);
+  const target = variants.find((item) => item.id === normalizedId);
+  if (!target) return nextExtra;
+  const nextStock = target.stock + delta;
+  if (nextStock < 0) throw new Error('ตัวเลือกสินค้าคงเหลือไม่พอ');
+  target.stock = nextStock;
+  nextExtra.variants = variants;
+  return nextExtra;
+}
+function variantStockTotal(extra = {}) {
+  return normalizeVariantRows(extra?.variants).reduce((sum, item) => sum + Math.max(0, parseInt(item.stock, 10) || 0), 0);
+}
 function orderItemQty(item = {}) {
   const qty = parseInt(item?.qty, 10) || 0;
   return qty > 0 ? qty : 1;
@@ -443,6 +478,13 @@ export async function updateOrder(id, patch) {
   const cur = await getOrder(id);
   if (!cur) return null;
   const payload = {
+    items: patch.items ?? cur.items,
+    customer: patch.customer ?? cur.customer,
+    total: patch.total ?? cur.total,
+    subtotal: patch.subtotal ?? cur.subtotal,
+    discount: patch.discount ?? cur.discount,
+    shipping: patch.shipping ?? cur.shipping,
+    coupon: patch.coupon ?? cur.coupon,
     status: patch.status ?? cur.status,
     paid: patch.paid ?? cur.paid,
     payment_claimed: patch.payment_claimed ?? cur.payment_claimed,
@@ -463,14 +505,17 @@ export async function reserveOrderResources({ items = [], coupon = '', storeId =
       const id = String(item?.id || '').trim();
       const qty = Math.max(0, parseInt(item?.qty, 10) || 0);
       if (!id || !qty) continue;
-      let query = supabase.from('products').select('id,stock').eq('id', id).maybeSingle();
+      let query = supabase.from('products').select('id,stock,extra').eq('id', id).maybeSingle();
       query = applyStoreScope(query, normalizedStoreId);
       const { data, error } = await query;
       fail(error, 'reserveOrderResources:product');
       if (!data) throw new Error('สินค้าไม่พร้อมขายในร้านนี้');
-      const nextStock = Number(data.stock || 0) - qty;
+      const currentStock = item?.variantId ? Math.max(Number(data.stock || 0), variantStockTotal(data.extra || {})) : Number(data.stock || 0);
+      const nextStock = currentStock - qty;
       if (nextStock < 0) throw new Error('สินค้าไม่พอในสต็อก');
-      let updateQuery = supabase.from('products').update({ stock: nextStock }).eq('id', id);
+      const nextExtra = patchVariantInventory(data.extra || {}, item?.variantId, -qty);
+      const finalStock = item?.variantId ? Math.max(nextStock, variantStockTotal(nextExtra || {})) : nextStock;
+      let updateQuery = supabase.from('products').update({ stock: finalStock, extra: nextExtra }).eq('id', id);
       updateQuery = applyStoreScope(updateQuery, normalizedStoreId);
       const { error: updateError } = await updateQuery;
       fail(updateError, 'reserveOrderResources:updateProduct');
@@ -493,12 +538,15 @@ export async function releaseOrderResources({ items = [], coupon = '', storeId =
       const id = String(item?.id || '').trim();
       const qty = Math.max(0, parseInt(item?.qty, 10) || 0);
       if (!id || !qty) continue;
-      let query = supabase.from('products').select('id,stock').eq('id', id).maybeSingle();
+      let query = supabase.from('products').select('id,stock,extra').eq('id', id).maybeSingle();
       query = applyStoreScope(query, normalizedStoreId);
       const { data, error } = await query;
       fail(error, 'releaseOrderResources:product');
       if (!data) continue;
-      let updateQuery = supabase.from('products').update({ stock: Number(data.stock || 0) + qty }).eq('id', id);
+      const nextExtra = patchVariantInventory(data.extra || {}, item?.variantId, qty);
+      const currentStock = item?.variantId ? Math.max(Number(data.stock || 0), variantStockTotal(data.extra || {})) : Number(data.stock || 0);
+      const finalStock = item?.variantId ? Math.max(currentStock + qty, variantStockTotal(nextExtra || {})) : (currentStock + qty);
+      let updateQuery = supabase.from('products').update({ stock: finalStock, extra: nextExtra }).eq('id', id);
       updateQuery = applyStoreScope(updateQuery, normalizedStoreId);
       const { error: updateError } = await updateQuery;
       fail(updateError, 'releaseOrderResources:updateProduct');
@@ -1567,6 +1615,16 @@ function normalizeCommunityArray(value) {
   if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean);
   return [];
 }
+function communitySeedPostId(article = {}, storeId = '') {
+  const scope = normalizeStoreId(storeId || article?.storeId);
+  const articleId = String(article?.id || '').trim();
+  return articleId ? `post_${scope}_${articleId}` : '';
+}
+function communitySeedStoryId(article = {}, storeId = '') {
+  const scope = normalizeStoreId(storeId || article?.storeId);
+  const articleId = String(article?.id || '').trim();
+  return articleId ? `story_${scope}_${articleId}` : '';
+}
 
 function rowToCommunityPost(r, viewerState = {}) {
   if (!r) return null;
@@ -1597,6 +1655,7 @@ function rowToCommunityPost(r, viewerState = {}) {
 function rowToCommunityComment(r) {
   if (!r) return null;
   return {
+    storeId: r.store_id || 'store_main',
     id: r.id,
     postId: r.post_id,
     userId: r.user_id || '',
@@ -1623,15 +1682,30 @@ function rowToCommunityStory(r) {
   };
 }
 
-async function enrichCommunityPosts(rows = [], viewerId = '') {
+async function enrichCommunityPosts(rows = [], viewerId = '', options = {}) {
   const ids = rows.map((row) => row.id).filter(Boolean);
   if (!ids.length) return [];
+  const scopedStoreId = String(options.storeId || rows[0]?.store_id || '').trim();
+  let reactionQuery = supabase.from('community_reactions').select('post_id').in('post_id', ids).eq('type', 'like');
+  let commentQuery = supabase.from('community_comments').select('post_id').in('post_id', ids).eq('status', 'approved');
+  let saveQuery = supabase.from('community_saves').select('post_id').in('post_id', ids);
+  let viewerReactionQuery = viewerId ? supabase.from('community_reactions').select('post_id').in('post_id', ids).eq('user_id', viewerId).eq('type', 'like') : Promise.resolve({ data: [], error: null });
+  let viewerSaveQuery = viewerId ? supabase.from('community_saves').select('post_id').in('post_id', ids).eq('user_id', viewerId) : Promise.resolve({ data: [], error: null });
+  if (scopedStoreId) {
+    reactionQuery = applyStoreScope(reactionQuery, scopedStoreId);
+    commentQuery = applyStoreScope(commentQuery, scopedStoreId);
+    saveQuery = applyStoreScope(saveQuery, scopedStoreId);
+    if (viewerId) {
+      viewerReactionQuery = applyStoreScope(viewerReactionQuery, scopedStoreId);
+      viewerSaveQuery = applyStoreScope(viewerSaveQuery, scopedStoreId);
+    }
+  }
   const [reactions, comments, saves, viewerReactions, viewerSaves] = await Promise.all([
-    supabase.from('community_reactions').select('post_id').in('post_id', ids).eq('type', 'like'),
-    supabase.from('community_comments').select('post_id').in('post_id', ids).eq('status', 'approved'),
-    supabase.from('community_saves').select('post_id').in('post_id', ids),
-    viewerId ? supabase.from('community_reactions').select('post_id').in('post_id', ids).eq('user_id', viewerId).eq('type', 'like') : Promise.resolve({ data: [], error: null }),
-    viewerId ? supabase.from('community_saves').select('post_id').in('post_id', ids).eq('user_id', viewerId) : Promise.resolve({ data: [], error: null }),
+    reactionQuery,
+    commentQuery,
+    saveQuery,
+    viewerReactionQuery,
+    viewerSaveQuery,
   ]);
   if ([reactions, comments, saves, viewerReactions, viewerSaves].some((result) => isMissingTable(result.error))) {
     return rows.map((row) => rowToCommunityPost(row));
@@ -1680,7 +1754,7 @@ export async function createCommunityPost(post = {}) {
   const { data, error } = await supabase.from('community_posts').insert(row).select('*').single();
   if (failUnlessMissingTable(error, 'createCommunityPost')) return null;
   fail(error, 'createCommunityPost');
-  const [mapped] = await enrichCommunityPosts([data], post.userId || '');
+  const [mapped] = await enrichCommunityPosts([data], post.userId || '', { storeId: post.storeId });
   return mapped || rowToCommunityPost(data);
 }
 
@@ -1690,7 +1764,7 @@ export async function getCommunityPost(id, options = {}) {
   const { data, error } = await query.maybeSingle();
   if (failUnlessMissingTable(error, 'getCommunityPost')) return null;
   fail(error, 'getCommunityPost');
-  const [post] = await enrichCommunityPosts(data ? [data] : [], options.viewerId || '');
+  const [post] = await enrichCommunityPosts(data ? [data] : [], options.viewerId || '', { storeId: options.storeId });
   return post || null;
 }
 
@@ -1702,7 +1776,7 @@ export async function listCommunityPosts(options = {}) {
   const { data, error } = await query;
   if (failUnlessMissingTable(error, 'listCommunityPosts')) return [];
   fail(error, 'listCommunityPosts');
-  return enrichCommunityPosts(data || [], options.viewerId || '');
+  return enrichCommunityPosts(data || [], options.viewerId || '', { storeId: options.storeId });
 }
 
 export async function updateCommunityPostStatus(id, patch = {}) {
@@ -1717,7 +1791,7 @@ export async function updateCommunityPostStatus(id, patch = {}) {
   const { data, error } = await query.select('*').single();
   if (failUnlessMissingTable(error, 'updateCommunityPostStatus')) return null;
   fail(error, 'updateCommunityPostStatus');
-  const [post] = await enrichCommunityPosts([data], patch.viewerId || '');
+  const [post] = await enrichCommunityPosts([data], patch.viewerId || '', { storeId: patch.storeId || current.storeId });
   return post || rowToCommunityPost(data);
 }
 
@@ -1733,6 +1807,7 @@ export async function createCommunityComment(postId, comment = {}) {
   const post = await getCommunityPost(postId, { storeId: comment.storeId });
   if (!post) return null;
   const row = {
+    store_id: normalizeStoreId(comment.storeId || post.storeId),
     id: comment.id || `cc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     post_id: postId,
     user_id: comment.userId || '',
@@ -1751,7 +1826,9 @@ export async function listCommunityComments(postId, options = {}) {
   const limit = Math.min(200, Math.max(1, Number(options.limit || 50) || 50));
   const post = await getCommunityPost(postId, { storeId: options.storeId });
   if (!post) return [];
-  const { data, error } = await supabase.from('community_comments').select('*').eq('post_id', postId).eq('status', 'approved').order('created_at', { ascending: true }).limit(limit);
+  let query = supabase.from('community_comments').select('*').eq('post_id', postId).eq('status', 'approved').order('created_at', { ascending: true }).limit(limit);
+  query = applyStoreScope(query, options.storeId || post.storeId);
+  const { data, error } = await query;
   if (failUnlessMissingTable(error, 'listCommunityComments')) return [];
   fail(error, 'listCommunityComments');
   return (data || []).map(rowToCommunityComment);
@@ -1760,12 +1837,15 @@ export async function listCommunityComments(postId, options = {}) {
 export async function setCommunityReaction(postId, userId, type = 'like', active = true, options = {}) {
   const post = await getCommunityPost(postId, { storeId: options.storeId, viewerId: userId });
   if (!post) return null;
+  const scopedStoreId = normalizeStoreId(options.storeId || post.storeId);
   if (active) {
-    const { error } = await supabase.from('community_reactions').upsert({ post_id: postId, user_id: userId, type, created_at: Date.now() }, { onConflict: 'post_id,user_id,type' });
+    const { error } = await supabase.from('community_reactions').upsert({ store_id: scopedStoreId, post_id: postId, user_id: userId, type, created_at: Date.now() }, { onConflict: 'post_id,user_id,type' });
     if (failUnlessMissingTable(error, 'setCommunityReaction')) return post;
     fail(error, 'setCommunityReaction');
   } else {
-    const { error } = await supabase.from('community_reactions').delete().eq('post_id', postId).eq('user_id', userId).eq('type', type);
+    let query = supabase.from('community_reactions').delete().eq('post_id', postId).eq('user_id', userId).eq('type', type);
+    query = applyStoreScope(query, scopedStoreId);
+    const { error } = await query;
     if (failUnlessMissingTable(error, 'setCommunityReaction')) return post;
     fail(error, 'setCommunityReaction');
   }
@@ -1775,12 +1855,15 @@ export async function setCommunityReaction(postId, userId, type = 'like', active
 export async function setCommunitySave(postId, userId, active = true, options = {}) {
   const post = await getCommunityPost(postId, { storeId: options.storeId, viewerId: userId });
   if (!post) return null;
+  const scopedStoreId = normalizeStoreId(options.storeId || post.storeId);
   if (active) {
-    const { error } = await supabase.from('community_saves').upsert({ post_id: postId, user_id: userId, created_at: Date.now() }, { onConflict: 'post_id,user_id' });
+    const { error } = await supabase.from('community_saves').upsert({ store_id: scopedStoreId, post_id: postId, user_id: userId, created_at: Date.now() }, { onConflict: 'post_id,user_id' });
     if (failUnlessMissingTable(error, 'setCommunitySave')) return post;
     fail(error, 'setCommunitySave');
   } else {
-    const { error } = await supabase.from('community_saves').delete().eq('post_id', postId).eq('user_id', userId);
+    let query = supabase.from('community_saves').delete().eq('post_id', postId).eq('user_id', userId);
+    query = applyStoreScope(query, scopedStoreId);
+    const { error } = await query;
     if (failUnlessMissingTable(error, 'setCommunitySave')) return post;
     fail(error, 'setCommunitySave');
   }
@@ -1829,7 +1912,7 @@ export async function deleteCommunityStory(id, options = {}) {
 function articleToCommunityPost(article = {}) {
   return {
     storeId: article.storeId,
-    id: `post_${article.id}`,
+    id: communitySeedPostId(article, article.storeId),
     userId: 'system',
     authorName: 'ทีมจูนุชฟอร์ไลฟ์',
     authorRole: 'admin',
@@ -1853,15 +1936,15 @@ export async function seedCommunityFromArticles(options = {}) {
   let stories = 0;
   for (const article of articles) {
     if (!article?.id) continue;
-    const postId = `post_${article.id}`;
+    const postId = communitySeedPostId(article, options.storeId || article.storeId);
     if (!existingPostIds.has(postId)) {
-      await createCommunityPost(articleToCommunityPost(article));
+      await createCommunityPost({ ...articleToCommunityPost(article), id: postId, storeId: options.storeId || article.storeId });
       posts += 1;
     }
-    const storyId = `story_${article.id}`;
+    const storyId = communitySeedStoryId(article, options.storeId || article.storeId);
     if (!existingStoryIds.has(storyId) && article.cover) {
       await createCommunityStory({
-        storeId: article.storeId,
+        storeId: options.storeId || article.storeId,
         id: storyId,
         postId,
         authorName: 'ทีมจูนุชฟอร์ไลฟ์',

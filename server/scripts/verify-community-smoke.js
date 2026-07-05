@@ -19,8 +19,8 @@ const {
 const storeId = process.env.STORE_ID || 'store_main';
 const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 const articleId = `community_smoke_${suffix}`;
-const postId = `post_${articleId}`;
-const storyId = `story_${articleId}`;
+const postId = `post_${storeId}_${articleId}`;
+const storyId = `story_${storeId}_${articleId}`;
 const expiredStoryId = `story_expired_${suffix}`;
 const userId = `smoke_user_${suffix}`;
 

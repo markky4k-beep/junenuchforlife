@@ -2,10 +2,22 @@
 let PRODUCTS = [];
 let productsCachePromise = null;
 let productsCacheLoaded = false;
-let ARTICLES = null;            // แคชบทความในหน่วยความจำ (โหลดครั้งเดียว ใช้ซ้ำ)
+let ARTICLES = null;            // เก็บบทความของ store ปัจจุบันล่าสุดเพื่อให้โค้ดเก่ายังอ่านได้
+const ARTICLES_BY_SCOPE = new Map();
+const ARTICLE_PROMISE_BY_SCOPE = new Map();
 let _afterRender = null;        // callback ทำงานหลังวาดหน้าเสร็จ (hydrate ข้อมูลแบบไม่บล็อก)
 let REVIEW_GALLERY = [];
-let reviewGalleryPromise = null;
+const REVIEW_GALLERY_BY_SCOPE = new Map();
+const REVIEW_GALLERY_PROMISE_BY_SCOPE = new Map();
+const COMMUNITY_CACHE_BY_SCOPE = new Map();
+const COMMUNITY_PROMISE_BY_SCOPE = new Map();
+function currentSiteScopeKey() {
+  const raw = String(SITE?.store?.id || SITE?.PUBLIC_URL || (typeof location !== 'undefined' ? location.host : '') || 'store_main').trim();
+  return raw || 'store_main';
+}
+function isolatedStoreClient() {
+  return Boolean(SITE?.store?.id) && String(SITE.store.id) !== 'store_main';
+}
 async function refreshProductsCache() {
   if (productsCachePromise) return productsCachePromise;
   productsCachePromise = (async () => {
@@ -25,21 +37,41 @@ async function ensureProductsCache() {
   if (productsCacheLoaded) return PRODUCTS;
   return refreshProductsCache();
 }
-async function refreshArticlesCache() {
-  try { ARTICLES = await (await fetch('/api/articles')).json(); }
-  catch { if (!ARTICLES) ARTICLES = []; }
-  return ARTICLES || [];
+async function refreshArticlesCache(force = false) {
+  const scopeKey = currentSiteScopeKey();
+  if (!force && ARTICLES_BY_SCOPE.has(scopeKey)) {
+    ARTICLES = ARTICLES_BY_SCOPE.get(scopeKey) || [];
+    return ARTICLES;
+  }
+  if (!force && ARTICLE_PROMISE_BY_SCOPE.has(scopeKey)) return ARTICLE_PROMISE_BY_SCOPE.get(scopeKey);
+  const loader = (async () => {
+    try {
+      const next = await (await fetch('/api/articles', { cache: 'no-store' })).json();
+      ARTICLES = Array.isArray(next) ? next : [];
+    } catch {
+      ARTICLES = ARTICLES_BY_SCOPE.get(scopeKey) || [];
+    }
+    ARTICLES_BY_SCOPE.set(scopeKey, ARTICLES);
+    return ARTICLES;
+  })().finally(() => { ARTICLE_PROMISE_BY_SCOPE.delete(scopeKey); });
+  ARTICLE_PROMISE_BY_SCOPE.set(scopeKey, loader);
+  return loader;
 }
 async function refreshReviewGallery(force = false) {
-  if (!force && REVIEW_GALLERY.length) return REVIEW_GALLERY;
-  if (!force && reviewGalleryPromise) return reviewGalleryPromise;
+  const scopeKey = currentSiteScopeKey();
+  if (!force && REVIEW_GALLERY_BY_SCOPE.has(scopeKey)) {
+    REVIEW_GALLERY = REVIEW_GALLERY_BY_SCOPE.get(scopeKey) || [];
+    return REVIEW_GALLERY;
+  }
+  if (!force && REVIEW_GALLERY_PROMISE_BY_SCOPE.has(scopeKey)) return REVIEW_GALLERY_PROMISE_BY_SCOPE.get(scopeKey);
   const loadReviewGallery = async () => {
     const primary = await fetch('/api/reviews/gallery', { cache: 'no-store' }).catch(() => null);
     if (primary?.ok) return primary.json();
-    const fallback = await fetch('/review-gallery.json', { cache: 'no-store' });
-    return fallback.ok ? fallback.json() : { items: [] };
+    if (isolatedStoreClient()) return { items: [] };
+    const fallback = await fetch('/review-gallery.json', { cache: 'no-store' }).catch(() => null);
+    return fallback?.ok ? fallback.json() : { items: [] };
   };
-  reviewGalleryPromise = loadReviewGallery()
+  const loader = loadReviewGallery()
     .then((data) => {
       REVIEW_GALLERY = Array.isArray(data?.items) ? data.items.map((item, index) => ({
         id: String(item.id || `review-${index + 1}`),
@@ -53,14 +85,17 @@ async function refreshReviewGallery(force = false) {
         sourceName: String(item.sourceName || '').trim(),
         lightboxIndex: index,
       })).filter((item) => item.image) : [];
+      REVIEW_GALLERY_BY_SCOPE.set(scopeKey, REVIEW_GALLERY);
       return REVIEW_GALLERY;
     })
     .catch(() => {
       REVIEW_GALLERY = [];
+      REVIEW_GALLERY_BY_SCOPE.set(scopeKey, REVIEW_GALLERY);
       return REVIEW_GALLERY;
     })
-    .finally(() => { reviewGalleryPromise = null; });
-  return reviewGalleryPromise;
+    .finally(() => { REVIEW_GALLERY_PROMISE_BY_SCOPE.delete(scopeKey); });
+  REVIEW_GALLERY_PROMISE_BY_SCOPE.set(scopeKey, loader);
+  return loader;
 }
 const productById = (id) => PRODUCTS.find((p) => p.id === id);
 const clientOrders = new Map(); // เก็บออเดอร์ที่เพิ่งสร้าง
@@ -1236,6 +1271,166 @@ function productSellingPoints(p) {
     extra.audienceShort || p?.specs?.['เหมาะกับ'] || 'เหมาะกับลูกค้าที่ต้องการตัดสินใจเร็ว',
     extra.style || p?.specs?.['สไตล์'] || 'พร้อมสั่งซื้อออนไลน์',
   ];
+}
+const PRODUCT_RECO_REASON_LABELS = {
+  curated_bundle: 'ชุดที่ร้านแนะนำ',
+  curated_upsell: 'ตัวต่อยอดที่ควรเสนอ',
+  bought_together: 'ลูกค้ามักซื้อคู่กัน',
+  same_category: 'หมวดเดียวกัน',
+  same_segment: 'กลุ่มเดียวกัน',
+  crop_match: 'ตรงกับพืช/โจทย์ที่สนใจ',
+  interest_match: 'ตรงกับความสนใจ',
+  best_seller: 'สินค้าขายดี',
+  catalog: 'สินค้าแนะนำ',
+};
+function productSearchKeywords(p) {
+  return asArray(productExtra(p).searchKeywords).map((item) => String(item || '').trim()).filter(Boolean);
+}
+function productBundleIds(p) {
+  return asArray(productExtra(p).bundleIds).map((item) => String(item || '').trim()).filter(Boolean);
+}
+function productUpsellIds(p) {
+  return asArray(productExtra(p).upsellIds).map((item) => String(item || '').trim()).filter(Boolean);
+}
+function normalizeVariantRows(raw = []) {
+  return asArray(raw).map((item, index) => {
+    const source = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
+    const options = Object.fromEntries(Object.entries(source.options || {})
+      .map(([key, value]) => [String(key || '').trim(), String(value || '').trim()])
+      .filter(([key, value]) => key && value));
+    const id = String(source.id || source.key || `variant_${index + 1}`).trim();
+    const label = String(source.label || Object.values(options).join(' / ') || `ตัวเลือก ${index + 1}`).trim();
+    const stock = parseInt(source.stock, 10);
+    const price = parseFloat(source.price);
+    return {
+      id,
+      label,
+      stock: Number.isFinite(stock) ? stock : 0,
+      price: Number.isFinite(price) ? price : 0,
+      sku: String(source.sku || '').trim(),
+      options,
+    };
+  }).filter((item) => item.id);
+}
+function productVariants(p) {
+  return normalizeVariantRows(productExtra(p).variants);
+}
+function resolveProductVariant(p, variantId = '') {
+  const normalizedId = String(variantId || '').trim();
+  if (!normalizedId) return null;
+  return productVariants(p).find((item) => item.id === normalizedId) || null;
+}
+function variantOptionSummary(variant = {}) {
+  return Object.entries(variant?.options || {}).map(([key, value]) => `${key}: ${value}`).join(' · ');
+}
+function productVariantDisplayLabel(variant = {}) {
+  return String(variant?.label || '').trim() || variantOptionSummary(variant) || 'ตัวเลือกสินค้า';
+}
+function productVariantUnitPrice(p, variant = null) {
+  const variantPrice = Number(variant?.price || 0);
+  return variantPrice > 0 ? variantPrice : effPrice(p);
+}
+function productVariantStock(p, variant = null) {
+  if (variant) return Math.max(0, parseInt(variant.stock, 10) || 0);
+  return Math.max(0, parseInt(p?.stock, 10) || 0);
+}
+function productPriceHTMLForSelection(p, variant = null) {
+  const current = productVariantUnitPrice(p, variant);
+  const compare = Math.max(productComparePriceValue(p), current);
+  if (!compare || compare <= current) return `<span class="price"><span class="price-main">${baht(current)}</span></span>`;
+  const percent = Math.max(1, Math.round(((compare - current) / compare) * 100));
+  return `<span class="price">
+    <span class="price-main">${baht(current)}</span>
+    <span class="price-meta">
+      <span class="price-old">${baht(compare)}</span>
+      <span class="sale-badge sale-badge-inline">ลด ${percent}%</span>
+    </span>
+  </span>`;
+}
+function cartKeyOf(id = '', variantId = '') {
+  const pid = String(id || '').trim();
+  const vid = String(variantId || '').trim();
+  return vid ? `${pid}::${vid}` : pid;
+}
+function parseCartKey(raw = '') {
+  const [id, variantId = ''] = String(raw || '').split('::');
+  return { key: String(raw || '').trim(), id: String(id || '').trim(), variantId: String(variantId || '').trim() };
+}
+function cartEntrySnapshot(rawKey = '') {
+  const entry = parseCartKey(rawKey);
+  const product = productById(entry.id);
+  const variant = product ? resolveProductVariant(product, entry.variantId) : null;
+  return { ...entry, product, variant };
+}
+function serializeVariantRowsForForm(raw = []) {
+  return normalizeVariantRows(raw).map((variant) => {
+    const options = Object.entries(variant.options || {}).map(([key, value]) => `${key}=${value}`).join(', ');
+    return [variant.id, variant.label, variant.price || 0, variant.stock || 0, options].join(' :: ');
+  }).join('\n');
+}
+function parseVariantRowsFromForm(raw = '') {
+  return splitLines(raw).map((line, index) => {
+    const parts = line.split('::').map((item) => item.trim());
+    if (parts.length < 4) return null;
+    const [id, label, price, stock, optionRaw = ''] = parts;
+    const options = Object.fromEntries(String(optionRaw || '').split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((pair) => {
+        const eqIndex = pair.indexOf('=');
+        if (eqIndex === -1) return null;
+        return [pair.slice(0, eqIndex).trim(), pair.slice(eqIndex + 1).trim()];
+      })
+      .filter(Boolean));
+    return {
+      id: id || `variant_${index + 1}`,
+      label: label || `ตัวเลือก ${index + 1}`,
+      price: parseFloat(price || '0') || 0,
+      stock: parseInt(stock || '0', 10) || 0,
+      options,
+    };
+  }).filter(Boolean);
+}
+function productRecoReasonLabel(reason = '') {
+  return PRODUCT_RECO_REASON_LABELS[String(reason || '').trim()] || PRODUCT_RECO_REASON_LABELS.catalog;
+}
+function productKeywordBag(p) {
+  const extra = productExtra(p);
+  return [
+    p?.name,
+    p?.short,
+    p?.desc,
+    displayProductTag(p),
+    productCategory(p),
+    ...productCrops(p),
+    extra.highlight,
+    extra.audienceShort,
+    extra.applicationMethod,
+    extra.dosage,
+    ...productSellingPoints(p),
+    ...productSearchKeywords(p),
+    ...Object.entries(p?.specs || {}).flat(),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+function productSearchScore(p, query = '') {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return 0;
+  const name = String(p?.name || '').toLowerCase();
+  const short = String(p?.short || '').toLowerCase();
+  const category = String(productCategory(p) || '').toLowerCase();
+  const bag = productKeywordBag(p);
+  let score = 0;
+  if (name === q) score += 120;
+  if (name.includes(q)) score += 70;
+  if (short.includes(q)) score += 30;
+  if (category.includes(q)) score += 24;
+  if (bag.includes(q)) score += 18;
+  q.split(/\s+/).filter(Boolean).forEach((token) => {
+    if (name.includes(token)) score += 26;
+    if (short.includes(token)) score += 12;
+    if (bag.includes(token)) score += 8;
+  });
+  return score;
 }
 function recentlyViewedProductIds(nextId = '') {
   const key = 'recent_products_v1';
@@ -2808,6 +3003,235 @@ function confirmDialog({
     dialog.querySelector('[data-confirmok]')?.focus();
   });
 }
+function closeSupportModal() {
+  const modal = document.getElementById('supportRequestModal');
+  if (!modal) return;
+  modal.classList.remove('show');
+  setTimeout(() => modal.remove(), 180);
+}
+function supportTypeLabel(type = 'return') {
+  return String(type || '').trim() === 'refund' ? 'คืนเงิน' : 'คืนสินค้า';
+}
+function supportStatusLabel(status = '') {
+  return ({
+    requested: 'รอทีมตรวจสอบ',
+    approved: 'อนุมัติแล้ว',
+    in_transit: 'อยู่ระหว่างส่งคืน',
+    received: 'รับสินค้าคืนแล้ว',
+    refunded: 'คืนเงินแล้ว',
+    rejected: 'ปฏิเสธคำขอ',
+    closed: 'ปิดเคสแล้ว',
+  }[String(status || '').trim()] || 'อัปเดตคำขอ');
+}
+function supportStatusFlow(type = 'return') {
+  return type === 'refund'
+    ? ['requested', 'approved', 'in_transit', 'received', 'refunded', 'closed']
+    : ['requested', 'approved', 'in_transit', 'received', 'closed'];
+}
+function supportActorLabel(actor = '') {
+  return ({
+    customer: 'ลูกค้า',
+    admin: 'ทีมงาน',
+    system: 'ระบบ',
+    web: 'เว็บไซต์',
+    line_oa: 'LINE OA',
+  }[String(actor || '').trim()] || String(actor || '').trim());
+}
+function supportProgressHTML(request = null, type = 'return') {
+  if (!request) return '';
+  const steps = asArray(request.progress?.steps).length
+    ? asArray(request.progress.steps)
+    : supportStatusFlow(type).map((key) => ({ key, label: supportStatusLabel(key), done: key === request.status, current: key === request.status }));
+  return `<div class="timeline order-timeline" style="margin-top:12px">${steps.map((step) => `
+    <div class="tl-step ${step.done ? 'done' : ''} ${step.current ? 'cur' : ''}">
+      <span class="tl-dot">${step.done && !step.current ? '✓' : '•'}</span><span class="tl-label">${esc(step.label || supportStatusLabel(step.key))}</span>
+    </div>`).join('')}</div>`;
+}
+function supportReasonOptions(type = 'return') {
+  return type === 'refund'
+    ? [
+      'ชำระเงินซ้ำ / ตัดยอดซ้ำ',
+      'สินค้าชำรุดหรือไม่ตรงตามที่สั่ง',
+      'ได้รับสินค้าล่าช้าเกินกำหนด',
+      'ต้องการยกเลิกหลังชำระเงิน',
+      'ต้องการให้ทีมงานติดต่อกลับก่อน',
+    ]
+    : [
+      'ได้รับสินค้าผิดรุ่นหรือผิดตัวเลือก',
+      'สินค้าเสียหาย / ชำรุด',
+      'สภาพสินค้าไม่ตรงกับที่แจ้ง',
+      'ต้องการเปลี่ยนขนาด / สูตร / ตัวเลือก',
+      'ต้องการให้ทีมงานติดต่อกลับก่อน',
+    ];
+}
+function orderSupportItemsPreview(order = {}) {
+  const items = asArray(order.items).slice(0, 4);
+  if (!items.length) return '';
+  return `<div class="form-note" style="margin:0 0 12px">
+    <b>รายการในออเดอร์:</b> ${items.map((item) => `${orderItemLabel(item)} ×${item.qty}`).join(', ')}
+  </div>`;
+}
+function openSupportModal({
+  title = '',
+  subtitle = '',
+  bodyHTML = '',
+  submitText = 'บันทึก',
+} = {}) {
+  const prev = document.getElementById('supportRequestModal');
+  if (prev) prev.remove();
+  const modal = document.createElement('div');
+  modal.id = 'supportRequestModal';
+  modal.className = 'confirm-overlay';
+  modal.innerHTML = `<div class="confirm-card glass" role="dialog" aria-modal="true" aria-label="${esc(title)}" style="max-width:680px">
+    <button class="confirm-close" type="button" aria-label="ปิด" data-support-close>✕</button>
+    <span class="confirm-pill">แบบฟอร์ม</span>
+    <h3>${esc(title)}</h3>
+    ${subtitle ? `<p>${esc(subtitle)}</p>` : ''}
+    ${bodyHTML}
+    <div class="confirm-actions">
+      <button class="btn btn-glass" type="button" data-support-close>ยกเลิก</button>
+      <button class="btn btn-primary" type="submit" form="supportRequestForm">${esc(submitText)}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('show'));
+  modal.querySelector('textarea, select, input')?.focus();
+}
+function openOrderSupportModal(order = {}, type = 'return') {
+  const actionLabel = supportTypeLabel(type);
+  const reasons = supportReasonOptions(type);
+  openSupportModal({
+    title: `ส่งคำขอ${actionLabel}`,
+    subtitle: `ออเดอร์ ${order.id || '-'} · ทีมงานจะใช้ข้อมูลนี้เพื่อตรวจสอบและอัปเดตสถานะกลับในไทม์ไลน์`,
+    submitText: `ส่งคำขอ${actionLabel}`,
+    bodyHTML: `<form id="supportRequestForm" data-support-form="customer" data-order-id="${esc(order.id || '')}" data-support-type="${esc(type)}">
+      ${orderSupportItemsPreview(order)}
+      <div class="pf-grid">
+        <label>หัวข้อปัญหา
+          <select name="category">
+            ${reasons.map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join('')}
+            <option value="อื่น ๆ">อื่น ๆ</option>
+          </select>
+        </label>
+        <label>ผลลัพธ์ที่ต้องการ
+          <select name="resolution">
+            ${type === 'refund'
+              ? '<option value="ขอคืนเงินเต็มจำนวน">ขอคืนเงินเต็มจำนวน</option><option value="ขอคืนเงินบางส่วน">ขอคืนเงินบางส่วน</option><option value="ต้องการให้ติดต่อกลับก่อน">ต้องการให้ติดต่อกลับก่อน</option>'
+              : '<option value="ขอคืนสินค้าและเปลี่ยนสินค้า">ขอคืนสินค้าและเปลี่ยนสินค้า</option><option value="ขอคืนสินค้าและรับเครดิต/คืนเงิน">ขอคืนสินค้าและรับเครดิต/คืนเงิน</option><option value="ต้องการให้ติดต่อกลับก่อน">ต้องการให้ติดต่อกลับก่อน</option>'}
+          </select>
+        </label>
+      </div>
+      <label>สรุปเหตุผลหลัก
+        <textarea name="reason" rows="3" required placeholder="อธิบายปัญหาหลักแบบสั้นและชัด เช่น ได้รับสินค้าผิดไซซ์ สีไม่ตรงกับที่สั่ง"></textarea>
+      </label>
+      <label>รายละเอียดเพิ่มเติม
+        <textarea name="detail" rows="4" placeholder="ระบุสิ่งที่พบ สภาพสินค้า วันรับสินค้า หรือข้อมูลที่อยากให้ทีมงานตรวจเป็นพิเศษ"></textarea>
+      </label>
+      <div class="pf-grid">
+        <label>วิธีติดต่อกลับที่สะดวก
+          <input name="contact" placeholder="เช่น โทรเบอร์เดิม, LINE, อีเมล">
+        </label>
+        <label>อ้างอิงเพิ่มเติม
+          <input name="reference" placeholder="เช่น เลขพัสดุ เลขสลิป หรือข้อมูลประกอบ">
+        </label>
+      </div>
+      <label>แนบหลักฐานเพิ่มเติม
+        <input name="attachments" type="file" accept="image/*,application/pdf" multiple>
+      </label>
+      <p class="form-note">แนบได้สูงสุด 2 ไฟล์ ไฟล์ละไม่เกิน 2MB เช่น รูปสินค้าเสียหาย รูปพัสดุ หรือเอกสารประกอบ</p>
+    </form>`,
+  });
+}
+function openAdminSupportModal(order = {}, type = 'return', status = 'approved') {
+  const actionLabel = supportTypeLabel(type);
+  const statusText = supportStatusLabel(status);
+  openSupportModal({
+    title: `${statusText} ${actionLabel}`,
+    subtitle: `ออเดอร์ ${order.id || '-'} · ใช้ฟอร์มนี้เพื่อบันทึกข้อความที่ลูกค้าจะเห็นและ reference ภายในทีม`,
+    submitText: 'บันทึกสถานะ',
+    bodyHTML: `<form id="supportRequestForm" data-support-form="admin" data-order-id="${esc(order.id || '')}" data-support-type="${esc(type)}" data-support-status="${esc(status)}">
+      ${orderSupportItemsPreview(order)}
+      <div class="pf-grid">
+        <label>สถานะที่กำลังบันทึก
+          <input value="${esc(statusText)}" disabled>
+        </label>
+        <label>Reference ภายใน
+          <input name="reference" placeholder="เช่น REF-20260705-01 หรือเลขโอนคืน">
+        </label>
+      </div>
+      <label>ข้อความอัปเดตสำหรับลูกค้า
+        <textarea name="customerMessage" rows="3" placeholder="เช่น ทีมงานตรวจสอบแล้วและอนุมัติการคืนสินค้า กรุณาแพ็กสินค้าให้พร้อมก่อนส่งกลับ"></textarea>
+      </label>
+      <div class="pf-grid">
+        <label>ข้อมูลขนส่ง / การคืนของ
+          <input name="logistics" placeholder="เช่น รอรับของกลับ / Kerry TH123456789">
+        </label>
+        <label>นัดหมายหรือ SLA
+          <input name="sla" placeholder="เช่น คืนเงินภายใน 2 วันทำการ">
+        </label>
+      </div>
+      <label>หมายเหตุภายในทีม
+        <textarea name="adminNote" rows="4" placeholder="บันทึกผลการตรวจสอบ เงื่อนไขที่อนุมัติ หรือข้อควรติดตามต่อ"></textarea>
+      </label>
+      <label>แนบไฟล์ประกอบ
+        <input name="attachments" type="file" accept="image/*,application/pdf" multiple>
+      </label>
+      <p class="form-note">ใช้แนบหลักฐานจากทีมงาน เช่น สลิปคืนเงิน เอกสารตรวจรับ หรือรูปสินค้าหลังตรวจสอบ</p>
+    </form>`,
+  });
+}
+function buildCustomerSupportPayload(fd) {
+  const category = String(fd.get('category') || '').trim();
+  const reasonText = String(fd.get('reason') || '').trim();
+  const resolution = String(fd.get('resolution') || '').trim();
+  const detail = String(fd.get('detail') || '').trim();
+  const contact = String(fd.get('contact') || '').trim();
+  const reference = String(fd.get('reference') || '').trim();
+  return {
+    reason: [category, reasonText].filter(Boolean).join(' · '),
+    note: [
+      resolution ? `ผลลัพธ์ที่ต้องการ: ${resolution}` : '',
+      detail ? `รายละเอียด: ${detail}` : '',
+      contact ? `ติดต่อกลับ: ${contact}` : '',
+      reference ? `อ้างอิง: ${reference}` : '',
+    ].filter(Boolean).join('\n'),
+  };
+}
+function buildAdminSupportPayload(fd) {
+  const customerMessage = String(fd.get('customerMessage') || '').trim();
+  const adminNote = String(fd.get('adminNote') || '').trim();
+  const reference = String(fd.get('reference') || '').trim();
+  const logistics = String(fd.get('logistics') || '').trim();
+  const sla = String(fd.get('sla') || '').trim();
+  return {
+    adminNote: [
+      customerMessage ? `ข้อความถึงลูกค้า: ${customerMessage}` : '',
+      reference ? `Reference: ${reference}` : '',
+      logistics ? `Logistics: ${logistics}` : '',
+      sla ? `SLA: ${sla}` : '',
+      adminNote ? `หมายเหตุภายใน: ${adminNote}` : '',
+    ].filter(Boolean).join('\n'),
+  };
+}
+function supportAttachmentListHTML(items = [], label = 'ไฟล์แนบ') {
+  const attachments = asArray(items).filter((item) => item?.url);
+  if (!attachments.length) return '';
+  return `<div class="form-note"><b>${esc(label)}:</b> ${attachments.map((item, index) => `<a href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.name || `ไฟล์ ${index + 1}`)}</a>`).join(' · ')}</div>`;
+}
+async function collectSupportAttachmentPayloads(fileList, { maxFiles = 2, maxFileSize = 2 * 1024 * 1024 } = {}) {
+  const files = Array.from(fileList || []).filter(Boolean);
+  if (files.length > maxFiles) throw new Error(`แนบไฟล์ได้สูงสุด ${maxFiles} ไฟล์`);
+  const out = [];
+  for (const file of files) {
+    if ((Number(file.size) || 0) > maxFileSize) throw new Error(`ไฟล์ ${file.name || ''} มีขนาดเกิน 2MB`);
+    out.push({
+      name: String(file.name || 'attachment').trim().slice(0, 120),
+      type: String(file.type || '').trim().slice(0, 120),
+      dataUrl: await fileToDataUrl(file),
+    });
+  }
+  return out;
+}
 
 const PRODUCT_CROP_ASPECTS = {
   original: { label: 'เดิม', ratio: null },
@@ -3231,9 +3655,25 @@ function icon(name, cls = 'ico') {
 }
 function productIcon(id, cls = 'ico') { return icon(PROD_ICON[id] || 'pod', cls); }
 
-function addToCart(id, qty = 1) {
-  cart.set(id, (Number(cart.get(id)) || 0) + qty);
+function addToCart(id, qty = 1, options = {}) {
+  const product = productById(id);
+  if (!product) return false;
+  const variants = productVariants(product);
+  let variant = resolveProductVariant(product, options.variantId);
+  if (!variant && variants.length === 1) variant = variants[0];
+  if (variants.length && !variant) {
+    toast('กรุณาเลือกตัวเลือกสินค้าก่อน', 'warn');
+    if (options.redirectOnMissingVariant !== false && currentPath() !== `/product/${id}`) go('/product/' + id);
+    return false;
+  }
+  if (productVariantStock(product, variant) <= 0) {
+    toast('ตัวเลือกสินค้านี้หมดแล้ว', 'err');
+    return false;
+  }
+  const key = cartKeyOf(id, variant?.id || '');
+  cart.set(key, (Number(cart.get(key)) || 0) + qty);
   saveCart(); renderCart();
+  return true;
 }
 function addOrderToCart(order = {}) {
   const items = Array.isArray(order.items) ? order.items : [];
@@ -3242,18 +3682,28 @@ function addOrderToCart(order = {}) {
     const id = String(item.id || item.productId || '').trim();
     const qty = Math.max(1, parseInt(item.qty, 10) || 1);
     const p = productById(id);
-    if (!p || p.stock <= 0) return;
-    cart.set(id, (Number(cart.get(id)) || 0) + qty);
-    added += qty;
+    const variant = resolveProductVariant(p, item.variantId);
+    if (!p || productVariantStock(p, variant) <= 0) return;
+    if (addToCart(id, qty, { variantId: item.variantId, redirectOnMissingVariant: false })) added += qty;
   });
-  if (added) { saveCart(); renderCart(); }
   return added;
 }
 function cartCount() { let c = 0; cart.forEach((q) => (c += Number(q))); return c; }
-function cartTotal() { let t = 0; cart.forEach((q, id) => { const p = productById(id); if (p) t += effPrice(p) * Number(q); }); return t; }
+function cartTotal() {
+  let t = 0;
+  cart.forEach((q, rawKey) => {
+    const { product, variant } = cartEntrySnapshot(rawKey);
+    if (product) t += productVariantUnitPrice(product, variant) * Number(q);
+  });
+  return t;
+}
+let _cartRecoState = { key: '', items: [] };
+function cartRecoKey() {
+  return [...new Set([...cart.keys()].map((rawKey) => parseCartKey(rawKey).id).filter(Boolean))].sort().join(',');
+}
 function cartRecommendationProducts(limit = 3) {
-  const inCart = new Set([...cart.keys()]);
-  const cartProducts = [...cart.keys()].map((id) => productById(id)).filter(Boolean);
+  const inCart = new Set([...cart.keys()].map((rawKey) => parseCartKey(rawKey).id));
+  const cartProducts = [...inCart].map((id) => productById(id)).filter(Boolean);
   const cartCategories = new Set(cartProducts.map((p) => productCategory(p)).filter(Boolean));
   const cartSegments = new Set(cartProducts.map((p) => productSegment(p)).filter(Boolean));
   return sortProductsForDisplay(PRODUCTS)
@@ -3263,7 +3713,23 @@ function cartRecommendationProducts(limit = 3) {
       const bScore = (cartCategories.has(productCategory(b)) ? 2 : 0) + (cartSegments.has(productSegment(b)) ? 1 : 0) + (productTopPriorityValue(b) < 999 ? 1 : 0);
       return bScore - aScore;
     })
-    .slice(0, limit);
+    .slice(0, limit)
+    .map((p) => ({ ...p, recoReasonLabel: productRecoReasonLabel('catalog') }));
+}
+async function hydrateCartRecommendations() {
+  const key = cartRecoKey();
+  if (!key) {
+    _cartRecoState = { key: '', items: [] };
+    return;
+  }
+  try {
+    const data = await fetch('/api/products/recommendations?ids=' + encodeURIComponent(key) + '&limit=3', { cache: 'no-store' }).then((r) => r.json()).catch(() => null);
+    const inCart = new Set([...cart.keys()].map((rawKey) => parseCartKey(rawKey).id));
+    const items = asArray(data?.items).filter((item) => item && !inCart.has(item.id));
+    const changed = JSON.stringify(items.map((item) => [item.id, item.recoReason])) !== JSON.stringify(asArray(_cartRecoState.items).map((item) => [item.id, item.recoReason]));
+    _cartRecoState = { key, items };
+    if (changed && key === cartRecoKey()) renderCart();
+  } catch {}
 }
 function calcBundlePlan(raw = '') {
   let plan = [];
@@ -3283,10 +3749,8 @@ function applyCartPlan(plan = [], { replace = false } = {}) {
   if (replace) cart.clear();
   items.forEach((item) => {
     const qty = Math.max(1, parseInt(item.qty, 10) || 1);
-    cart.set(item.id, replace ? qty : ((Number(cart.get(item.id)) || 0) + qty));
+    addToCart(item.id, qty, { variantId: item.variantId, redirectOnMissingVariant: false });
   });
-  saveCart();
-  renderCart();
   return items.reduce((sum, item) => sum + (Math.max(1, parseInt(item.qty, 10) || 1)), 0);
 }
 function checkoutFromCalcPlan(raw = '') {
@@ -3329,19 +3793,24 @@ function renderCart() {
   if (!cartItemsEl) return;
   cartItemsEl.innerHTML = '';
   if (cart.size === 0) { cartItemsEl.innerHTML = '<div class="empty">ตะกร้ายังว่างอยู่</div>'; return; }
-  cart.forEach((qty, id) => {
-    const p = productById(id); if (!p) return;
+  cart.forEach((qty, rawKey) => {
+    const { key, product: p, variant } = cartEntrySnapshot(rawKey); if (!p) return;
     const row = document.createElement('div');
     row.className = 'cart-row';
     const media = p.image
       ? `<div class="cart-media"><img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy"></div>`
       : `<div class="cart-media">${productVisual(p, 'mini-ico')}</div>`;
+    const variantMeta = variant
+      ? `<div class="cart-variant">${esc(productVariantDisplayLabel(variant))}${variantOptionSummary(variant) ? ` · ${esc(variantOptionSummary(variant))}` : ''}</div>`
+      : '';
     row.innerHTML = `
-      <div class="cart-main">${media}<div class="cart-copy"><div class="nm">${p.name}</div><div class="pr">${baht(effPrice(p))}</div></div></div>
-      <div class="qty"><button data-dec="${id}">−</button><span>${qty}</span><button data-inc="${id}">+</button></div>`;
+      <div class="cart-main">${media}<div class="cart-copy"><div class="nm">${p.name}</div>${variantMeta}<div class="pr">${baht(productVariantUnitPrice(p, variant))}</div></div></div>
+      <div class="qty"><button data-dec="${esc(key)}">−</button><span>${qty}</span><button data-inc="${esc(key)}">+</button></div>`;
     cartItemsEl.appendChild(row);
   });
-  const recs = cartRecommendationProducts(3);
+  const recs = (_cartRecoState.key === cartRecoKey() && asArray(_cartRecoState.items).length)
+    ? asArray(_cartRecoState.items)
+    : cartRecommendationProducts(3);
   if (recs.length) {
     const box = document.createElement('div');
     box.className = 'cart-recs';
@@ -3349,10 +3818,12 @@ function renderCart() {
       ${recs.map((p) => `<button type="button" class="cart-rec" data-add="${esc(p.id)}">
         ${p.image ? `<img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy">` : `<span>${productVisual(p, 'mini-ico')}</span>`}
         <em>${esc(productCardName(p))}</em>
+        <span>${esc(p.recoReasonLabel || (p.recoReason ? productRecoReasonLabel(p.recoReason) : 'สินค้าแนะนำ'))}</span>
         <strong>${baht(effPrice(p))}</strong>
       </button>`).join('')}`;
     cartItemsEl.appendChild(box);
   }
+  hydrateCartRecommendations().catch(() => {});
 }
 function openCart() {
   if (!cartDrawer || !backdrop) return;
@@ -3415,11 +3886,13 @@ function productCard(p, i = 0) {
   const highlight = String(productExtra(p)?.highlight || '').trim();
   const points = productSellingPoints(p).slice(0, 2);
   const eyebrow = isPod ? 'POD COLLECTION' : '';
+  const recoHint = String(p?.recoReasonLabel || (p?.recoReason ? productRecoReasonLabel(p.recoReason) : '')).trim();
   return `<a class="card glass reveal ${out ? 'soldout' : ''} ${isPod ? 'is-pod' : ''}" href="${routeHref('/product/' + p.id)}" style="transition-delay:${(i % 3) * 0.07}s">
     <div class="thumb">${onSale ? saleBadgeHTML(p) : ''}${p.video ? '<span class="vid-badge">▶</span>' : ''}${modelUrl ? '<span class="vid-badge model-badge">3D</span>' : ''}${heartBtn(p.id)}<span class="glow"></span>${media}
       ${out ? '<span class="soldout-tag">สินค้าหมด</span>' : `<button class="qv-btn" data-quick="${p.id}">ดูเร็ว</button>`}</div>
     <div class="body">
       ${eyebrow ? `<div class="card-kicker">${esc(eyebrow)}</div>` : ''}
+      ${recoHint ? `<div class="card-kicker">${esc(recoHint)}</div>` : ''}
       ${badges ? `<div class="tag-row">${badges}</div>` : ''}
       <h3>${esc(productCardName(p))}</h3>
       ${p.reviews ? `<div class="card-rate">${stars(p.rating)}<small>(${p.reviews})</small></div>` : ''}
@@ -4014,8 +4487,11 @@ function filteredProducts() {
   else if (_pf.availability === 'featured') list = list.filter((p) => productIsFeatured(p) || productTopPriorityValue(p) < 999);
   if (_pf.crop && cropGuideMap()[_pf.crop]) { const ids = cropGuideMap()[_pf.crop].ids; list = list.filter((p) => ids.includes(p.id)); }
   if (_pf.q) {
-    const q = _pf.q.toLowerCase();
-    list = list.filter((p) => (p.name + ' ' + p.short + ' ' + displayProductTag(p) + ' ' + productCategory(p) + ' ' + productCrops(p).join(' ')).toLowerCase().includes(q));
+    list = list
+      .map((p) => ({ p, score: productSearchScore(p, _pf.q) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || Number(b.p.reviews || 0) - Number(a.p.reviews || 0))
+      .map((entry) => entry.p);
   }
   if (_pf.sort === 'price-asc') list.sort((a, b) => effPrice(a) - effPrice(b));
   else if (_pf.sort === 'price-desc') list.sort((a, b) => effPrice(b) - effPrice(a));
@@ -4556,7 +5032,7 @@ function updateCalcPage() {
 }
 
 // ── community / learning platform ──
-let COMMUNITY_CACHE = { posts: [], stories: [], loadedAt: 0 };
+let COMMUNITY_CACHE = { posts: [], stories: [], loadedAt: 0, scopeKey: 'store_main' };
 const COMMUNITY_STORY_SEEN_KEY = 'communitySeenStories:v1';
 function communitySeenStories() {
   try {
@@ -4623,20 +5099,31 @@ async function fetchCommunityJson(url, fallback, timeoutMs = 4500) {
   }
 }
 async function loadCommunity() {
+  const scopeKey = currentSiteScopeKey();
+  if (COMMUNITY_CACHE_BY_SCOPE.has(scopeKey)) {
+    COMMUNITY_CACHE = COMMUNITY_CACHE_BY_SCOPE.get(scopeKey) || { posts: [], stories: [], loadedAt: 0, scopeKey };
+    return COMMUNITY_CACHE;
+  }
+  if (COMMUNITY_PROMISE_BY_SCOPE.has(scopeKey)) return COMMUNITY_PROMISE_BY_SCOPE.get(scopeKey);
   const [feed, storyData] = await Promise.all([
     fetchCommunityJson('/api/community', { posts: [] }),
     fetchCommunityJson('/api/community/stories', { stories: [] }),
   ]);
-  let posts = asArray(feed.posts);
-  let stories = asArray(storyData.stories);
-  if (!posts.length && !stories.length) {
-    const fallbackArticles = await refreshArticlesCache().catch(() => []);
-    const fallback = articleCommunityFallback(fallbackArticles);
-    posts = fallback.posts;
-    stories = fallback.stories;
-  }
-  COMMUNITY_CACHE = { posts, stories, loadedAt: Date.now() };
-  return COMMUNITY_CACHE;
+  const loader = (async () => {
+    let posts = asArray(feed.posts);
+    let stories = asArray(storyData.stories);
+    if (!posts.length && !stories.length && !isolatedStoreClient()) {
+      const fallbackArticles = await refreshArticlesCache().catch(() => []);
+      const fallback = articleCommunityFallback(fallbackArticles);
+      posts = fallback.posts;
+      stories = fallback.stories;
+    }
+    COMMUNITY_CACHE = { posts, stories, loadedAt: Date.now(), scopeKey };
+    COMMUNITY_CACHE_BY_SCOPE.set(scopeKey, COMMUNITY_CACHE);
+    return COMMUNITY_CACHE;
+  })().finally(() => { COMMUNITY_PROMISE_BY_SCOPE.delete(scopeKey); });
+  COMMUNITY_PROMISE_BY_SCOPE.set(scopeKey, loader);
+  return loader;
 }
 function communityMediaHTML(media = [], cls = 'community-media') {
   const items = asArray(media).filter((item) => item?.url).slice(0, 4);
@@ -4974,6 +5461,77 @@ function standardProductBlocks(p) {
     }).join('') : '<span class="crop-tag">พืชทั่วไป</span>'}</div>` : ''}
   </section>`;
 }
+let _detailSelectedVariantId = '';
+function defaultProductVariant(p) {
+  const variants = productVariants(p);
+  return variants.find((item) => productVariantStock(p, item) > 0) || variants[0] || null;
+}
+function detailActiveVariant(p = _detailProduct) {
+  const product = p || _detailProduct;
+  if (!product) return null;
+  return resolveProductVariant(product, _detailSelectedVariantId) || defaultProductVariant(product);
+}
+function detailStockLineHTML(p, variant = null) {
+  const stock = productVariantStock(p, variant);
+  const label = variant ? productVariantDisplayLabel(variant) : '';
+  const copy = stock <= 0 ? 'สินค้าหมด' : stock <= 5 ? `เหลือเพียง ${stock} ชิ้น` : 'มีสินค้าพร้อมส่ง';
+  return `<div id="detailStockLine" class="stock-line ${stock <= 0 ? 'out' : stock <= 5 ? 'low' : ''}">${copy}${label ? ` · ${esc(label)}` : ''}</div>`;
+}
+function renderProductVariantPicker(p) {
+  const variants = productVariants(p);
+  if (!variants.length) return '';
+  const active = detailActiveVariant(p);
+  return `<div class="detail-variant-box" id="detailVariantBox">
+    <div class="detail-variant-head"><b>ตัวเลือกสินค้า</b><span>ราคาและสต็อกแยกตามตัวเลือก</span></div>
+    <div class="detail-variant-list">${variants.map((variant) => {
+      const selected = active?.id === variant.id;
+      const optionSummary = variantOptionSummary(variant);
+      const priceText = productVariantUnitPrice(p, variant) !== effPrice(p) ? baht(productVariantUnitPrice(p, variant)) : 'ราคาเดียวกับสินค้าหลัก';
+      const stock = productVariantStock(p, variant);
+      return `<button type="button" class="detail-variant-chip ${selected ? 'on' : ''} ${stock <= 0 ? 'is-disabled' : ''}" data-detail-variant="${esc(variant.id)}">
+        <b>${esc(productVariantDisplayLabel(variant))}</b>
+        <span>${optionSummary ? esc(optionSummary) : 'ตัวเลือกมาตรฐาน'}</span>
+        <small>${esc(priceText)} · ${stock > 0 ? `เหลือ ${stock}` : 'หมดสต็อก'}</small>
+      </button>`;
+    }).join('')}</div>
+    <div class="form-note" id="detailVariantSummary">${active ? `${productVariantDisplayLabel(active)}${variantOptionSummary(active) ? ` · ${variantOptionSummary(active)}` : ''}` : 'ยังไม่ได้เลือกตัวเลือกสินค้า'}</div>
+  </div>`;
+}
+function checkoutRecommendationCards(items = []) {
+  const recs = asArray(items).slice(0, 3);
+  if (!recs.length) return '';
+  return `<div class="checkout-recs"><h4>เพิ่มสินค้าแนะนำก่อนจ่ายเงิน</h4><div class="adm-list">${recs.map((p) => `<article class="adm-prod glass">
+    <div class="adm-prod-info"><b>${esc(productCardName(p))}</b><span>${esc(p.recoReasonLabel || (p.recoReason ? productRecoReasonLabel(p.recoReason) : 'สินค้าแนะนำ'))}</span></div>
+    <div class="adm-prod-act"><button type="button" class="btn-mini is-confirm" data-add="${esc(p.id)}">เพิ่ม ${baht(effPrice(p))}</button></div>
+  </article>`).join('')}</div></div>`;
+}
+function productDetailRecommendationPlacement(items = []) {
+  const recs = asArray(items).slice(0, 3);
+  if (!recs.length) return '';
+  return `<section class="detail-panel glass reveal">
+    <div class="panel-head"><span class="eyebrow">แนะนำก่อนกดสั่ง</span><h2>ซื้อชิ้นนี้แล้วมักหยิบอะไรต่อ</h2></div>
+    <div class="adm-list">${recs.map((item) => `<article class="adm-prod glass">
+      <div class="adm-prod-info"><b>${esc(productCardName(item))}</b><span>${esc(item.recoReasonLabel || productRecoReasonLabel(item.recoReason || 'catalog'))}</span></div>
+      <div class="adm-prod-act"><button type="button" class="btn-mini is-confirm" data-add="${esc(item.id)}">เพิ่ม ${baht(effPrice(item))}</button></div>
+    </article>`).join('')}</div>
+  </section>`;
+}
+function syncDetailVariantUI(product = _detailProduct) {
+  if (!product) return;
+  const variant = detailActiveVariant(product);
+  const priceWrap = document.getElementById('detailPriceWrap');
+  const stockWrap = document.getElementById('detailStockLine');
+  const summary = document.getElementById('detailVariantSummary');
+  const addBtn = document.querySelector('[data-addqty]');
+  const buyBtn = document.querySelector('[data-buynow]');
+  if (priceWrap) priceWrap.innerHTML = productPriceHTMLForSelection(product, variant);
+  if (stockWrap) stockWrap.outerHTML = detailStockLineHTML(product, variant);
+  if (summary) summary.textContent = variant ? `${productVariantDisplayLabel(variant)}${variantOptionSummary(variant) ? ` · ${variantOptionSummary(variant)}` : ''}` : 'ยังไม่ได้เลือกตัวเลือกสินค้า';
+  document.querySelectorAll('[data-detail-variant]').forEach((button) => button.classList.toggle('on', button.dataset.detailVariant === (variant?.id || '')));
+  const soldOut = productVariantStock(product, variant) <= 0;
+  if (addBtn) addBtn.disabled = soldOut;
+  if (buyBtn) buyBtn.disabled = soldOut;
+}
 async function hydrateProductDetail(id, fallbackP) {
   let p = fallbackP;
   let rev = { reviews: [], stats: { avg: fallbackP?.rating || 0, count: fallbackP?.reviews || 0 } };
@@ -4991,8 +5549,10 @@ async function hydrateProductDetail(id, fallbackP) {
   // กันกรณีผู้ใช้เปลี่ยนหน้าไปแล้ว
   if (!reviewsMount || reviewsMount.dataset.pid !== String(id)) return;
   _detailProduct = p;
+  _detailSelectedVariantId = detailActiveVariant(p)?.id || '';
   if (supportMount) supportMount.innerHTML = productSupportSection(p, rev);
   reviewsMount.innerHTML = reviewsHTML(p, rev);
+  syncDetailVariantUI(p);
   [supportMount, reviewsMount].forEach((m) => m && m.querySelectorAll('.reveal:not(.in)').forEach((el) => revealObserver.observe(el)));
   hydrateProductRecommendations(id).catch(() => {});
 }
@@ -5003,6 +5563,8 @@ async function hydrateProductRecommendations(id) {
   const data = await fetch('/api/products/' + encodeURIComponent(id) + '/recommendations?limit=4').then((r) => r.json()).catch(() => null);
   const items = Array.isArray(data?.items) ? data.items.filter((item) => item && item.id !== id) : [];
   if (!items.length || grid.dataset.pid !== String(id)) return;
+  const placement = document.getElementById('pdRecoPlacement');
+  if (placement) placement.innerHTML = productDetailRecommendationPlacement(items);
   grid.innerHTML = items.map((item, i) => productCard(item, i)).join('');
   const head = document.getElementById('pdRelatedHead');
   if (head && items.some((item) => item.recoReason === 'bought_together')) {
@@ -5020,6 +5582,8 @@ async function viewProductDetail({ id }) {
   setPageMeta(productSeoTitle(p), productSeoDescription(p));
   recentlyViewedProductIds(p.id);
   _detailProduct = p; _detailMedia = buildMedia(p);
+  _detailSelectedVariantId = defaultProductVariant(p)?.id || '';
+  const selectedVariant = detailActiveVariant(p);
   // เรนเดอร์ทันทีด้วยรีวิวว่าง แล้วค่อยเติมรีวิวจริงหลังหน้าโชว์ (ไม่หน่วง)
   const rev = { reviews: [], stats: { avg: p.rating || 0, count: p.reviews || 0 } };
   _afterRender = () => hydrateProductDetail(id, p);
@@ -5049,8 +5613,8 @@ async function viewProductDetail({ id }) {
         <div class="di-top">${productBadgeMarkup(p) ? `<div class="tag-row">${productBadgeMarkup(p)}</div>` : ''}${heartBtn(p.id)}</div>
         <h1>${esc(p.name)}</h1>
         ${p.reviews ? `<div class="card-rate">${stars(p.rating)}<small>${p.rating} (${p.reviews} รีวิว)</small></div>` : ''}
-        <div class="d-price">${priceHTML(p)}</div>
-        <div class="stock-line ${p.stock <= 0 ? 'out' : p.stock <= 5 ? 'low' : ''}">${p.stock <= 0 ? 'สินค้าหมด' : p.stock <= 5 ? `เหลือเพียง ${p.stock} ชิ้น` : 'มีสินค้าพร้อมส่ง'}</div>
+        <div class="d-price" id="detailPriceWrap">${productPriceHTMLForSelection(p, selectedVariant)}</div>
+        ${detailStockLineHTML(p, selectedVariant)}
         <p class="d-desc">${esc(p.desc || '')}</p>
         <div class="detail-points">${quickPoints.map((item) => `<span>${esc(item)}</span>`).join('')}</div>
         ${isAgriProduct(p) ? `<div class="detail-summary-grid compact-top-grid">
@@ -5062,9 +5626,10 @@ async function viewProductDetail({ id }) {
           <div class="summary-box"><span>เหมาะกับ</span><b>${esc(extra.audienceShort || p.specs['เหมาะกับ'] || 'ลูกค้าที่อยากเลือกไว')}</b></div>
           <div class="summary-box"><span>จุดเด่น</span><b>${esc(extra.highlight || p.specs['จุดเด่น'] || 'ดีไซน์เด่นพร้อมขาย')}</b></div>
         </div>` : ''}
+        ${renderProductVariantPicker(p)}
         <div class="qty-row"><span>จำนวน</span><div class="qtybox"><button data-qd>−</button><span id="detailQty">1</span><button data-qi>+</button></div></div>
         <div class="d-actions">
-          ${p.stock <= 0
+          ${productVariantStock(p, selectedVariant) <= 0
             ? '<button class="btn btn-primary" disabled>สินค้าหมด</button>'
             : `<button class="btn btn-primary" data-buynow="${p.id}">ซื้อเลย</button>
           <button class="btn btn-glass" data-addqty="${p.id}">เพิ่มลงตะกร้า</button>`}
@@ -5080,6 +5645,7 @@ async function viewProductDetail({ id }) {
     </div>
     ${standardProductBlocks(p)}
     ${productConversionPanel(p, related)}
+    <div id="pdRecoPlacement"></div>
     <div id="pdSupportMount" data-pid="${esc(id)}">${productSupportSection(p, rev)}</div>
     <section class="detail-panel glass reveal">
       <div class="panel-head"><span class="eyebrow">ก่อนตัดสินใจ</span><h2>คำถามสำคัญเกี่ยวกับสินค้านี้</h2></div>
@@ -5089,8 +5655,8 @@ async function viewProductDetail({ id }) {
     <div id="pdReviewsMount" data-pid="${esc(id)}">${reviewsHTML(p, rev)}</div>
     <div class="section-head reveal" style="margin-top:30px" id="pdRelatedHead"><span class="eyebrow">สินค้าที่เกี่ยวข้อง</span><h2>อาจถูกใจคุณ</h2></div>
     <div class="products" id="pdRelatedGrid" data-pid="${esc(id)}">${related.map((r, i) => productCard(r, i)).join('')}</div>
-    ${p.stock > 0 ? `<div class="mobile-buybar">
-      <div class="mobile-buybar-copy"><b>${esc(p.name)}</b><span>${baht(effPrice(p))}</span></div>
+    ${productVariantStock(p, selectedVariant) > 0 ? `<div class="mobile-buybar">
+      <div class="mobile-buybar-copy"><b>${esc(p.name)}</b><span>${baht(productVariantUnitPrice(p, selectedVariant))}</span></div>
       <button class="btn btn-primary" data-buynow="${p.id}">ซื้อเลย</button>
     </div>` : ''}
   </section>`;
@@ -5174,6 +5740,78 @@ function orderTimelineHTML(status = '') {
     <div class="tl-step ${i <= stepIndex ? 'done' : ''} ${i === stepIndex ? 'cur' : ''}">
       <span class="tl-dot">${i < stepIndex ? '✓' : s.icon}</span><span class="tl-label">${s.label}</span></div>`).join('')}</div>`;
 }
+function orderItemLabel(item = {}) {
+  const variantBits = [String(item.variantLabel || '').trim(), String(item.optionSummary || '').trim()].filter(Boolean);
+  return `${String(item.name || 'สินค้า').trim()}${variantBits.length ? ` · ${variantBits.join(' · ')}` : ''}`;
+}
+function supportRequestSummaryHTML(label, request = null) {
+  if (!request) return '';
+  const type = String(request.type || '').trim() || (label.includes('เงิน') ? 'refund' : 'return');
+  return `<div class="glass" style="padding:14px;margin-top:12px">
+    <div class="sum-row"><span>${esc(label)}</span><b>${esc(supportStatusLabel(request.status || ''))}</b></div>
+    ${supportProgressHTML(request, type)}
+    ${request.reason ? `<div class="form-note" style="margin-top:8px"><b>เหตุผล:</b> ${esc(request.reason)}</div>` : ''}
+    ${request.note ? `<div class="form-note"><b>รายละเอียดจากลูกค้า:</b> ${esc(request.note)}</div>` : ''}
+    ${request.adminNote ? `<div class="form-note"><b>หมายเหตุทีมงาน:</b> ${esc(request.adminNote)}</div>` : ''}
+    ${supportAttachmentListHTML(request.attachments, 'ไฟล์แนบ')}
+  </div>`;
+}
+function orderSupportTimelineHTML(support = {}) {
+  const entries = asArray(support.timeline);
+  if (!entries.length) return '';
+  return `<div class="glass reveal" style="padding:18px;margin-top:18px">
+    <h3 style="margin:0 0 10px">ไทม์ไลน์คำสั่งซื้อและการดูแลหลังการขาย</h3>
+    <div class="adm-list">${entries.map((entry) => `<article class="adm-prod glass">
+      <div class="adm-prod-info">
+        <b>${esc(entry.title || 'กิจกรรม')}</b>
+        <span>${esc([
+          entry.detail || '',
+          entry.supportType ? `งาน${supportTypeLabel(entry.supportType)}` : '',
+          entry.status ? supportStatusLabel(entry.status) : '',
+          entry.actor ? supportActorLabel(entry.actor) : '',
+        ].filter(Boolean).join(' · '))}</span>
+        ${supportAttachmentListHTML(entry.attachments, 'หลักฐาน')}
+      </div>
+      <div class="adm-prod-act"><span class="btn-mini">${esc(crmTimeLabel(entry.at) || '')}</span></div>
+    </article>`).join('')}</div>
+  </div>`;
+}
+function supportAdminActionButtons(orderId, request = null, type = 'return') {
+  if (!request) return [];
+  const currentStatus = String(request.status || '').trim() || 'requested';
+  if (['rejected', 'refunded', 'closed'].includes(currentStatus)) return [];
+  return [...supportStatusFlow(type), 'rejected']
+    .filter((status) => status !== 'requested' && status !== currentStatus)
+    .map((status) => `<button class="btn-mini ${status === 'rejected' ? 'danger' : ''}" type="button" data-admin-support="${esc(orderId)}" data-support-type="${esc(type)}" data-support-status="${esc(status)}">${esc(`${supportStatusLabel(status)}${type === 'refund' ? ' · คืนเงิน' : ' · คืนสินค้า'}`)}</button>`);
+}
+function orderSupportActionsHTML(o = {}, { admin = false } = {}) {
+  const returnRequest = o.support?.returnRequest || null;
+  const refundRequest = o.support?.refundRequest || null;
+  if (admin) {
+    const requestButtons = [
+      ...supportAdminActionButtons(o.id, returnRequest, 'return'),
+      ...supportAdminActionButtons(o.id, refundRequest, 'refund'),
+    ];
+    return `<div class="dash-card">
+      <h3>งานคืนสินค้า / คืนเงิน</h3>
+      ${supportRequestSummaryHTML('คำขอคืนสินค้า', returnRequest)}
+      ${supportRequestSummaryHTML('คำขอคืนเงิน', refundRequest)}
+      ${requestButtons.length ? `<div class="ao-act" style="margin-top:12px">${requestButtons.join('')}</div>` : '<p class="muted">ยังไม่มีคำขอคืนสินค้าหรือคืนเงินจากลูกค้า</p>'}
+    </div>`;
+  }
+  const canRequestReturn = ['paid', 'preparing', 'shipped', 'delivered'].includes(String(o.status || '').trim()) && !returnRequest;
+  const canRequestRefund = (o.paid || ['paid', 'preparing', 'shipped', 'delivered'].includes(String(o.status || '').trim())) && !refundRequest;
+  return `<div class="glass reveal" style="padding:18px;margin-top:18px">
+    <h3 style="margin:0 0 8px">คืนสินค้า / คืนเงิน</h3>
+    <p class="muted" style="margin:0 0 12px">ส่งคำขอจากหน้านี้ได้เลย ทีมงานจะอัปเดตสถานะกลับในไทม์ไลน์ด้านล่าง</p>
+    <div class="ao-act">
+      ${canRequestReturn ? `<button class="btn-mini" type="button" data-order-support="${esc(o.id)}" data-support-type="return">ขอคืนสินค้า</button>` : ''}
+      ${canRequestRefund ? `<button class="btn-mini" type="button" data-order-support="${esc(o.id)}" data-support-type="refund">ขอคืนเงิน</button>` : ''}
+    </div>
+    ${supportRequestSummaryHTML('คำขอคืนสินค้า', returnRequest)}
+    ${supportRequestSummaryHTML('คำขอคืนเงิน', refundRequest)}
+  </div>`;
+}
 function orderPriority(o = {}) {
   if (o.status === 'awaiting_payment' && o.payment_claimed && !o.paid) return { key: 'verify', label: 'รอตรวจสลิป', tone: 'warn', action: 'paid' };
   if (o.status === 'paid') return { key: 'prepare', label: 'รอเตรียมสินค้า', tone: 'info', action: 'preparing' };
@@ -5191,9 +5829,9 @@ function viewCheckout() {
   }
   let rows = '';
   const checkoutPoints = settingLines('SITE_CHECKOUT_POINTS', DEFAULT_CHECKOUT_POINTS);
-  cart.forEach((qty, id) => {
-    const p = productById(id); if (!p) return;
-    rows += `<div class="sum-row"><span>${p.name} <em>×${qty}</em></span><b>${baht(effPrice(p) * qty)}</b></div>`;
+  cart.forEach((qty, rawKey) => {
+    const { product: p, variant } = cartEntrySnapshot(rawKey); if (!p) return;
+    rows += `<div class="sum-row"><span>${esc(orderItemLabel({ ...variant, name: p.name, variantLabel: variant ? productVariantDisplayLabel(variant) : '', optionSummary: variantOptionSummary(variant) }) || p.name)} <em>×${qty}</em></span><b>${baht(productVariantUnitPrice(p, variant) * qty)}</b></div>`;
   });
   const recs = cartRecommendationProducts(3);
   return `
@@ -5244,7 +5882,7 @@ function viewCheckout() {
           <ul class="support-list">${checkoutPoints.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>
           ${lineCTA('line-inline')}
         </div>
-        ${recs.length ? `<div class="checkout-recs"><h4>เพิ่มสินค้าแนะนำ</h4>${recs.map((p) => `<button type="button" data-add="${esc(p.id)}"><span>${esc(productCardName(p))}</span><b>${baht(effPrice(p))}</b></button>`).join('')}</div>` : ''}
+        ${checkoutRecommendationCards(recs)}
         <a href="${routeHref('/products')}" class="back" style="margin-top:14px;display:inline-block">← เลือกซื้อเพิ่ม</a>
       </aside>
     </div>
@@ -5330,7 +5968,7 @@ function renderOrderHTML(o) {
     pay = `<div class="pay-block glass"><h3>รอการชำระเงิน</h3><p>หากยังไม่ได้ชำระผ่านบัตร กรุณาทักแชทแอดมินเพื่อขอลิงก์ชำระเงินใหม่</p></div>`;
   }
 
-  const items = o.items.map((it) => `<div class="sum-row"><span>${it.name} <em>×${it.qty}</em></span><b>${baht(it.price * it.qty)}</b></div>`).join('');
+  const items = o.items.map((it) => `<div class="sum-row"><span>${esc(orderItemLabel(it))} <em>×${it.qty}</em></span><b>${baht(it.price * it.qty)}</b></div>`).join('');
   const expiresText = o.expiresAt && !o.paid && !cancelled && !expired ? new Date(o.expiresAt).toLocaleString('th-TH') : '';
   return `
   <section class="section page-top">
@@ -5360,6 +5998,8 @@ function renderOrderHTML(o) {
           <div class="sum-row"><span>โทร</span><b>${o.customer.phone}</b></div>
         </aside>
       </div>
+      ${orderSupportActionsHTML(o)}
+      ${orderSupportTimelineHTML(o.support)}
       <div class="d-actions" style="justify-content:center;margin-top:30px">
         <button class="btn btn-glass" id="confirmChat">สอบถามแอดมิน 💬</button>
         <a href="${routeHref('/products')}" class="btn btn-glass">เลือกซื้อต่อ</a>
@@ -6262,7 +6902,7 @@ function setGrowthActionDone(actionId = '') {
 function isGrowthActionDone(actionId = '') {
   return Boolean(growthActionStore()[`${adminSelectedStoreId()}::${actionId}`]);
 }
-function buildGrowthRecommendations({ analytics = {}, stats = {}, products = [], orders = [] } = {}) {
+function buildGrowthRecommendations({ analytics = {}, stats = {}, products = [], orders = [], followUps = [], productionQa = {} } = {}) {
   const totals = analytics.totals || {};
   const topProducts = Array.isArray(analytics.topProducts) ? analytics.topProducts : [];
   const awaitingOrders = asArray(orders).filter((order) => ['awaiting_payment', 'expired'].includes(String(order.status || '')));
@@ -6272,64 +6912,103 @@ function buildGrowthRecommendations({ analytics = {}, stats = {}, products = [],
     ? asArray(products).find((p) => productCardName(p) === topProductName || p.name === topProductName)
     : null;
   const aov = Math.max(0, Number(totals.aov || 0));
+  const health = productionQa?.health || {};
+  const launchPercent = Math.max(0, Number(productionQa?.checklist?.percent || 0));
+  const followUpCount = asArray(followUps).length;
+  const lineReady = Boolean(health.lineConfigured) && Boolean(health.lineWebRoomReady);
+  const paymentReady = Boolean(health.promptpayConfigured || health.stripeConfigured);
+  const launchReady = launchPercent >= 85;
   return [
     {
       id: 'payment-recovery',
       tone: awaitingOrders.length ? 'urgent' : 'setup',
-      title: awaitingOrders.length ? 'Recover pending payments' : 'Validate checkout flow',
+      title: awaitingOrders.length ? 'เร่งติดตามออเดอร์ค้างชำระ' : 'ตรวจสอบเส้นทางสั่งซื้อ',
       detail: awaitingOrders.length
-        ? `${awaitingOrders.length} orders should be followed up today through Inbox or LINE.`
-        : 'No pending payment queue right now. Open Orders to verify checkout and payment flow.',
-      impact: awaitingOrders.length ? 'Recover revenue that may otherwise be lost.' : 'Reduce launch risk before real customers order.',
+        ? `มี ${awaitingOrders.length} ออเดอร์ที่ควรติดตามวันนี้ผ่าน Inbox หรือ LINE`
+        : 'ตอนนี้ยังไม่มีคิวค้างชำระ ให้เปิดหน้าออเดอร์เพื่อตรวจขั้นตอนสั่งซื้อและการชำระเงิน',
+      impact: awaitingOrders.length ? 'ช่วยดึงรายได้ที่เสี่ยงหลุดกลับมา' : 'ลดความเสี่ยงก่อนเปิดให้ลูกค้าจริงสั่งซื้อ',
       action: 'open-orders',
-      confirm: awaitingOrders.length ? 'Open order queue' : 'Open orders',
+      confirm: awaitingOrders.length ? 'เปิดคิวออเดอร์' : 'เปิดหน้าออเดอร์',
     },
     {
       id: 'lead-followup',
       tone: Number(stats.leads || 0) ? 'urgent' : 'setup',
-      title: Number(stats.leads || 0) ? 'Follow up leads' : 'Improve lead capture',
+      title: Number(stats.leads || 0) ? 'ติดตามลีดที่เข้ามา' : 'เพิ่มประสิทธิภาพการเก็บลีด',
       detail: Number(stats.leads || 0)
-        ? `${Number(stats.leads || 0)} leads are waiting. Open Inbox and clear the sales conversation queue.`
-        : 'No leads yet. Open Brand Settings to improve CTA and contact points.',
-      impact: 'Turn existing interest into sales conversations.',
+        ? `มีลีดรออยู่ ${Number(stats.leads || 0)} ราย เปิด Inbox แล้วเคลียร์คิวบทสนทนาการขาย`
+        : 'ยังไม่มีลีดใหม่ ลองเปิดหน้าตั้งค่าหน้าเว็บเพื่อปรับ CTA และช่องทางติดต่อ',
+      impact: 'เปลี่ยนความสนใจที่มีอยู่ให้กลายเป็นบทสนทนาการขาย',
       action: Number(stats.leads || 0) ? 'open-inbox' : 'open-site-contact',
-      confirm: Number(stats.leads || 0) ? 'Open Inbox' : 'Open CTA settings',
+      confirm: Number(stats.leads || 0) ? 'เปิด Inbox' : 'เปิดการตั้งค่า CTA',
     },
     {
       id: 'pin-top-product',
       tone: topProduct ? 'growth' : 'setup',
-      title: topProduct ? 'Pin best seller' : 'Create first hero product',
+      title: topProduct ? 'ปักสินค้าขายดีขึ้นก่อน' : 'ตั้งสินค้าตัวชูโรงชิ้นแรก',
       detail: topProduct
-        ? `Pin "${topProductName}" to the top and mark it as recommended.`
-        : 'No clear best seller yet. Open Products and create or choose a hero item.',
-      impact: 'Help customers see the strongest product first.',
+        ? `ปัก "${topProductName}" ไว้ด้านบนและทำเครื่องหมายเป็นสินค้าแนะนำ`
+        : 'ยังไม่มีสินค้าขายเด่นชัด ลองเปิดหน้าสินค้าแล้วเลือกหรือตั้งสินค้าตัวชูโรง',
+      impact: 'ช่วยให้ลูกค้าเห็นสินค้าที่ควรขายก่อนเป็นอันดับแรก',
       action: topProduct ? 'pin-product' : 'open-products',
       productId: topProduct?.id || '',
-      confirm: topProduct ? 'Pin product' : 'Open Products',
+      confirm: topProduct ? 'ปักสินค้าแนะนำ' : 'เปิดหน้าสินค้า',
     },
     {
       id: 'bundle-coupon',
       tone: aov ? 'growth' : 'setup',
-      title: aov ? 'Lift AOV with bundle offer' : 'Start AOV tracking',
+      title: aov ? 'ดันยอดต่อออเดอร์ด้วยข้อเสนอแบบบันเดิล' : 'เริ่มติดตามมูลค่าเฉลี่ยต่อออเดอร์',
       detail: aov
-        ? `Current AOV is ${baht(aov)}. Create a bundle coupon with minimum ${baht(Math.max(500, Math.round(aov * 1.2)))}.`
-        : 'Create a starter coupon or bundle to begin measuring order value.',
-      impact: 'Increase order value without heavy discounting.',
+        ? `AOV ปัจจุบันคือ ${baht(aov)} แนะนำให้สร้างคูปองบันเดิลโดยกำหนดยอดขั้นต่ำ ${baht(Math.max(500, Math.round(aov * 1.2)))}`
+        : 'สร้างคูปองเริ่มต้นหรือโปรแบบบันเดิล เพื่อเริ่มวัดมูลค่าต่อออเดอร์',
+      impact: 'เพิ่มมูลค่าต่อออเดอร์โดยไม่ต้องลดราคาแรง',
       action: 'create-bundle-coupon',
       minTotal: Math.max(500, Math.round(aov * 1.2)),
       value: aov >= 1500 ? 7 : 5,
-      confirm: 'Create coupon draft',
+      confirm: 'สร้างคูปองร่าง',
+    },
+    {
+      id: 'line-readiness',
+      tone: lineReady ? 'ok' : 'setup',
+      title: lineReady ? 'LINE OA และห้องแชตพร้อมแล้ว' : 'ตั้งค่า LINE OA และห้องแชตให้พร้อม',
+      detail: lineReady
+        ? `ระบบ LINE พร้อมใช้งาน${followUpCount ? ` และมีคิวติดตาม ${followUpCount} รายการ` : ''}`
+        : 'ยังไม่พบ LINE token/secret หรือห้องแชตเว็บยังไม่พร้อมสำหรับร้านนี้',
+      impact: lineReady ? 'ลูกค้าทักเข้าเว็บและ LINE ต่อเนื่องได้' : 'ปิดจุดหลุดของ inbox, webhook และ handoff ไปห้องแชตก่อนเปิดขาย',
+      action: lineReady ? 'mark-done' : 'open-stores',
+      confirm: lineReady ? 'ทำเครื่องหมายว่าเรียบร้อย' : 'เปิด Brand & API รายร้าน',
+    },
+    {
+      id: 'payment-readiness',
+      tone: paymentReady ? 'ok' : 'setup',
+      title: paymentReady ? 'ช่องทางชำระเงินพร้อมใช้งาน' : 'ตั้งค่าช่องทางชำระเงิน',
+      detail: paymentReady
+        ? `พร้อมใช้ ${health.promptpayConfigured ? 'PromptPay' : ''}${health.promptpayConfigured && health.stripeConfigured ? ' และ ' : ''}${health.stripeConfigured ? 'Stripe' : ''}`
+        : 'ยังไม่พบ PromptPay หรือ Stripe สำหรับร้านที่เลือกอยู่ตอนนี้',
+      impact: paymentReady ? 'ลูกค้าจ่ายเงินได้ต่อเนื่องโดยไม่สะดุด' : 'ลดการหลุดก่อนปิดการขายจริง',
+      action: paymentReady ? 'mark-done' : 'open-stores',
+      confirm: paymentReady ? 'ทำเครื่องหมายว่าเรียบร้อย' : 'เปิด Brand & API รายร้าน',
     },
     {
       id: 'stock-health',
       tone: lowStock.length ? 'urgent' : 'ok',
-      title: lowStock.length ? 'Fix low stock items' : 'Stock looks healthy',
+      title: lowStock.length ? 'จัดการสินค้าสต็อกต่ำ' : 'สต็อกโดยรวมยังปกติ',
       detail: lowStock.length
-        ? `${lowStock.length} active items are low or out of stock.`
-        : 'No active low-stock items detected.',
-      impact: lowStock.length ? 'Prevent customers from ordering unavailable items.' : 'Keep the catalog flow smooth.',
+        ? `มีสินค้าที่เปิดขายอยู่ ${lowStock.length} รายการซึ่งใกล้หมดหรือหมดสต็อกแล้ว`
+        : 'ยังไม่พบสินค้าที่เปิดขายแล้วมีสต็อกต่ำ',
+      impact: lowStock.length ? 'ป้องกันลูกค้าสั่งสินค้าที่ไม่มีพร้อมขาย' : 'ช่วยให้การเลือกดูสินค้าไหลลื่นต่อเนื่อง',
       action: lowStock.length ? 'open-products' : 'mark-done',
-      confirm: lowStock.length ? 'Open stock list' : 'Mark done',
+      confirm: lowStock.length ? 'เปิดรายการสต็อก' : 'ทำเครื่องหมายว่าเรียบร้อย',
+    },
+    {
+      id: 'launch-qa',
+      tone: launchReady ? 'ok' : 'urgent',
+      title: launchReady ? 'ร้านใกล้พร้อมเปิดจริง' : 'ปิดงานก่อนเปิดขายจริง',
+      detail: launchPercent
+        ? `Production QA ผ่าน ${launchPercent}%${followUpCount ? ` · AI จัดคิวติดตามไว้ ${followUpCount} รายการ` : ''}`
+        : 'ยังไม่มีผล Production QA ล่าสุดสำหรับร้านที่เลือก',
+      impact: launchReady ? 'ใช้เป็นจุดตรวจสุดท้ายก่อนยิงทราฟฟิกหรือเปิดโฆษณา' : 'รวมจุดเสี่ยงเรื่องโดเมน LINE การชำระเงิน และการ์ดแชร์ไว้ให้ดูในที่เดียว',
+      action: 'open-diagnostics',
+      confirm: launchReady ? 'เปิด Production QA' : 'ตรวจ Production QA',
     },
   ];
 }
@@ -6349,20 +7028,24 @@ function renderGrowthRecommendations(items = []) {
         data-growth-product="${esc(item.productId || '')}"
         data-growth-min="${esc(item.minTotal || '')}"
         data-growth-value="${esc(item.value || '')}"
-        data-growth-label="${esc(item.title)}">${done ? 'Done' : esc(item.confirm || 'Confirm')}</button>
+        data-growth-label="${esc(item.title)}">${done ? 'เสร็จแล้ว' : esc(item.confirm || 'ยืนยัน')}</button>
     </article>`;
   }).join('')}</div>`;
 }
 async function viewAdminDash() {
   if (!adminGuard()) return loadingView();
   await ensureAdminStoresContext();
-  const a = await (await api('/api/admin/analytics?days=30')).json();
-  const s = await (await api('/api/admin/stats')).json();
-  const dashProducts = await (await api('/api/admin/products')).json().catch(() => []);
-  const dashOrdersData = await (await api('/api/admin/orders?limit=8')).json().catch(() => ({ items: [] }));
-  const followUpsData = await (await api('/api/admin/customers/follow-ups')).json().catch(() => ({ items: [] }));
+  const [a, s, dashProducts, dashOrdersData, followUpsData, productionQaData] = await Promise.all([
+    api('/api/admin/analytics?days=30').then((r) => r.json()),
+    api('/api/admin/stats').then((r) => r.json()),
+    api('/api/admin/products').then((r) => r.json()).catch(() => []),
+    api('/api/admin/orders?limit=8').then((r) => r.json()).catch(() => ({ items: [] })),
+    api('/api/admin/customers/follow-ups').then((r) => r.json()).catch(() => ({ items: [] })),
+    api('/api/admin/production-qa').then((r) => r.json()).catch(() => ({})),
+  ]);
   const t = a.totals;
   const followUps = asArray(followUpsData.items);
+  const launchPercent = Math.max(0, Number(productionQaData?.checklist?.percent || 0));
   const followUpHtml = followUps.length
     ? `<div class="crm-followup-list">${followUps.map((item) => `<a href="${routeHref(item.href || '/admin/customers')}" class="crm-followup-item ft-${esc(item.type || 'other')}"><span class="crm-followup-icon">${esc(item.icon || '📌')}</span><div class="crm-followup-copy"><b>${esc(item.title)}</b><span>${esc(item.detail)}</span></div><span class="crm-followup-go">จัดการ →</span></a>`).join('')}</div>`
     : '<p class="muted">วันนี้ไม่มีลูกค้าที่ต้องเร่งติดตาม 🎉</p>';
@@ -6371,7 +7054,8 @@ async function viewAdminDash() {
     <div class="stat-card"><span>ออเดอร์</span><b>${t.orders}</b></div>
     <div class="stat-card"><span>เฉลี่ย/ออเดอร์</span><b>${baht(t.aov)}</b></div>
     <div class="stat-card"><span>ส่วนลดที่ให้</span><b>${baht(t.discountGiven)}</b></div>
-    <div class="stat-card"><span>ลีดจากเว็บ</span><b>${s.leads || 0}</b></div></div>`;
+    <div class="stat-card"><span>ลีดจากเว็บ</span><b>${s.leads || 0}</b></div>
+    <div class="stat-card"><span>Launch QA</span><b>${launchPercent ? `${launchPercent}%` : '—'}</b></div></div>`;
   const payItems = [{ label: 'PromptPay', n: a.payment.promptpay }, { label: 'บัตรเครดิต', n: a.payment.card }];
   const status = Object.entries(a.statusBreakdown).map(([k, v]) => `<span class="chip">${a.statusLabels[k] || k} · ${v}</span>`).join('') || '<span class="muted">—</span>';
   const top = a.topProducts.length ? barRows(a.topProducts, 'name', 'qty', (v) => v + ' ชิ้น') : '<p class="muted">ยังไม่มีข้อมูล</p>';
@@ -6380,6 +7064,8 @@ async function viewAdminDash() {
     stats: s,
     products: dashProducts,
     orders: asArray(dashOrdersData.items),
+    followUps,
+    productionQa: productionQaData,
   });
   const lowStockProducts = (Array.isArray(dashProducts) ? dashProducts : [])
     .filter((p) => p.active !== false && Number(p.stock || 0) <= 5)
@@ -6397,15 +7083,17 @@ async function viewAdminDash() {
     : '<p class="muted">ยังไม่มีออเดอร์ที่ต้องจัดการเร่งด่วน</p>';
   return adminLayout('', `<h2>แดชบอร์ด</h2>${tiles}
     <div class="dash-card"><div class="dash-head"><h3>ยอดขาย 30 วันล่าสุด</h3><span class="muted">รวม ${baht(t.revenue)} · ${t.paidOrders} ออเดอร์ที่ชำระแล้ว</span></div>${areaChart(a.series)}</div>
-    <div class="dash-card growth-card growth-ai-card"><div class="dash-head"><div><h3>AI Growth checklist</h3><span class="muted">Autopilot recommendations from sales, leads, orders, and products. Confirm an item to let the system apply the first safe step.</span></div><span class="status-badge s-paid">Autopilot</span></div>${renderGrowthRecommendations(growthItems)}</div>
+    <div class="dash-card growth-card growth-ai-card"><div class="dash-head"><div><h3>เช็กลิสต์ AI เพิ่มยอดขาย</h3><span class="muted">AI สรุปคำแนะนำอัตโนมัติจากยอดขาย ลีด ออเดอร์ และสินค้า กดยืนยันแต่ละข้อเพื่อให้ระบบลงมือทำขั้นแรกที่ปลอดภัยให้ทันที</span></div><span class="status-badge s-paid">ออโต้ไพลอต</span></div>${renderGrowthRecommendations(growthItems)}</div>
     <div class="dash-card crm-followup-card"><div class="dash-head"><div><h3>ลูกค้าที่ควรติดตามวันนี้</h3><span class="muted">AI จัดคิวจากออเดอร์ค้างจ่าย แชตที่ยังไม่ตอบ ลีดใหม่ และลูกค้าถึงรอบซื้อซ้ำ</span></div><a class="btn-mini" href="${routeHref('/admin/customers')}">เปิด CRM ลูกค้า</a></div>${followUpHtml}</div>
     <div class="dash-card today-work"><div class="dash-head"><h3>วันนี้ต้องทำอะไร</h3><span class="muted">คิวงานออเดอร์ที่ควรเคลียร์ก่อน</span></div>${todayWork}</div>
     <div class="dash-grid">
-      <div class="dash-card stock-watch"><div class="dash-head"><h3>Low stock watch</h3><span class="muted">สินค้าที่ควรเติมหรือซ่อนก่อนลูกค้าสั่ง</span></div>${lowStock}</div>
-      <div class="dash-card admin-quick-actions"><div class="dash-head"><h3>Quick actions</h3><span class="muted">ทางลัดสำหรับทำให้ร้านพร้อมขาย</span></div>
+      <div class="dash-card stock-watch"><div class="dash-head"><h3>เฝ้าระวังสต็อกต่ำ</h3><span class="muted">สินค้าที่ควรเติมหรือซ่อนก่อนลูกค้าสั่ง</span></div>${lowStock}</div>
+      <div class="dash-card admin-quick-actions"><div class="dash-head"><h3>ทางลัดที่ควรทำต่อ</h3><span class="muted">ทางลัดสำหรับทำให้ร้านพร้อมขาย</span></div>
         <a href="${routeHref('/admin/products')}">จัดการสินค้า / เติมสต็อก</a>
         <a href="${routeHref('/admin/site')}">แก้ Hero และข้อมูลร้าน</a>
         <a href="${routeHref('/admin/coupons')}">สร้างคูปองกระตุ้นยอด</a>
+        <a href="${routeHref('/admin/stores')}">ตั้งค่า Brand & API รายร้าน</a>
+        <a href="${routeHref('/admin/diagnostics')}">เปิด Production QA / Diagnostics</a>
         <a href="${routeHref('/admin/inbox')}">ตอบ Inbox ลูกค้า</a>
       </div>
     </div>
@@ -6451,6 +7139,63 @@ function crmCustomerCard(c, labels = {}) {
     <div class="adm-prod-act">${actions}</div>
   </article>`;
 }
+function crmActivityAttachmentLinksHTML(items = []) {
+  const attachments = asArray(items).filter((item) => item?.url);
+  if (!attachments.length) return '';
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">${attachments.map((item, index) => `<a class="btn-mini" href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.name || `ไฟล์ ${index + 1}`)}</a>`).join('')}</div>`;
+}
+function crmActivityCardHTML(item = {}) {
+  const href = routeHref(item.href || (item.orderId ? `/admin/order/${item.orderId}` : '/admin/customers'));
+  const typeText = item.supportType ? `งาน${supportTypeLabel(item.supportType)}` : '';
+  const statusText = item.status ? supportStatusLabel(item.status) : '';
+  const actorText = item.actor ? supportActorLabel(item.actor) : '';
+  const meta = [item.detail || '', item.orderId ? `ออเดอร์ ${item.orderId}` : '', actorText].filter(Boolean).join(' · ');
+  return `<article class="glass" style="padding:14px;border-radius:18px">
+    <div style="display:flex;gap:12px;align-items:flex-start;justify-content:space-between">
+      <div style="min-width:0;flex:1">
+        <div class="crm-name-row" style="margin-bottom:6px">
+          <b>${esc(item.title || 'กิจกรรม')}</b>
+          ${typeText ? `<span class="crm-badge">${esc(typeText)}</span>` : ''}
+          ${statusText ? `<span class="crm-badge">${esc(statusText)}</span>` : ''}
+        </div>
+        <span class="muted">${esc(meta || crmTimeLabel(item.at))}</span>
+        ${crmActivityAttachmentLinksHTML(item.attachments)}
+      </div>
+      <div class="adm-prod-act" style="display:grid;gap:8px;justify-items:end">
+        <span class="btn-mini">${esc(crmTimeLabel(item.at))}</span>
+        <a class="btn-mini" href="${href}">เปิด</a>
+      </div>
+    </div>
+  </article>`;
+}
+function crmSpotlightPanel(data = {}, labels = {}) {
+  const customer = data.customer || {};
+  const spotlight = data.spotlight || {};
+  const displayName = customer.name || customer.phone || customer.email || 'ลูกค้าไม่ระบุชื่อ';
+  const suggested = asArray(spotlight.suggestedProducts);
+  const activity = asArray(spotlight.recentActivity);
+  const actions = asArray(spotlight.nextActions);
+  return `<section class="dash-card crm-followup-card">
+    <div class="dash-head"><div><h3>ลูกค้าเด่นที่ควรดูตอนนี้</h3><span class="muted">${esc(labels[customer.segment] || customer.segment || 'ลูกค้า')} · ${esc(spotlight.insight || 'สรุปพฤติกรรมล่าสุดจากออเดอร์ แชต และลีด')}</span></div></div>
+    <div class="dash-grid">
+      <div>
+        <div class="crm-name-row" style="margin-bottom:8px"><b>${esc(displayName)}</b><span class="crm-badge seg-${esc(customer.segment || 'visitor')}">${esc(labels[customer.segment] || customer.segment || '')}</span></div>
+        <div class="adm-list">
+          ${actions.length ? actions.map((item) => `<a href="${routeHref(item.href || '/admin/customers')}" class="crm-followup-item ft-${esc(item.type || 'other')}"><span class="crm-followup-icon">${esc(item.icon || '📌')}</span><div class="crm-followup-copy"><b>${esc(item.title)}</b><span>${esc(item.detail)}</span></div><span class="crm-followup-go">จัดการ →</span></a>`).join('') : '<p class="muted">ตอนนี้ยังไม่มีรายการที่ต้องเร่งทันที</p>'}
+        </div>
+      </div>
+      <div>
+        <h3 style="margin:0 0 10px">สินค้าที่ควรเสนอ</h3>
+        ${suggested.length ? `<div class="adm-list">${suggested.map((entry) => {
+          const p = entry.product || entry;
+          return `<a class="adm-prod" href="${routeHref('/admin/products')}"><div class="adm-prod-info"><b>${esc(productCardName(p))}</b><span>${esc(productRecoReasonLabel(entry.reason || p.recoReason || 'catalog'))}</span></div><div class="adm-prod-act"><span class="btn-mini">${baht(effPrice(p))}</span></div></a>`;
+        }).join('')}</div>` : '<p class="muted">ยังไม่มีสินค้าที่ตรงพอสำหรับเสนออัตโนมัติ</p>'}
+        <h3 style="margin:14px 0 10px">สัญญาณล่าสุด</h3>
+        ${activity.length ? `<div class="adm-list">${activity.map((item) => crmActivityCardHTML(item)).join('')}</div>` : '<p class="muted">ยังไม่มี activity ให้แสดง</p>'}
+      </div>
+    </div>
+  </section>`;
+}
 async function viewAdminCustomers() {
   if (!adminGuard()) return loadingView();
   await ensureAdminStoresContext();
@@ -6462,6 +7207,9 @@ async function viewAdminCustomers() {
     api('/api/admin/customers/follow-ups?limit=8').then((r) => r.json()).catch(() => ({ items: [] })),
   ]);
   const customers = asArray(data.customers);
+  const spotlightData = customers[0]?.key
+    ? await api('/api/admin/customers/' + encodeURIComponent(customers[0].key)).then((r) => r.json()).catch(() => null)
+    : null;
   const labels = data.segmentLabels || {};
   const counts = data.segmentCounts || {};
   const segChips = ['all', 'at_risk', 'vip', 'repeat', 'new_customer', 'dormant', 'lead'].map((seg) => {
@@ -6483,6 +7231,7 @@ async function viewAdminCustomers() {
   }
   return adminLayout('customers', `<div class="admin-workspace"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Customer Data Platform</span><h2>CRM ลูกค้า</h2><p class="muted">โปรไฟล์ลูกค้ารวมศูนย์จากออเดอร์ แชต ลีด และสมาชิก — พร้อม segment และคิวติดตามอัตโนมัติ</p></div></div>
     <div class="dash-card crm-followup-card"><div class="dash-head"><h3>คิวติดตามวันนี้</h3><span class="muted">จัดลำดับตามมูลค่าที่เสี่ยงหลุดและความสดของสัญญาณ</span></div>${followUpHtml}</div>
+    ${spotlightData?.customer ? crmSpotlightPanel(spotlightData, labels) : ''}
     <div class="admin-filter-bar">
       <input id="crmSearchInput" class="admin-filter-input" placeholder="ค้นหาชื่อ เบอร์ อีเมล หรือรหัสออเดอร์…" value="${esc(_crmFilter.q)}" autocomplete="off">
       <div class="crm-seg-chips">${segChips}</div>
@@ -6534,6 +7283,13 @@ function productForm(p) {
     <label>คำโปรย (สั้น)<input name="short" value="${e.short || ''}"></label>
     <label>รายละเอียด<textarea name="desc" rows="3">${e.desc || ''}</textarea></label>
     <label>จุดขายบนหน้าเว็บ (บรรทัดละ 1 ข้อ)<textarea name="sellingPoints" rows="3" placeholder="เช่น พร้อมส่ง / เหมาะกับลูกค้าใหม่ / ทีมช่วยแนะนำก่อนซื้อ">${esc(asArray(extra.sellingPoints).join('\n'))}</textarea></label>
+    <div class="pf-grid">
+      <label>คีย์เวิร์ดค้นหา (คั่นด้วย comma)<input name="searchKeywords" value="${esc(asArray(extra.searchKeywords).join(', '))}" placeholder="เช่น ทุเรียน, เร่งใบ, ซื้อซ้ำ"></label>
+      <label>Bundle IDs แนะนำ (คั่นด้วย comma)<input name="bundleIds" value="${esc(productBundleIds(e).join(', '))}" placeholder="เช่น p2, p3"></label>
+      <label>Upsell IDs แนะนำ (คั่นด้วย comma)<input name="upsellIds" value="${esc(productUpsellIds(e).join(', '))}" placeholder="เช่น p4, p5"></label>
+    </div>
+    <label>ตัวเลือกสินค้า / Variant (1 บรรทัดต่อ 1 ตัวเลือก ในรูปแบบ "id :: label :: price :: stock :: key=value, key=value")<textarea name="variants" rows="5" placeholder="size_s :: ไซซ์ S :: 590 :: 12 :: ขนาด=S, สี=ขาว">${esc(serializeVariantRowsForForm(extra.variants))}</textarea></label>
+    <p class="form-note">ถ้าไม่กรอก ระบบจะใช้ราคาและสต็อกหลักของสินค้าแทน แต่ถ้ากรอกแล้วหน้า product, cart, checkout และ order จะอ้างอิงระดับ variant ทันที</p>
     <div class="pf-grid">
       <label>SEO Title<input name="seoTitle" value="${esc(extra.seoTitle || '')}" placeholder="เว้นว่างเพื่อใช้ชื่อสินค้า"></label>
       <label>SEO Description<input name="seoDescription" value="${esc(extra.seoDescription || '')}" placeholder="เว้นว่างเพื่อใช้คำโปรยสินค้า"></label>
@@ -7107,53 +7863,109 @@ function renderStoreSubdomainCheck(state = {}) {
   if (!state?.valid) return `<div class="form-note" style="color:#b42318">Subdomain <code>${esc(subdomain)}</code> ใช้ไม่ได้ ต้องเป็น a-z, 0-9, ขีดกลาง และต้องไม่ชนคำสงวนของระบบ</div>`;
   return `<div class="form-note" style="color:#b42318">Subdomain <code>${esc(subdomain)}</code> ถูกใช้งานแล้ว ลองเปลี่ยนชื่ออีกเล็กน้อย</div>`;
 }
-function renderSelectedStoreSettingsPanel(data = {}) {
+function renderSelectedStoreSettingsPanel(data = {}, qa = {}) {
   const store = data.store || selectedAdminStore();
   const isolated = data.isolated === true || (store && store.isDefault !== true);
   const settings = Object.fromEntries((Array.isArray(data.settings) ? data.settings : []).map((item) => [item.key, item]));
   const value = (key) => String(settings[key]?.value ?? data.site?.[key] ?? '').trim();
-  const field = (key, label, type = 'text', rows = 2) => {
+  const currentMode = value('LINE_CHAT_MODE') || 'line_reply';
+  const webChatPath = value('LINE_WEB_CHAT_PATH') || '/line-room';
+  const health = qa?.health || {};
+  const launchPercent = Math.max(0, Number(qa?.checklist?.percent || 0));
+  const secField = (key, label, type = 'text', rows = 2) => {
     const secret = settings[key]?.secret === true;
     const inherited = settings[key]?.inherited === true;
     const display = String(settings[key]?.display || '').trim();
     const help = inherited
-      ? `<em class="ok">${isolated ? 'ใช้ค่าเริ่มต้นร้านนี้อยู่' : 'ใช้ค่า global อยู่'}</em>`
+      ? `<em class="ok">${isolated ? 'ใช้ค่าเริ่มต้นของร้านนี้อยู่' : 'ใช้ค่า global อยู่'}</em>`
       : '<em class="ok">ตั้งค่าแยกร้านแล้ว</em>';
     if (type === 'area') {
       return `<label class="set-field"><span>${esc(label)} ${help}</span><textarea name="${esc(key)}" rows="${rows}">${esc(value(key))}</textarea></label>`;
     }
     return `<label class="set-field"><span>${esc(label)} ${help}</span><input name="${esc(key)}" ${secret ? 'type="password"' : ''} value="${secret ? '' : esc(value(key))}" placeholder="${secret && display ? esc(display + ' (เว้นว่างไว้ = คงเดิม)') : ''}"></label>`;
   };
-  return `<section class="glass" style="padding:18px;margin-top:18px">
-    <div class="adm-head" style="margin:0 0 10px"><h3>ตั้งค่าร้านที่เลือก: ${esc(store?.name || store?.id || '-')}</h3><span class="muted">ค่าชุดนี้ใช้เฉพาะร้านใน Store Switcher</span></div>
-    <form id="adminStoreSettingsForm" class="set-form" style="padding:0;background:transparent;border:0">
-      <input type="hidden" name="storeId" value="${esc(store?.id || adminSelectedStoreId())}">
-      <div class="pf-grid">
-        ${field('SITE_NAME', 'ชื่อเว็บ / ชื่อร้าน')}
-        ${field('SITE_HERO_TITLE', 'Hero title')}
-        ${field('SITE_HERO_ACCENT', 'Hero accent')}
-        ${field('SITE_HERO_SUB', 'Hero subtitle', 'area', 3)}
-        ${field('SITE_SHARE_TITLE', 'หัวข้อตอนแชร์ลิงก์')}
-        ${field('SITE_SHARE_DESC', 'คำอธิบายตอนแชร์ลิงก์', 'area', 3)}
-        ${field('SITE_SHARE_IMAGE', 'รูปการ์ดแชร์ URL')}
-        ${field('CONTACT_PRIMARY_LABEL', 'ชื่อ / ป้ายเบอร์หลัก')}
-        ${field('CONTACT_PRIMARY_PHONE', 'เบอร์ติดต่อหลัก')}
-        ${field('CONTACT_LINE_ID', 'LINE ID ส่วนตัว')}
-        ${field('CONTACT_LINE_OA_ID', 'LINE OA ID')}
-        ${field('CONTACT_LINE_PERSONAL_URL', 'ลิงก์ LINE ส่วนตัว')}
-        ${field('PROMPTPAY_ID', 'PromptPay ID')}
-        ${field('PROMPTPAY_NAME', 'ชื่อบัญชี PromptPay')}
-        ${field('PUBLIC_URL', 'Public URL ของร้าน')}
-        ${field('LINE_CHANNEL_ACCESS_TOKEN', 'LINE Channel Access Token')}
-        ${field('LINE_CHANNEL_SECRET', 'LINE Channel Secret')}
-        ${field('LINE_ADMIN_USER_ID', 'LINE Admin userId')}
-        ${field('SMTP_HOST', 'SMTP Host')}
-        ${field('SMTP_PORT', 'SMTP Port')}
-        ${field('SMTP_USER', 'SMTP User')}
-        ${field('SMTP_PASS', 'SMTP Password')}
-        ${field('SMTP_FROM', 'SMTP From')}
+  const secBlock = (id, title, desc, fields = []) => `<section class="store-settings-group" id="${esc(id)}">
+    <div class="store-settings-group-head">
+      <div><h4>${esc(title)}</h4><p>${esc(desc || '')}</p></div>
+    </div>
+    <div class="store-settings-group-grid">${fields.join('')}</div>
+  </section>`;
+  const statusCardsNew = `<div class="adm-list store-settings-status-grid">
+    ${diagnosticsMetricCard('Launch QA', diagnosticsHealthBadge(launchPercent >= 85, 'พร้อม', 'ต้องเก็บงานเพิ่ม'), launchPercent ? `${launchPercent}% พร้อมใช้งาน` : 'ยังไม่มีผล Production QA ล่าสุด', store?.publicUrl || data.site?.PUBLIC_URL || '')}
+    ${diagnosticsMetricCard('LINE OA', diagnosticsHealthBadge(Boolean(health.lineConfigured && health.lineWebRoomReady), 'พร้อม', 'ยังไม่พร้อม'), health.lineConfigured ? 'พบ token/secret แล้ว' : 'ยังไม่พบ LINE token หรือ secret', health.lineWebRoomReady ? 'ห้องแชตเว็บพร้อม' : 'ห้องแชตเว็บยังไม่พร้อม')}
+    ${diagnosticsMetricCard('Payment', diagnosticsHealthBadge(Boolean(health.promptpayConfigured || health.stripeConfigured), 'พร้อม', 'ยังไม่พร้อม'), `promptpay ${health.promptpayConfigured ? 'on' : 'off'} · stripe ${health.stripeConfigured ? 'on' : 'off'}`, health.slipokConfigured ? 'SlipOK พร้อม' : 'SlipOK ยังไม่พร้อม')}
+    ${diagnosticsMetricCard('SMTP', diagnosticsHealthBadge(Boolean(health.mailConfigured), 'พร้อม', 'ยังไม่พร้อม'), health.mailConfigured ? 'พร้อมส่งอีเมลระบบ' : 'ยังไม่พบ SMTP ที่ใช้ได้', '')}
+  </div>`;
+  const sectionNav = [
+    ['store-settings-brand', 'แบรนด์'],
+    ['store-settings-share', 'แชร์ลิงก์'],
+    ['store-settings-contact', 'ติดต่อ'],
+    ['store-settings-line', 'LINE / แชต'],
+    ['store-settings-payment', 'การชำระเงิน'],
+    ['store-settings-mail', 'อีเมล'],
+  ];
+  return `<section class="glass store-settings-shell" style="padding:18px;margin-top:18px">
+    <div class="adm-head store-settings-head" style="margin:0 0 10px">
+      <div>
+        <h3>ตั้งค่าร้านที่เลือก: ${esc(store?.name || store?.id || '-')}</h3>
+        <span class="muted">แยกเป็นหมวดจริงเพื่อให้แก้ทีละส่วนได้เร็วขึ้น ลดการไล่ฟอร์มยาวทั้งก้อน</span>
       </div>
-      <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึก settings ร้านนี้</button></div>
+      <span class="status-badge">${isolated ? 'Store Scope' : 'Global Scope'}</span>
+    </div>
+    ${statusCardsNew}
+    <div class="store-settings-toolbar">
+      ${sectionNav.map(([id, label], index) => `<button class="${index === 0 ? 'is-active' : ''}" type="button" data-store-settings-jump="${esc(id)}">${esc(label)}</button>`).join('')}
+    </div>
+    <form id="adminStoreSettingsForm" class="set-form store-settings-form" style="padding:0;background:transparent;border:0">
+      <input type="hidden" name="storeId" value="${esc(store?.id || adminSelectedStoreId())}">
+      <div class="store-settings-groups">
+        ${secBlock('store-settings-brand', 'แบรนด์และหน้าแรก', 'ข้อมูลที่เปลี่ยนภาพรวมของร้านและ hero หน้าแรก', [
+          secField('SITE_NAME', 'ชื่อเว็บไซต์ / ชื่อร้าน'),
+          secField('SITE_HERO_TITLE', 'Hero title'),
+          secField('SITE_HERO_ACCENT', 'Hero accent'),
+          secField('SITE_HERO_SUB', 'Hero subtitle', 'area', 3),
+        ])}
+        ${secBlock('store-settings-share', 'แชร์ลิงก์และ SEO', 'หัวข้อ คำอธิบาย และรูปที่ใช้ตอนแชร์ลิงก์ร้าน', [
+          secField('SITE_SHARE_TITLE', 'หัวข้อตอนแชร์ลิงก์'),
+          secField('SITE_SHARE_IMAGE', 'รูปการ์ดแชร์ URL'),
+          secField('SITE_SHARE_DESC', 'คำอธิบายตอนแชร์ลิงก์', 'area', 3),
+          secField('PUBLIC_URL', 'Public URL ของร้าน'),
+        ])}
+        ${secBlock('store-settings-contact', 'ช่องทางติดต่อ', 'ข้อมูลที่แสดงให้ลูกค้าใช้ติดต่อร้านโดยตรง', [
+          secField('CONTACT_PRIMARY_LABEL', 'ชื่อ / ป้ายเบอร์หลัก'),
+          secField('CONTACT_PRIMARY_PHONE', 'เบอร์ติดต่อหลัก'),
+          secField('CONTACT_LINE_ID', 'LINE ID ส่วนตัว'),
+          secField('CONTACT_LINE_OA_ID', 'LINE OA ID'),
+          secField('CONTACT_LINE_PERSONAL_URL', 'ลิงก์ LINE ส่วนตัว'),
+        ])}
+        ${secBlock('store-settings-line', 'LINE OA และแชตเว็บ', 'โหมดแชต, token และ path ห้องแชตของร้านนี้', [
+          `<label class="set-field"><span>LINE Chat Mode <em class="ok">ใช้เฉพาะร้านนี้</em></span><select name="LINE_CHAT_MODE"><option value="line_reply" ${currentMode === 'line_reply' ? 'selected' : ''}>ตอบกลับใน LINE OA</option><option value="web_room" ${currentMode === 'web_room' ? 'selected' : ''}>คุยต่อในห้องแชตเว็บ</option></select></label>`,
+          `<label class="set-field"><span>LINE Web Chat Path <em class="ok">ลิงก์ปลายทางสำหรับเปิดห้องแชตเว็บ</em></span><input name="LINE_WEB_CHAT_PATH" value="${esc(webChatPath)}" placeholder="/line-room"></label>`,
+          secField('LINE_CHANNEL_ACCESS_TOKEN', 'LINE Channel Access Token'),
+          secField('LINE_CHANNEL_SECRET', 'LINE Channel Secret'),
+          secField('LINE_ADMIN_USER_ID', 'LINE Admin userId'),
+          secField('LINEOA_API_BASE_URL', 'LINE OA Bot API Base URL'),
+          secField('LINEOA_API_CLIENT_ID', 'LINE OA Bot Client ID'),
+          secField('LINEOA_API_SECRET', 'LINE OA Shared Secret'),
+        ])}
+        ${secBlock('store-settings-payment', 'การชำระเงิน', 'PromptPay, Stripe และบริการตรวจสลิปของร้านนี้', [
+          secField('PROMPTPAY_ID', 'PromptPay ID'),
+          secField('PROMPTPAY_NAME', 'ชื่อบัญชี PromptPay'),
+          secField('STRIPE_SECRET_KEY', 'Stripe Secret Key'),
+          secField('STRIPE_WEBHOOK_SECRET', 'Stripe Webhook Secret'),
+          secField('SLIPOK_API_URL', 'SlipOK API URL'),
+          secField('SLIPOK_API_KEY', 'SlipOK API Key'),
+          secField('ORDER_RESERVATION_TTL_MINUTES', 'หมดเวลาชำระ (นาที)'),
+        ])}
+        ${secBlock('store-settings-mail', 'อีเมลระบบ', 'SMTP สำหรับการแจ้งเตือนและการส่งอีเมลจากระบบร้าน', [
+          secField('SMTP_HOST', 'SMTP Host'),
+          secField('SMTP_PORT', 'SMTP Port'),
+          secField('SMTP_USER', 'SMTP User'),
+          secField('SMTP_PASS', 'SMTP Password'),
+          secField('SMTP_FROM', 'SMTP From'),
+        ])}
+      </div>
+      <div class="pf-actions store-settings-actions"><button class="btn btn-primary" type="submit">บันทึก settings ร้านนี้</button><button class="btn btn-glass" type="button" data-storeops="test-line">ทดสอบ LINE ร้านนี้</button><button class="btn btn-glass" type="button" data-storeops="test-line-room">ทดสอบลิงก์ห้องแชต</button><button class="btn btn-glass" type="button" data-storeops="test-mail">ทดสอบอีเมลร้านนี้</button><button class="btn btn-glass" type="button" data-storeops="run-diagnostics-recheck">เช็ก config ใหม่</button><button class="btn btn-glass" type="button" data-storeops="open-diagnostics">เปิด Production QA</button></div>
     </form>
   </section>`;
 }
@@ -7272,6 +8084,7 @@ function renderAdminStoreCreateCard(stores = []) {
       <div><span class="eyebrow">New Store</span><h3>สร้างเว็บไซต์ใหม่</h3></div>
       <span class="status-badge">Wizard</span>
     </div>
+    <p class="form-note store-create-note">เริ่มจากชื่อร้านและ subdomain ก่อน แล้วค่อยไปแต่งรายละเอียดร้านทางฝั่งขวา</p>
     <form id="adminStoreCreateForm" class="set-form store-create-form">
       <div class="store-create-grid">
         <label class="set-field">
@@ -7402,7 +8215,7 @@ async function viewAdminStores() {
     api(`/api/admin/stores/${encodeURIComponent(selectedStoreId)}/roles`).then((res) => res.json()).catch(() => ({})),
     api('/api/admin/production-qa').then((res) => res.json()).catch(() => ({})),
   ]);
-  const selectedStoreSettingsPanel = selectedSettingsRes?.ok ? renderSelectedStoreSettingsPanel(selectedSettingsData) : `<section class="glass" style="padding:18px;margin-top:18px"><b>ตั้งค่าร้านที่เลือก</b><p class="muted">โหลด settings ร้าน ${esc(selectedStoreId)} ไม่สำเร็จ</p></section>`;
+  const selectedStoreSettingsPanel = selectedSettingsRes?.ok ? renderSelectedStoreSettingsPanel(selectedSettingsData, selectedQaData) : `<section class="glass" style="padding:18px;margin-top:18px"><b>ตั้งค่าร้านที่เลือก</b><p class="muted">โหลด settings ร้าน ${esc(selectedStoreId)} ไม่สำเร็จ</p></section>`;
   const selectedReady = adminStoreReadiness(selectedStore);
   const selectedHost = adminStoreHostLabel(selectedStore, rootDomain);
   const qaChecklist = selectedQaData?.checklist || {};
@@ -7415,12 +8228,49 @@ async function viewAdminStores() {
   </div>`;
   const selectedPublicUrl = String(selectedStore?.publicUrl || selectedHealthData?.publicUrl || '').trim();
   const deleteConfirm = selectedStore?.subdomain || selectedStore?.id || '';
-  const selectedActions = `<div class="store-selected-actions">
-    <button class="btn btn-primary" type="button" data-open-site-section="brand">แก้แบรนด์ & ฮีโร่</button>
-    ${selectedPublicUrl ? `<a class="btn btn-primary" href="${esc(selectedPublicUrl)}" target="_blank" rel="noopener">เปิดหน้าเว็บร้าน</a>` : ''}
+  const selectedStatusBadges = `<div class="store-workspace-status">
+    ${storeStatusBadge(selectedStore)}
+    ${selectedStore?.isDefault ? '<span class="status-badge">Main Store</span>' : '<span class="status-badge">Sub Store</span>'}
+    ${selectedReady.databaseReady ? '<span class="status-badge s-paid">Database Ready</span>' : '<span class="status-badge s-awaiting_payment">Database Pending</span>'}
+    ${selectedReady.domainReady ? '<span class="status-badge s-paid">Domain Ready</span>' : '<span class="status-badge s-awaiting_payment">Domain Pending</span>'}
+  </div>`;
+  const selectedMeta = `<div class="store-workspace-meta">
+    <small>storeId: ${esc(selectedStore?.id || selectedStoreId)}</small>
+    ${selectedReady.database?.databaseKey ? `<small>database: ${esc(selectedReady.database.databaseKey)}</small>` : ''}
+    ${selectedReady.primaryDomain?.host ? `<small>domain: ${esc(selectedReady.primaryDomain.host)}</small>` : ''}
+    ${selectedStore?.subdomain ? `<small>subdomain: ${esc(selectedStore.subdomain)}</small>` : '<small>main store</small>'}
+  </div>`;
+  const selectedActions = `<div class="store-workspace-actions">
+    <button class="btn btn-primary" type="button" data-store-panel-target="store-settings">แก้ settings ร้านนี้</button>
+    <button class="btn btn-glass" type="button" data-store-panel-target="store-launch">เช็ก Launch</button>
+    ${selectedPublicUrl ? `<a class="btn btn-glass" href="${esc(selectedPublicUrl)}" target="_blank" rel="noopener">เปิดหน้าเว็บร้าน</a>` : ''}
     ${selectedPublicUrl ? `<button class="btn btn-glass" type="button" data-copystoreurl="${esc(selectedPublicUrl)}">คัดลอก URL</button>` : ''}
+    <button class="btn btn-glass" type="button" data-storeops="open-diagnostics">Production QA</button>
+    <button class="btn btn-glass" type="button" data-storeops="run-diagnostics-recheck">เช็ก config ใหม่</button>
     ${selectedStore?.id && selectedStore?.subdomain ? `<button class="btn btn-glass" type="button" data-provisionstore="${esc(selectedStore.id)}">Retry Domain</button>` : ''}
     ${selectedStore?.id && !selectedStore?.isDefault ? `<button class="btn btn-glass store-delete-btn" type="button" data-deletestore="${esc(selectedStore.id)}" data-deletestore-name="${esc(selectedStore.name || selectedStore.id)}" data-deletestore-confirm="${esc(deleteConfirm)}">ลบร้าน</button>` : ''}
+  </div>`;
+  const selectedSummaryCards = `<div class="store-selected-summary">
+    <article class="store-summary-card">
+      <span>โดเมนหลัก</span>
+      <b>${esc(selectedReady.primaryDomain?.host || selectedHost || '-')}</b>
+      <small>${selectedReady.domainReady ? 'พร้อมใช้งานแล้ว' : 'รอตรวจ DNS / SSL'}</small>
+    </article>
+    <article class="store-summary-card">
+      <span>ฐานข้อมูล</span>
+      <b>${esc(selectedReady.database?.databaseKey || selectedStore?.id || '-')}</b>
+      <small>${selectedReady.databaseReady ? 'database พร้อม' : 'กำลังเตรียม namespace'}</small>
+    </article>
+    <article class="store-summary-card">
+      <span>Launch score</span>
+      <b>${launchPercent ? `${launchPercent}%` : 'ยังไม่มี'}</b>
+      <small>${selectedReady.domainReady ? 'พร้อมเช็ก production QA ต่อ' : 'แนะนำเริ่มที่โดเมนก่อน'}</small>
+    </article>
+    <article class="store-summary-card">
+      <span>โหมดจัดการ</span>
+      <b>${selectedStore?.isDefault ? 'Main Store' : 'Store Scope'}</b>
+      <small>${selectedStore?.isDefault ? 'แกนกลางของระบบหลายเว็บไซต์' : 'แยกค่า config เป็นรายร้าน'}</small>
+    </article>
   </div>`;
   return adminLayout('stores', `<div class="admin-workspace admin-stores-ui store-manager-ui">
     <div class="adm-head admin-lux-head store-manager-head">
@@ -7430,35 +8280,30 @@ async function viewAdminStores() {
     ${quickCards}
     <div class="store-manager-shell">
       <aside class="store-manager-rail">
-        ${renderAdminStoreCreateCard(stores)}
-        <section class="store-quick-card">
+        <section class="store-quick-card store-directory-card">
           <div class="store-card-head"><div><span class="eyebrow">Store List</span><h3>เลือกร้านเพื่อแก้ไข</h3></div><span class="status-badge">${stores.length}</span></div>
           ${renderAdminStoreList(stores, rootDomain, selectedStoreId)}
         </section>
+        ${renderAdminStoreCreateCard(stores)}
       </aside>
       <main class="store-manager-detail">
-        <section class="store-selected-card">
-          <div class="store-selected-main">
-            <span class="eyebrow">Selected Website</span>
-            <h3>${esc(selectedStore?.name || selectedStoreId)}</h3>
-            <p>${esc(selectedHost)}</p>
-            <div class="meta-row">
-              <small>storeId: ${esc(selectedStore?.id || selectedStoreId)}</small>
-              ${selectedReady.database?.databaseKey ? `<small>database: ${esc(selectedReady.database.databaseKey)}</small>` : ''}
-              ${selectedReady.primaryDomain?.host ? `<small>domain: ${esc(selectedReady.primaryDomain.host)}</small>` : ''}
+        <section class="store-workspace-head">
+          <div class="store-workspace-top">
+            <div class="store-workspace-title">
+              <span class="eyebrow">Selected Website</span>
+              <h3>${esc(selectedStore?.name || selectedStoreId)}</h3>
+              <p>${esc(selectedHost)}</p>
             </div>
+            ${selectedActions}
           </div>
-          <div class="store-selected-status">
-            ${storeStatusBadge(selectedStore)}
-            ${selectedReady.databaseReady ? '<span class="status-badge s-paid">Database Ready</span>' : '<span class="status-badge s-awaiting_payment">Database Pending</span>'}
-            ${selectedReady.domainReady ? '<span class="status-badge s-paid">Domain Ready</span>' : '<span class="status-badge s-awaiting_payment">Domain Pending</span>'}
-          </div>
-          ${selectedActions}
+          ${selectedStatusBadges}
+          ${selectedMeta}
+          ${selectedSummaryCards}
         </section>
         <div class="store-work-tabs" aria-label="Store edit sections">
+          <button class="is-active" type="button" data-store-panel-target="store-settings">Brand & API</button>
           <button type="button" data-store-panel-target="store-launch">Checklist</button>
           <button type="button" data-store-panel-target="store-domain">Domain</button>
-          <button type="button" data-store-panel-target="store-settings">Brand & API</button>
           <button type="button" data-store-panel-target="store-roles">Permission</button>
           <button type="button" data-store-panel-target="store-backup">Backup</button>
         </div>
@@ -8557,7 +9402,7 @@ async function viewAdminOrderDetail({ id }) {
   if (!adminGuard()) return loadingView();
   const o = await (await api('/api/admin/orders/' + encodeURIComponent(id))).json();
   if (!o || o.error) return adminLayout('orders', `<a class="back" href="${routeHref('/admin/orders')}">← กลับ</a><p class="muted">ไม่พบคำสั่งซื้อ</p>`);
-  const items = o.items.map((it) => `<div class="sum-row"><span>${it.name} <em>×${it.qty}</em></span><b>${baht(it.price * it.qty)}</b></div>`).join('');
+  const items = o.items.map((it) => `<div class="sum-row"><span>${esc(orderItemLabel(it))} <em>×${it.qty}</em></span><b>${baht(it.price * it.qty)}</b></div>`).join('');
   const acct = o.account ? `${o.account.name || '-'} (${o.account.email})` : 'ลูกค้าทั่วไป (ไม่ได้ล็อกอิน)';
   const trackVal = o.tracking || '';
   return adminLayout('orders', `
@@ -8597,7 +9442,9 @@ async function viewAdminOrderDetail({ id }) {
         <button class="btn-mini" data-oaction="delivered" data-oid="${o.id}">สำเร็จ</button>
         <button class="btn-mini danger" data-oaction="cancelled" data-oid="${o.id}">ยกเลิก</button>
       </div>
-    </div>`);
+    </div>
+    ${orderSupportActionsHTML(o, { admin: true })}
+    ${orderSupportTimelineHTML(o.support)}`);
 }
 
 let _lineRoomEntryState = { token: '', ok: false, error: '', sessionId: '', lineUserId: '', customerName: '' };
@@ -8759,9 +9606,32 @@ function startOrderPoll(id, initial) {
     if (j !== prev) { prev = j; app.innerHTML = renderOrderHTML(o); enhance(); }
   }, 5000);
 }
+let adminOpsRefreshTimer = null;
+function clearAdminOpsRefresh() {
+  if (adminOpsRefreshTimer) {
+    clearInterval(adminOpsRefreshTimer);
+    adminOpsRefreshTimer = null;
+  }
+}
+function syncAdminOpsRefresh(path = currentPath()) {
+  clearAdminOpsRefresh();
+  if (!['/admin', '/admin/diagnostics'].includes(path)) return;
+  const intervalMs = path === '/admin/diagnostics' ? 45000 : 30000;
+  adminOpsRefreshTimer = setInterval(() => {
+    if (currentPath() !== path) {
+      clearAdminOpsRefresh();
+      return;
+    }
+    if (document.hidden) return;
+    const activeTag = String(document.activeElement?.tagName || '').toUpperCase();
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag)) return;
+    render().catch(() => {});
+  }, intervalMs);
+}
 
 async function render() {
   clearOrderPoll();
+  clearAdminOpsRefresh();
   clearAdminInboxPoll();
   const path = currentPath();
   if (!canAccessAdminInboxClient(currentUser)) {
@@ -8818,6 +9688,7 @@ async function render() {
     }, 40);
   }
   if (canAccessAdminInboxClient(currentUser)) initAdminInboxLive();
+  syncAdminOpsRefresh(path);
   trackPageView(path, document.title);
   if (path === '/checkout' && !markTracked('checkout:' + cartCount() + ':' + cartTotal())) trackEvent('begin_checkout', { value: cartTotal(), currency: 'THB', items: [...cart.entries()].length });
   requestAnimationFrame(() => app.classList.add('view-in'));
@@ -8981,6 +9852,31 @@ document.body.addEventListener('click', (e) => {
     render();
     return;
   }
+  const detailVariantBtn = e.target.closest('[data-detail-variant]');
+  if (detailVariantBtn) {
+    e.preventDefault();
+    if (detailVariantBtn.classList.contains('is-disabled')) return;
+    _detailSelectedVariantId = String(detailVariantBtn.dataset.detailVariant || '').trim();
+    syncDetailVariantUI();
+    return;
+  }
+  const orderSupportBtn = e.target.closest('[data-order-support]');
+  if (orderSupportBtn) {
+    e.preventDefault();
+    const orderId = String(orderSupportBtn.dataset.orderSupport || '').trim();
+    const type = String(orderSupportBtn.dataset.supportType || 'return').trim();
+    openOrderSupportModal(clientOrders.get(orderId) || { id: orderId }, type);
+    return;
+  }
+  const adminSupportBtn = e.target.closest('[data-admin-support]');
+  if (adminSupportBtn) {
+    e.preventDefault();
+    const orderId = String(adminSupportBtn.dataset.adminSupport || '').trim();
+    const type = String(adminSupportBtn.dataset.supportType || 'return').trim();
+    const status = String(adminSupportBtn.dataset.supportStatus || 'approved').trim();
+    openAdminSupportModal(clientOrders.get(orderId) || { id: orderId }, type, status);
+    return;
+  }
   const t = e.target.closest('[data-add],[data-inc],[data-dec],[data-qi],[data-qd],[data-addqty],[data-buynow],[data-notifypay]');
   if (!t) return;
   const d = t.dataset;
@@ -8991,8 +9887,15 @@ document.body.addEventListener('click', (e) => {
     t.textContent = 'เพิ่มแล้ว ✓'; t.classList.add('added');
     setTimeout(() => { t.textContent = 'เพิ่ม +'; t.classList.remove('added'); }, 1000);
   }
-  if (d.inc) { addToCart(d.inc, 1); }
-  if (d.dec) { const q = (Number(cart.get(d.dec)) || 0) - 1; if (q <= 0) cart.delete(d.dec); else cart.set(d.dec, q); saveCart(); renderCart(); }
+  if (d.inc) {
+    const entry = parseCartKey(d.inc);
+    addToCart(entry.id, 1, { variantId: entry.variantId, redirectOnMissingVariant: false });
+  }
+  if (d.dec) {
+    const q = (Number(cart.get(d.dec)) || 0) - 1;
+    if (q <= 0) cart.delete(d.dec); else cart.set(d.dec, q);
+    saveCart(); renderCart();
+  }
 
   // หน้า detail: ปุ่มจำนวน
   if (d.qi !== undefined || d.qd !== undefined) {
@@ -9003,11 +9906,11 @@ document.body.addEventListener('click', (e) => {
   }
   if (d.addqty) {
     const n = parseInt(document.getElementById('detailQty')?.textContent, 10) || 1;
-    addToCart(d.addqty, n); openCart();
+    if (addToCart(d.addqty, n, { variantId: detailActiveVariant()?.id || '' })) openCart();
   }
   if (d.buynow) {
     const n = parseInt(document.getElementById('detailQty')?.textContent, 10) || 1;
-    addToCart(d.buynow, n); go('/checkout');
+    if (addToCart(d.buynow, n, { variantId: detailActiveVariant()?.id || '' })) go('/checkout');
   }
   if (d.notifypay) {
     t.disabled = true; t.textContent = 'กำลังแจ้ง…';
@@ -9134,6 +10037,56 @@ document.body.addEventListener('submit', async (e) => {
     }
     return;
   }
+  if (e.target.id === 'supportRequestForm') {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    const mode = String(form.dataset.supportForm || 'customer').trim();
+    const orderId = String(form.dataset.orderId || '').trim();
+    const type = String(form.dataset.supportType || 'return').trim();
+    const status = String(form.dataset.supportStatus || 'approved').trim();
+    const submitBtn = document.querySelector('#supportRequestModal button[type=submit][form="supportRequestForm"]');
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'กำลังบันทึก...'; }
+    try {
+      const attachments = await collectSupportAttachmentPayloads(form.querySelector('input[name="attachments"]')?.files, { maxFiles: 2 });
+      if (mode === 'admin') {
+        const payload = buildAdminSupportPayload(fd);
+        const r = await api(`/api/admin/orders/${encodeURIComponent(orderId)}/support`, {
+          method: 'POST',
+          body: JSON.stringify({ type, status, ...payload, attachments }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'อัปเดตคำขอไม่สำเร็จ');
+        closeSupportModal();
+        toast('อัปเดตงานคืนสินค้า/คืนเงินแล้ว', 'ok');
+        const fresh = data.order || await fetchOrder(orderId);
+        if (fresh) clientOrders.set(fresh.id, fresh);
+        if (currentPath() === `/admin/order/${orderId}`) render();
+      } else {
+        const payload = buildCustomerSupportPayload(fd);
+        if (!payload.reason.trim()) throw new Error(`กรุณาระบุเหตุผลที่ต้องการขอ${supportTypeLabel(type)}`);
+        const r = await api(`/api/orders/${encodeURIComponent(orderId)}/support${orderAccessQuery(orderId)}`, {
+          method: 'POST',
+          body: JSON.stringify({ type, ...payload, attachments }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'ส่งคำขอไม่สำเร็จ');
+        closeSupportModal();
+        const order = data.order || await fetchOrder(orderId);
+        if (order) {
+          clientOrders.set(order.id, order);
+          app.innerHTML = renderOrderHTML(order);
+          enhance();
+          startOrderPoll(order.id, order);
+        }
+        toast(type === 'refund' ? 'ส่งคำขอคืนเงินแล้ว' : 'ส่งคำขอคืนสินค้าแล้ว', 'ok');
+      }
+    } catch (err) {
+      toast(err.message || 'บันทึกคำขอไม่สำเร็จ', 'err');
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = mode === 'admin' ? 'บันทึกสถานะ' : `ส่งคำขอ${supportTypeLabel(type)}`; }
+    }
+    return;
+  }
   if (e.target.id !== 'checkoutForm') return;
   e.preventDefault();
   const form = e.target;
@@ -9147,7 +10100,10 @@ document.body.addEventListener('submit', async (e) => {
     country: (fd.get('country') || '').trim(),
     note: (fd.get('note') || '').trim(),
   };
-  const items = [...cart.entries()].map(([id, qty]) => ({ id, qty: Number(qty) }));
+  const items = [...cart.entries()].map(([rawKey, qty]) => {
+    const entry = parseCartKey(rawKey);
+    return { id: entry.id, variantId: entry.variantId, qty: Number(qty) };
+  }).filter((item) => item.id);
   const btn = form.querySelector('button[type=submit]');
   btn.disabled = true; btn.textContent = 'กำลังดำเนินการ…';
   try {
@@ -9190,6 +10146,10 @@ async function submitProductForm(form) {
     sellingPoints: splitLines(fd.get('sellingPoints')),
     seoTitle: (fd.get('seoTitle') || '').trim(),
     seoDescription: (fd.get('seoDescription') || '').trim(),
+    searchKeywords: splitCsv(fd.get('searchKeywords')),
+    bundleIds: splitCsv(fd.get('bundleIds')),
+    upsellIds: splitCsv(fd.get('upsellIds')),
+    variants: parseVariantRowsFromForm(fd.get('variants')),
     salePrice: parseInt(fd.get('salePrice') || '0', 10) || 0,
     registrationNo: (fd.get('registrationNo') || '').trim(),
     cropTargets: splitCsv(fd.get('cropTargets')),
@@ -9520,8 +10480,10 @@ document.body.addEventListener('click', async (e) => {
     const r = await api('/api/admin/reviews', { method: 'PUT', body: JSON.stringify({ items: collectAdminReviewGalleryItems() }) });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || 'บันทึก caption รีวิวไม่สำเร็จ');
+    const scopeKey = currentSiteScopeKey();
     REVIEW_GALLERY = [];
-    reviewGalleryPromise = null;
+    REVIEW_GALLERY_BY_SCOPE.delete(scopeKey);
+    REVIEW_GALLERY_PROMISE_BY_SCOPE.delete(scopeKey);
     toast('บันทึก caption รีวิวแล้ว', 'ok');
     render();
   } catch (err) {
@@ -10438,12 +11400,12 @@ document.body.addEventListener('click', async (e) => {
     e.stopPropagation();
     const action = String(growthApply.dataset.growthAction || '').trim();
     const actionId = String(growthApply.dataset.growthId || '').trim();
-    const label = String(growthApply.dataset.growthLabel || 'AI Growth action').trim();
+    const label = String(growthApply.dataset.growthLabel || 'คำสั่งแนะนำ AI').trim();
     const ok = await confirmDialog({
-      title: 'Confirm AI Growth action',
-      message: `Apply "${label}" for the currently selected store? The system will only perform the safe first step and will not send messages to customers automatically.`,
-      confirmText: 'Apply action',
-      cancelText: 'Review first',
+      title: 'ยืนยันให้ AI ลงมือทำขั้นแรก',
+      message: `ให้ระบบทำรายการ "${label}" กับร้านที่เลือกอยู่ตอนนี้หรือไม่ ระบบจะทำเฉพาะขั้นแรกที่ปลอดภัย และจะยังไม่ส่งข้อความหาลูกค้าอัตโนมัติ`,
+      confirmText: 'ยืนยันให้ทำ',
+      cancelText: 'ขอดูก่อน',
       tone: 'info',
     });
     if (!ok) return;
@@ -10451,26 +11413,26 @@ document.body.addEventListener('click', async (e) => {
     try {
       if (action === 'pin-product') {
         const productId = String(growthApply.dataset.growthProduct || '').trim();
-        if (!productId) throw new Error('Missing product id');
+        if (!productId) throw new Error('ไม่พบรหัสสินค้า');
         const products = await (await api('/api/admin/products')).json();
         const product = asArray(products).find((item) => String(item.id || '') === productId);
-        if (!product) throw new Error('Product not found');
+        if (!product) throw new Error('ไม่พบสินค้า');
         const extra = { ...(product.extra || {}) };
-        extra.marketingBadge = extra.marketingBadge || 'Recommended';
+        extra.marketingBadge = extra.marketingBadge || 'สินค้าแนะนำ';
         const r = await api('/api/admin/products/' + encodeURIComponent(productId), {
           method: 'PUT',
           body: JSON.stringify({
             active: true,
             sort: -999,
-            tag: product.tag || 'Recommended',
+            tag: product.tag || 'สินค้าแนะนำ',
             extra,
           }),
         });
         const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || 'Pin product failed');
+        if (!r.ok) throw new Error(d.error || 'ปักสินค้าแนะนำไม่สำเร็จ');
         await refreshProductsCache();
         setGrowthActionDone(actionId);
-        toast('Pinned recommended product', 'ok');
+        toast('ปักสินค้าแนะนำเรียบร้อยแล้ว', 'ok');
         render();
         return;
       }
@@ -10483,9 +11445,9 @@ document.body.addEventListener('click', async (e) => {
           body: JSON.stringify({ code, type: 'percent', value, minTotal, maxUses: 50, active: true }),
         });
         const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || 'Create coupon failed');
+        if (!r.ok) throw new Error(d.error || 'สร้างคูปองไม่สำเร็จ');
         setGrowthActionDone(actionId);
-        toast(`Created coupon ${code}`, 'ok');
+        toast(`สร้างคูปอง ${code} เรียบร้อยแล้ว`, 'ok');
         go('/admin/coupons');
         return;
       }
@@ -10510,12 +11472,69 @@ document.body.addEventListener('click', async (e) => {
         go('/admin/site');
         return;
       }
+      if (action === 'open-stores') {
+        setGrowthActionDone(actionId);
+        go('/admin/stores');
+        return;
+      }
+      if (action === 'open-diagnostics') {
+        setGrowthActionDone(actionId);
+        go('/admin/diagnostics');
+        return;
+      }
       setGrowthActionDone(actionId);
-      toast('Marked as done', 'ok');
+      toast('บันทึกสถานะเรียบร้อยแล้ว', 'ok');
       render();
     } catch (err) {
-      toast(err.message || 'AI Growth action failed', 'err');
+      toast(err.message || 'AI ทำรายการนี้ไม่สำเร็จ', 'err');
       growthApply.disabled = false;
+    }
+    return;
+  }
+  const storeOpsBtn = e.target.closest('[data-storeops]');
+  if (storeOpsBtn) {
+    e.preventDefault();
+    const op = String(storeOpsBtn.dataset.storeops || '').trim();
+    storeOpsBtn.disabled = true;
+    try {
+      if (op === 'open-diagnostics') {
+        go('/admin/diagnostics');
+        return;
+      }
+      if (op === 'test-line') {
+        const r = await api('/api/admin/test-line', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'ส่งข้อความทดสอบไม่สำเร็จ');
+        toast('ส่งข้อความทดสอบ LINE ร้านนี้แล้ว', 'ok');
+        return;
+      }
+      if (op === 'test-line-room') {
+        const r = await api('/api/admin/test-line-room', { method: 'POST', body: JSON.stringify({}) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'ทดสอบลิงก์ห้องแชตไม่สำเร็จ');
+        toast('ลิงก์ห้องแชตร้านนี้พร้อมใช้งาน', 'ok');
+        if (d.entryUrl) window.open(d.entryUrl, '_blank', 'noopener');
+        return;
+      }
+      if (op === 'test-mail') {
+        const r = await api('/api/admin/test-mail', { method: 'POST', body: JSON.stringify({}) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'ส่งอีเมลทดสอบไม่สำเร็จ');
+        toast('ส่งอีเมลทดสอบร้านนี้แล้ว', 'ok');
+        return;
+      }
+      if (op === 'run-diagnostics-recheck') {
+        const r = await api('/api/admin/diagnostics/recheck', { method: 'POST', body: JSON.stringify({}) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 're-check ไม่สำเร็จ');
+        toast('เช็ก config ใหม่แล้ว', 'ok');
+        await render();
+        return;
+      }
+      toast('ยังไม่รองรับคำสั่งนี้', 'err');
+    } catch (err) {
+      toast(err.message || 'ทำรายการไม่สำเร็จ', 'err');
+      storeOpsBtn.disabled = false;
     }
     return;
   }
@@ -10596,6 +11615,19 @@ document.body.addEventListener('click', async (e) => {
     const section = String(openSiteSectionBtn.dataset.openSiteSection || 'brand').trim() || 'brand';
     try { localStorage.setItem(SITE_ADMIN_ACTIVE_SECTION_KEY, section); } catch {}
     go('/admin/site');
+    return;
+  }
+  const storeSettingsJumpBtn = e.target.closest('[data-store-settings-jump]');
+  if (storeSettingsJumpBtn) {
+    e.preventDefault();
+    const targetId = String(storeSettingsJumpBtn.dataset.storeSettingsJump || '').trim();
+    const target = targetId ? document.getElementById(targetId) : null;
+    if (!target) return;
+    document.querySelectorAll('[data-store-settings-jump]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn === storeSettingsJumpBtn);
+    });
+    const top = Math.max(0, target.getBoundingClientRect().top + window.scrollY - 210);
+    window.scrollTo({ top, behavior: 'smooth' });
     return;
   }
   const storePickBtn = e.target.closest('[data-admin-store-pick]');
@@ -11570,6 +12602,9 @@ document.body.addEventListener('click', (e) => {
   const q = e.target.closest('[data-quick]');
   if (q) { e.preventDefault(); e.stopPropagation(); openQuickView(q.dataset.quick); return; }
   if (e.target.closest('[data-qvclose]') || e.target.id === 'quickModal') { closeQuickView(); return; }
+  if (e.target.closest('[data-support-close]')) { e.preventDefault(); closeSupportModal(); return; }
+  if (e.target.closest('.confirm-card')) return;
+  if (e.target.id === 'supportRequestModal') { closeSupportModal(); return; }
   const z = e.target.closest('[data-zoom]');
   if (z) { e.preventDefault(); openLightbox(z); return; }
   const lbClose = e.target.closest('.lb-close');
@@ -11583,7 +12618,7 @@ document.body.addEventListener('click', (e) => {
   if (e.target.closest('[data-add]')) closeQuickView();
 });
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { closeMobileNav(); closeQuickView(); closeLightbox(); closeImageCropper(null); }
+  if (e.key === 'Escape') { closeMobileNav(); closeQuickView(); closeLightbox(); closeImageCropper(null); closeSupportModal(); }
   if (e.key === 'ArrowRight' && document.getElementById('lightbox')?.classList.contains('show')) moveLightbox(1);
   if (e.key === 'ArrowLeft' && document.getElementById('lightbox')?.classList.contains('show')) moveLightbox(-1);
 });

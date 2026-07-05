@@ -60,7 +60,7 @@ import { isSupabaseConfigured, supabaseEnv, uploadPublicAsset } from './supabase
 import { verifyBridgeRequest } from './lineoa-bridge.js';
 import { createOrderService } from './order-service.js';
 import { DEFAULT_ARTICLES } from './default-articles.js';
-import { buildCustomerProfiles, buildFollowUps, buildProductRecommendations, CRM_SEGMENT_LABELS } from './crm.js';
+import { buildCustomerProfiles, buildFollowUps, buildProductRecommendations, buildCustomerSpotlight, CRM_SEGMENT_LABELS } from './crm.js';
 import { createLineRuntime } from './lineoa-runtime.js';
 import { extractRequestHost, normalizeRequestedSubdomain, isValidStoreSubdomain, buildStoreId, rootDomainFromPublicUrl, buildStorePublicUrl, buildStoreBootstrapSettings } from './store-tenant.js';
 import { getVercelDomainConfig, provisionVercelProjectDomain, removeVercelProjectDomain, vercelDomainAutomationConfigured } from './vercel-domains.js';
@@ -2004,8 +2004,168 @@ function canAccessOrder(req, order) {
 }
 function clientOrder(order) {
   if (!order) return null;
-  const { accessToken, ...rest } = order;
-  return rest;
+  const { accessToken, customer, ...rest } = order;
+  const safeCustomer = safeObject(customer);
+  delete safeCustomer._ops;
+  return { ...rest, customer: safeCustomer, support: extractOrderSupportState(order) };
+}
+function extractOrderSupportState(order = {}) {
+  const ops = safeObject(order?.customer?._ops);
+  const timeline = Array.isArray(ops.timeline)
+    ? ops.timeline
+      .filter((item) => item && typeof item === 'object' && Number(item.at || 0))
+      .map((item) => ({
+        type: String(item.type || 'activity').trim(),
+        supportType: String(item.supportType || '').trim(),
+        title: String(item.title || '').trim(),
+        detail: String(item.detail || '').trim(),
+        status: String(item.status || '').trim(),
+        actor: String(item.actor || '').trim(),
+        at: Number(item.at || 0),
+        attachments: normalizeSupportAttachments(item.attachments),
+      }))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 20)
+    : [];
+  const sanitizeRequest = (type = 'return', value = {}) => {
+    const raw = safeObject(value);
+    if (!raw.status && !raw.reason && !raw.note && !raw.adminNote && !raw.updatedAt && !raw.requestedAt) return null;
+    const status = normalizeSupportStatus(type, raw.status || 'requested');
+    return {
+      type,
+      status,
+      reason: String(raw.reason || '').trim(),
+      note: String(raw.note || '').trim(),
+      adminNote: String(raw.adminNote || '').trim(),
+      requestedAt: Number(raw.requestedAt || raw.at || 0) || 0,
+      updatedAt: Number(raw.updatedAt || raw.requestedAt || raw.at || 0) || 0,
+      updatedBy: String(raw.updatedBy || '').trim(),
+      attachments: normalizeSupportAttachments(raw.attachments),
+      progress: orderSupportProgress(type, status),
+    };
+  };
+  return {
+    timeline,
+    returnRequest: sanitizeRequest('return', ops.returnRequest),
+    refundRequest: sanitizeRequest('refund', ops.refundRequest),
+  };
+}
+async function patchOrderSupportState(orderId, mutator) {
+  const current = await getOrder(orderId);
+  if (!current) return null;
+  const customer = safeObject(current.customer);
+  const ops = safeObject(customer._ops);
+  const nextOps = mutator({
+    ...ops,
+    timeline: Array.isArray(ops.timeline) ? [...ops.timeline] : [],
+    returnRequest: safeObject(ops.returnRequest),
+    refundRequest: safeObject(ops.refundRequest),
+  });
+  return updateOrder(orderId, {
+    customer: {
+      ...customer,
+      _ops: nextOps,
+    },
+  });
+}
+async function appendOrderTimeline(orderId, entry = {}) {
+  return patchOrderSupportState(orderId, (ops) => {
+    ops.timeline.push({
+      type: String(entry.type || 'activity').trim(),
+      supportType: String(entry.supportType || '').trim(),
+      title: String(entry.title || '').trim(),
+      detail: String(entry.detail || '').trim(),
+      status: String(entry.status || '').trim(),
+      actor: String(entry.actor || 'system').trim(),
+      at: Number(entry.at || Date.now()) || Date.now(),
+      attachments: normalizeSupportAttachments(entry.attachments),
+    });
+    ops.timeline = ops.timeline
+      .filter((item) => item && item.title)
+      .sort((a, b) => Number(a.at || 0) - Number(b.at || 0))
+      .slice(-30);
+    return ops;
+  });
+}
+async function updateOrderSupportRequest(orderId, type = 'return', patch = {}, timelineEntry = null) {
+  const key = type === 'refund' ? 'refundRequest' : 'returnRequest';
+  let updated = await patchOrderSupportState(orderId, (ops) => {
+    const current = safeObject(ops[key]);
+    ops[key] = {
+      ...current,
+      ...safeObject(patch),
+      type,
+      status: normalizeSupportStatus(type, patch.status || current.status || 'requested'),
+      attachments: mergeSupportAttachments(current.attachments, patch.attachments),
+      updatedAt: Number(patch.updatedAt || Date.now()) || Date.now(),
+    };
+    return ops;
+  });
+  if (timelineEntry) updated = await appendOrderTimeline(orderId, {
+    ...timelineEntry,
+    supportType: type,
+    status: timelineEntry.status ? normalizeSupportStatus(type, timelineEntry.status) : '',
+    attachments: normalizeSupportAttachments(timelineEntry.attachments),
+  }) || updated;
+  return updated;
+}
+function orderSupportTypeLabel(type = 'return') {
+  return String(type || '').trim() === 'refund' ? 'คืนเงิน' : 'คืนสินค้า';
+}
+function orderSupportStatusFlow(type = 'return') {
+  return type === 'refund'
+    ? ['requested', 'approved', 'in_transit', 'received', 'refunded', 'closed']
+    : ['requested', 'approved', 'in_transit', 'received', 'closed'];
+}
+function normalizeSupportAttachments(value = []) {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => ({
+      name: String(item?.name || '').trim().slice(0, 120),
+      type: String(item?.type || '').trim().slice(0, 120),
+      url: String(item?.url || '').trim(),
+    }))
+    .filter((item) => item.url);
+}
+function mergeSupportAttachments(...groups) {
+  const seen = new Set();
+  const merged = [];
+  for (const item of groups.flatMap((group) => normalizeSupportAttachments(group))) {
+    if (!item.url || seen.has(item.url)) continue;
+    seen.add(item.url);
+    merged.push(item);
+  }
+  return merged.slice(0, 8);
+}
+function normalizeSupportStatus(type = 'return', status = '') {
+  const normalized = String(status || '').trim() || 'requested';
+  const allowed = new Set([...orderSupportStatusFlow(type), 'rejected']);
+  return allowed.has(normalized) ? normalized : 'requested';
+}
+function orderSupportProgress(type = 'return', status = '') {
+  const steps = orderSupportStatusFlow(type);
+  const normalized = normalizeSupportStatus(type, status);
+  const currentIndex = steps.indexOf(normalized);
+  return {
+    current: normalized,
+    steps: steps.map((key, index) => ({
+      key,
+      label: orderSupportStatusLabel(key),
+      done: currentIndex >= index,
+      current: currentIndex === index,
+    })),
+    terminal: ['rejected', 'refunded', 'closed'].includes(normalized),
+  };
+}
+function orderSupportStatusLabel(status = '') {
+  return ({
+    requested: 'รอทีมตรวจสอบ',
+    approved: 'อนุมัติแล้ว',
+    in_transit: 'อยู่ระหว่างส่งคืน',
+    rejected: 'ไม่อนุมัติ',
+    received: 'รับสินค้าคืนแล้ว',
+    refunded: 'คืนเงินแล้ว',
+    closed: 'ปิดเคสแล้ว',
+  }[String(status || '').trim()] || String(status || '').trim() || 'อัปเดตสถานะ');
 }
 function summarizeOrderLineQty(item = {}) {
   const qty = parseInt(item?.qty, 10) || 0;
@@ -2235,6 +2395,14 @@ async function applyOrderAction(id, action, tracking = '') {
     await releaseOrderResources({ items: prev.items, coupon: prev.coupon || '' });
     o = await updateOrder(id, { resources_reserved: false }) || o;
   }
+  o = await appendOrderTimeline(id, {
+    type: 'order_status',
+    title: `อัปเดตสถานะเป็น ${STATUS_LABEL[o.status] || o.status}`,
+    detail: tracking ? `เลขพัสดุ ${tracking}` : a.note,
+    status: o.status,
+    actor: 'admin',
+  }) || o;
+  o = await getOrder(id) || o;
   await notifyCustomer(o, `[ออเดอร์ ${id}] ${a.note}`);
   if (o.customer.email) await sendMail(o.customer.email, `อัปเดตออเดอร์ ${id} · ${STATUS_LABEL[o.status]}`, orderEmailHTML(o, `อัปเดตสถานะ: ${STATUS_LABEL[o.status]}`));
   return o;
@@ -3547,29 +3715,94 @@ app.get('/api/products', async (req, res) => {
     return { ...item, rating: st[item.id]?.avg || 0, reviews: st[item.id]?.count || 0, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0) };
   }));
 });
-app.get('/api/products/:id', async (req, res) => {
-  const store = await getRequestStore(req);
-  const p = await getProduct(req.params.id, { storeId: store?.id });
-  if (!p || !p.active) return res.status(404).json({ error: 'ไม่พบสินค้า' });
-  const overrides = await siteOverridesForRequest(req);
-  const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) });
-  const s = await reviewStats(p.id, { storeId: store?.id }); const sale = saleConfig({ siteValue: scopedSiteValue });
-  const item = normalizeProductForClient(p);
-  res.json({ ...item, rating: s.avg, reviews: s.count, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0) });
-});
 // ── Recommendation API: "ลูกค้าที่ซื้อสินค้านี้มักซื้อคู่กับ" (co-occurrence จากออเดอร์จริง) ──
 const productRecoCache = new Map(); // storeId -> { at, engine }
 const PRODUCT_RECO_TTL_MS = 10 * 60 * 1000;
+const PRODUCT_RECO_REASON_LABELS = {
+  curated_bundle: 'ชุดแนะนำที่ร้านจัดไว้',
+  curated_upsell: 'เหมาะอัปเซลต่อจากสินค้านี้',
+  bought_together: 'ลูกค้ามักซื้อคู่กัน',
+  same_category: 'อยู่ในหมวดเดียวกัน',
+  same_segment: 'อยู่ในกลุ่มสินค้าเดียวกัน',
+  crop_match: 'ตรงกับพืชหรือปัญหาที่ลูกค้าสนใจ',
+  interest_match: 'ตรงกับความสนใจของลูกค้า',
+  best_seller: 'สินค้าขายดีของร้าน',
+  catalog: 'สินค้าแนะนำจากแคตตาล็อก',
+};
+function normalizeCsvIds(value = '') {
+  return [...new Set(String(value || '').split(',').map((item) => String(item || '').trim()).filter(Boolean))];
+}
+function productSearchText(product = {}) {
+  const extra = safeObject(product?.extra);
+  return [
+    product?.name,
+    product?.short,
+    product?.desc,
+    product?.tag,
+    extra.category,
+    extra.highlight,
+    extra.audienceShort,
+    extra.applicationMethod,
+    extra.dosage,
+    ...(Array.isArray(extra.cropTargets) ? extra.cropTargets : []),
+    ...(Array.isArray(extra.sellingPoints) ? extra.sellingPoints : []),
+    ...(Array.isArray(extra.searchKeywords) ? extra.searchKeywords : []),
+    ...Object.entries(safeObject(product?.specs)).flat(),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+function productSearchScore(product = {}, query = '') {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return 0;
+  const extra = safeObject(product?.extra);
+  const text = productSearchText(product);
+  const name = String(product?.name || '').toLowerCase();
+  const short = String(product?.short || '').toLowerCase();
+  const category = String(extra.category || product?.tag || '').toLowerCase();
+  let score = 0;
+  if (name === q) score += 120;
+  if (name.includes(q)) score += 70;
+  if (short.includes(q)) score += 35;
+  if (category.includes(q)) score += 28;
+  if (text.includes(q)) score += 20;
+  const tokens = q.split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    if (name.includes(token)) score += 28;
+    if (short.includes(token)) score += 14;
+    if (text.includes(token)) score += 8;
+  }
+  return score;
+}
+function applyPublicProductFilters(items = [], { q = '', category = '', availability = '', crop = '', sort = 'default', limit = 24 } = {}) {
+  let rows = [...items];
+  if (category && category !== 'all') rows = rows.filter((item) => String(item?.extra?.category || item?.tag || '').trim() === String(category).trim());
+  if (availability === 'in-stock') rows = rows.filter((item) => Number(item?.stock || 0) > 0);
+  else if (availability === 'sale') rows = rows.filter((item) => Number(item?.comparePrice || 0) > Number(item?.salePrice || 0) || Number(item?.comparePrice || 0) > Number(item?.price || 0));
+  else if (availability === 'featured') rows = rows.filter((item) => item?.extra?.featured === true || item?.extra?.featured === 'true');
+  if (crop) rows = rows.filter((item) => Array.isArray(item?.extra?.cropTargets) && item.extra.cropTargets.some((value) => String(value || '').trim().toLowerCase().includes(String(crop || '').trim().toLowerCase())));
+  if (q) {
+    rows = rows
+      .map((item) => ({ item, _score: productSearchScore(item, q) }))
+      .filter((entry) => entry._score > 0)
+      .sort((a, b) => b._score - a._score || Number(b.item?.reviews || 0) - Number(a.item?.reviews || 0))
+      .map((entry) => entry.item);
+  } else if (sort === 'price-asc') rows.sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
+  else if (sort === 'price-desc') rows.sort((a, b) => Number(b.price || 0) - Number(a.price || 0));
+  else if (sort === 'rating') rows.sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0));
+  else if (sort === 'popular') rows.sort((a, b) => (Number(b.reviews || 0) + (b?.extra?.featured ? 20 : 0)) - (Number(a.reviews || 0) + (a?.extra?.featured ? 20 : 0)));
+  return rows.slice(0, Math.min(60, Math.max(1, parseInt(limit, 10) || 24)));
+}
 async function getRecommendationEngine(storeId = '') {
-  const key = String(storeId || 'store_main');
-  const cached = productRecoCache.get(key);
+  const normalizedStoreId = String(storeId || '').trim();
+  const key = normalizedStoreId === 'all' ? '' : normalizedStoreId;
+  const cacheKey = key || '__all__';
+  const cached = productRecoCache.get(cacheKey);
   if (cached && (Date.now() - cached.at) < PRODUCT_RECO_TTL_MS) return cached.engine;
   const [orders, products] = await Promise.all([
-    listOrders(300, { storeId: key }),
-    listProducts(false, { storeId: key }),
+    listOrders(300, key ? { storeId: key } : {}),
+    listProducts(false, key ? { storeId: key } : {}),
   ]);
   const engine = buildProductRecommendations({ orders, products });
-  productRecoCache.set(key, { at: Date.now(), engine });
+  productRecoCache.set(cacheKey, { at: Date.now(), engine });
   return engine;
 }
 app.get('/api/products/:id/recommendations', async (req, res) => {
@@ -3598,6 +3831,89 @@ app.get('/api/products/:id/recommendations', async (req, res) => {
   } catch (err) {
     res.json({ ok: false, items: [], error: err?.message || 'recommendation_failed' });
   }
+});
+app.get('/api/products/recommendations', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const store = await getRequestStore(req);
+    const overrides = await siteOverridesForRequest(req);
+    const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) });
+    const sale = saleConfig({ siteValue: scopedSiteValue });
+    const st = await allReviewStats({ storeId: store?.id });
+    const engine = await getRecommendationEngine(store?.id);
+    const ids = normalizeCsvIds(req.query.ids || '');
+    const picks = ids.length
+      ? engine.recommendForMany(ids, Math.min(10, Math.max(2, parseInt(req.query.limit, 10) || 4)))
+      : (engine.bestSellers || []).slice(0, Math.min(10, Math.max(2, parseInt(req.query.limit, 10) || 4))).map((product) => ({ product, reason: 'best_seller', reasons: ['best_seller'] }));
+    res.json({
+      ok: true,
+      items: picks.map(({ product, reason, reasons = [] }) => {
+        const item = normalizeProductForClient(product);
+        return {
+          ...item,
+          rating: st[item.id]?.avg || 0,
+          reviews: st[item.id]?.count || 0,
+          salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0),
+          recoReason: reason,
+          recoReasonLabel: PRODUCT_RECO_REASON_LABELS[reason] || PRODUCT_RECO_REASON_LABELS.catalog,
+          recoReasons: reasons,
+        };
+      }),
+    });
+  } catch (err) {
+    res.json({ ok: false, items: [], error: err?.message || 'recommendation_failed' });
+  }
+});
+app.get('/api/products/search', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const store = await getRequestStore(req);
+    const overrides = await siteOverridesForRequest(req);
+    const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) });
+    const sale = saleConfig({ siteValue: scopedSiteValue });
+    const [products, stats] = await Promise.all([
+      listProducts(false, { storeId: store?.id }),
+      allReviewStats({ storeId: store?.id }),
+    ]);
+    const normalized = products.map((product) => {
+      const item = normalizeProductForClient(product);
+      return {
+        ...item,
+        rating: stats[item.id]?.avg || 0,
+        reviews: stats[item.id]?.count || 0,
+        salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0),
+      };
+    });
+    const items = applyPublicProductFilters(normalized, {
+      q: req.query.q,
+      category: req.query.category,
+      availability: req.query.availability,
+      crop: req.query.crop,
+      sort: req.query.sort,
+      limit: req.query.limit,
+    });
+    res.json({
+      ok: true,
+      total: items.length,
+      items,
+      facets: {
+        categories: [...new Set(normalized.map((item) => String(item?.extra?.category || item?.tag || '').trim()).filter(Boolean))],
+        available: normalized.filter((item) => Number(item.stock || 0) > 0).length,
+      },
+    });
+  } catch (err) {
+    res.json({ ok: false, total: 0, items: [], error: err?.message || 'search_failed' });
+  }
+});
+app.get('/api/products/:id', async (req, res) => {
+  const store = await getRequestStore(req);
+  const p = await getProduct(req.params.id, { storeId: store?.id });
+  if (!p || !p.active) return res.status(404).json({ error: 'ไม่พบสินค้า' });
+  const overrides = await siteOverridesForRequest(req);
+  const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) });
+  const s = await reviewStats(p.id, { storeId: store?.id }); const sale = saleConfig({ siteValue: scopedSiteValue });
+  const item = normalizeProductForClient(p);
+  res.json({ ...item, rating: s.avg, reviews: s.count, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0) });
 });
 
 // ──────────── articles (public) ────────────
@@ -3903,6 +4219,35 @@ app.post('/api/orders/:id/verify-slip', paymentLimiter, async (req, res) => {
     return res.status(400).json({ error: err.message || 'ตรวจสลิปไม่สำเร็จ' });
   }
 });
+app.post('/api/orders/:id/support', paymentLimiter, async (req, res) => {
+  const o = await expireOrderIfNeeded(await getOrder(req.params.id));
+  if (!o || !canAccessOrder(req, o)) return res.status(404).json({ error: 'ไม่พบคำสั่งซื้อ' });
+  if (['cancelled', 'expired'].includes(String(o.status || '').trim())) return res.status(400).json({ error: 'ออเดอร์นี้ไม่สามารถส่งคำขอหลังการขายได้แล้ว' });
+  const type = String(req.body?.type || 'return').trim() === 'refund' ? 'refund' : 'return';
+  const reason = String(req.body?.reason || '').trim().slice(0, 200);
+  const note = String(req.body?.note || '').trim().slice(0, 500);
+  const attachments = await saveSupportAttachments(req.body?.attachments, { folder: `support/${o.id}` });
+  if (!reason) return res.status(400).json({ error: `กรุณาระบุเหตุผลที่ต้องการขอ${orderSupportTypeLabel(type)}` });
+  const updated = await updateOrderSupportRequest(o.id, type, {
+    status: 'requested',
+    reason,
+    note,
+    attachments,
+    requestedAt: Date.now(),
+    updatedAt: Date.now(),
+    updatedBy: req.user?.id || 'customer',
+  }, {
+    type: `${type}_requested`,
+    title: `ลูกค้าส่งคำขอ${orderSupportTypeLabel(type)}`,
+    detail: [reason, note, attachments.length ? `แนบ ${attachments.length} ไฟล์` : ''].filter(Boolean).join(' · '),
+    attachments,
+    status: 'requested',
+    actor: 'customer',
+  });
+  if (!updated) return res.status(400).json({ error: 'บันทึกคำขอไม่สำเร็จ' });
+  invalidateCrmSnapshot(updated.storeId || o.storeId || 'store_main');
+  res.json({ ok: true, order: { ...clientOrder(updated), statusLabel: STATUS_LABEL[updated.status] } });
+});
 app.get('/api/my/orders', requireAuth, async (req, res) => {
   const store = await getRequestStore(req);
   res.json((await listOrdersByUser(req.user.id, 50, { storeId: store?.id })).map((o) => ({ ...clientOrder(o), statusLabel: STATUS_LABEL[o.status] })));
@@ -3919,7 +4264,7 @@ function saveLocalAsset(dataUrl) {
   fs.writeFileSync(path.join(uploadsDir, fname), buf);
   return '/uploads/' + fname;
 }
-async function saveAsset(dataUrl) {
+async function saveAsset(dataUrl, options = {}) {
   const m = /^data:((image\/(png|jpe?g|webp|gif))|application\/pdf);base64,(.+)$/i.exec(dataUrl);
   if (!m) return '';
   const contentType = m[1].toLowerCase();
@@ -3927,10 +4272,23 @@ async function saveAsset(dataUrl) {
   const buf = Buffer.from(m[4], 'base64');
   if (buf.length > 6 * 1024 * 1024) throw new Error('รูปใหญ่เกิน 6MB');
   if (isSupabaseConfigured({ requireServiceRole: true })) {
-    return uploadPublicAsset({ buffer: buf, contentType, extension: ext, folder: 'site-assets' });
+    return uploadPublicAsset({ buffer: buf, contentType, extension: ext, folder: options.folder || 'site-assets' });
   }
   if (isServerless) throw new Error('ต้องตั้งค่า Supabase Storage ก่อน deploy บน Vercel');
   return saveLocalAsset(dataUrl);
+}
+async function saveSupportAttachments(raw = [], { folder = 'support' } = {}) {
+  const files = Array.isArray(raw) ? raw.slice(0, 2) : [];
+  const out = [];
+  for (const item of files) {
+    const name = String(item?.name || 'attachment').trim().slice(0, 120);
+    const type = String(item?.type || '').trim().slice(0, 120);
+    const dataUrl = String(item?.dataUrl || '').trim();
+    if (!dataUrl.startsWith('data:')) continue;
+    const url = await saveAsset(dataUrl, { folder });
+    if (url) out.push({ name, type, url });
+  }
+  return out;
 }
 app.post('/api/admin/upload', uploadLimiter, requireAdmin, async (req, res) => {
   try {
@@ -4070,6 +4428,10 @@ app.delete('/api/admin/articles/:id', requireStoreScopedAccess('staff'), async (
 // ── CRM / Customer Data Platform: โปรไฟล์ลูกค้ารวมศูนย์จาก orders + leads + members + chat ──
 const crmSnapshotCache = new Map(); // storeId -> { at, profiles }
 const CRM_SNAPSHOT_TTL_MS = 60 * 1000;
+function invalidateCrmSnapshot(storeId = '') {
+  const scopeId = String(storeId || 'store_main') === 'all' ? '' : String(storeId || 'store_main');
+  crmSnapshotCache.delete(scopeId || '__all__');
+}
 async function getCrmProfiles(storeId = '') {
   const scopeId = String(storeId || 'store_main') === 'all' ? '' : String(storeId || 'store_main');
   const cacheKey = scopeId || '__all__';
@@ -4115,6 +4477,24 @@ app.get('/api/admin/customers/follow-ups', requireStoreScopedAccess('staff'), as
   const { storeId } = adminStoreScope(req);
   const profiles = await getCrmProfiles(storeId);
   res.json({ ok: true, items: buildFollowUps(profiles, { limit: Math.min(20, Math.max(3, parseInt(req.query.limit, 10) || 12)) }) });
+});
+app.get('/api/admin/customers/:key', requireStoreScopedAccess('staff'), async (req, res) => {
+  const { storeId } = adminStoreScope(req);
+  const normalizedKey = decodeURIComponent(String(req.params.key || '').trim());
+  const profiles = await getCrmProfiles(storeId);
+  const customer = profiles.find((profile) => String(profile.key || '') === normalizedKey);
+  if (!customer) return res.status(404).json({ error: 'ไม่พบลูกค้า' });
+  const [products, engine] = await Promise.all([
+    listProducts(false, { storeId }),
+    getRecommendationEngine(storeId),
+  ]);
+  const spotlight = buildCustomerSpotlight(customer, { products, recommendationEngine: engine });
+  res.json({
+    ok: true,
+    customer,
+    segmentLabels: CRM_SEGMENT_LABELS,
+    spotlight,
+  });
 });
 app.get('/api/admin/leads', requireStoreScopedAccess('staff'), async (req, res) => {
   const { page, limit, offset, search, status } = parseAdminListQuery(req, 20);
@@ -4220,7 +4600,34 @@ app.post('/api/admin/orders/:id/status', requireStoreScopedAccess('staff'), asyn
   if (!current || String(current.storeId || 'store_main') !== String(storeId || 'store_main')) return res.status(404).json({ error: 'ไม่พบออเดอร์ในร้านที่เลือก' });
   const o = await applyOrderAction(req.params.id, action, tracking || '');
   if (!o) return res.status(400).json({ error: 'ไม่พบออเดอร์หรือสถานะไม่ถูกต้อง' });
+  invalidateCrmSnapshot(storeId);
   res.json({ ok: true, order: { ...clientOrder(o), statusLabel: STATUS_LABEL[o.status] } });
+});
+app.post('/api/admin/orders/:id/support', requireStoreScopedAccess('staff'), async (req, res) => {
+  const { storeId } = adminStoreScope(req);
+  const current = await getOrder(req.params.id);
+  if (!current || String(current.storeId || 'store_main') !== String(storeId || 'store_main')) return res.status(404).json({ error: 'ไม่พบออเดอร์ในร้านที่เลือก' });
+  const type = String(req.body?.type || 'return').trim() === 'refund' ? 'refund' : 'return';
+  const status = String(req.body?.status || 'approved').trim() || 'approved';
+  const adminNote = String(req.body?.adminNote || '').trim().slice(0, 500);
+  const attachments = await saveSupportAttachments(req.body?.attachments, { folder: `support/${current.id}` });
+  const updated = await updateOrderSupportRequest(current.id, type, {
+    status,
+    adminNote,
+    attachments,
+    updatedAt: Date.now(),
+    updatedBy: req.user?.email || req.user?.id || 'admin',
+  }, {
+    type: `${type}_${status}`,
+    title: `ทีมงานอัปเดต${orderSupportTypeLabel(type)}`,
+    detail: [adminNote || orderSupportStatusLabel(status), attachments.length ? `แนบ ${attachments.length} ไฟล์` : ''].filter(Boolean).join(' · '),
+    attachments,
+    status,
+    actor: 'admin',
+  });
+  if (!updated) return res.status(400).json({ error: 'อัปเดตคำขอไม่สำเร็จ' });
+  invalidateCrmSnapshot(storeId);
+  res.json({ ok: true, order: { ...clientOrder(updated), statusLabel: STATUS_LABEL[updated.status] } });
 });
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   const { page, limit, offset, search, role } = parseAdminListQuery(req, 20);
@@ -5048,7 +5455,7 @@ app.get('/api/admin/site', requireStoreScopedAccess('staff'), async (req, res) =
     _isolated: store?.isDefault !== true,
   });
 });
-app.get('/api/admin/reviews', requireAdmin, async (req, res) => {
+app.get('/api/admin/reviews', requireStoreScopedAccess('staff'), async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const store = await getAdminSelectedStore(req).catch(() => null);
   if (store && store.isDefault !== true) {
@@ -5056,7 +5463,11 @@ app.get('/api/admin/reviews', requireAdmin, async (req, res) => {
   }
   res.json(mergedReviewGalleryData());
 });
-app.put('/api/admin/reviews', requireAdmin, async (req, res) => {
+app.put('/api/admin/reviews', requireStoreScopedAccess('admin'), async (req, res) => {
+  const store = await getAdminSelectedStore(req).catch(() => null);
+  if (store && store.isDefault !== true) {
+    return res.status(400).json({ error: 'ร้านย่อยยังไม่มี review gallery แยกร้าน โปรดจัดการรีวิวผ่านหน้า content ของร้านนี้แทน' });
+  }
   const base = mergedReviewGalleryData();
   const incoming = Array.isArray(req.body?.items) ? req.body.items : [];
   const baseMap = new Map(base.items.map((item) => [reviewOverrideKey(item), item]));

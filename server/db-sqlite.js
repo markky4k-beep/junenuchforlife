@@ -153,6 +153,7 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS community_comments (
+    store_id TEXT DEFAULT 'store_main',
     id TEXT PRIMARY KEY,
     post_id TEXT NOT NULL,
     user_id TEXT DEFAULT '',
@@ -162,6 +163,7 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS community_reactions (
+    store_id TEXT DEFAULT 'store_main',
     post_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     type TEXT DEFAULT 'like',
@@ -169,6 +171,7 @@ db.exec(`
     PRIMARY KEY (post_id, user_id, type)
   );
   CREATE TABLE IF NOT EXISTS community_saves (
+    store_id TEXT DEFAULT 'store_main',
     post_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
@@ -190,8 +193,28 @@ db.exec(`
 const communityPostCols = db.pragma('table_info(community_posts)').map((c) => c.name);
 if (!communityPostCols.includes('store_id')) db.exec(`ALTER TABLE community_posts ADD COLUMN store_id TEXT DEFAULT 'store_main'`);
 if (!communityPostCols.includes('author_avatar')) db.exec(`ALTER TABLE community_posts ADD COLUMN author_avatar TEXT DEFAULT ''`);
+const communityCommentCols = db.pragma('table_info(community_comments)').map((c) => c.name);
+if (!communityCommentCols.includes('store_id')) db.exec(`ALTER TABLE community_comments ADD COLUMN store_id TEXT DEFAULT 'store_main'`);
+const communityReactionCols = db.pragma('table_info(community_reactions)').map((c) => c.name);
+if (!communityReactionCols.includes('store_id')) db.exec(`ALTER TABLE community_reactions ADD COLUMN store_id TEXT DEFAULT 'store_main'`);
+const communitySaveCols = db.pragma('table_info(community_saves)').map((c) => c.name);
+if (!communitySaveCols.includes('store_id')) db.exec(`ALTER TABLE community_saves ADD COLUMN store_id TEXT DEFAULT 'store_main'`);
 const communityStoryCols = db.pragma('table_info(community_stories)').map((c) => c.name);
 if (!communityStoryCols.includes('store_id')) db.exec(`ALTER TABLE community_stories ADD COLUMN store_id TEXT DEFAULT 'store_main'`);
+db.exec(`
+  UPDATE community_comments
+  SET store_id = COALESCE((SELECT p.store_id FROM community_posts p WHERE p.id = community_comments.post_id), 'store_main')
+  WHERE COALESCE(store_id, '') = '';
+  UPDATE community_reactions
+  SET store_id = COALESCE((SELECT p.store_id FROM community_posts p WHERE p.id = community_reactions.post_id), 'store_main')
+  WHERE COALESCE(store_id, '') = '';
+  UPDATE community_saves
+  SET store_id = COALESCE((SELECT p.store_id FROM community_posts p WHERE p.id = community_saves.post_id), 'store_main')
+  WHERE COALESCE(store_id, '') = '';
+  CREATE INDEX IF NOT EXISTS idx_community_comments_store_post_created ON community_comments (store_id, post_id, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_community_reactions_store_post ON community_reactions (store_id, post_id, type);
+  CREATE INDEX IF NOT EXISTS idx_community_saves_store_post ON community_saves (store_id, post_id);
+`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS stores (
@@ -410,30 +433,30 @@ const S = {
   insCommunityPost: db.prepare(`INSERT INTO community_posts (store_id,id,user_id,author_name,author_avatar,author_role,caption,media,hashtags,article_id,product_ids,status,pinned,created_at,updated_at)
     VALUES (@store_id,@id,@user_id,@author_name,@author_avatar,@author_role,@caption,@media,@hashtags,@article_id,@product_ids,@status,@pinned,@created_at,@updated_at)`),
   getCommunityPost: db.prepare(`SELECT p.*,
-      (SELECT COUNT(*) FROM community_reactions r WHERE r.post_id=p.id AND r.type='like') AS likes,
-      (SELECT COUNT(*) FROM community_comments c WHERE c.post_id=p.id AND c.status='approved') AS comments,
-      (SELECT COUNT(*) FROM community_saves s WHERE s.post_id=p.id) AS saves
+      (SELECT COUNT(*) FROM community_reactions r WHERE r.post_id=p.id AND r.store_id=p.store_id AND r.type='like') AS likes,
+      (SELECT COUNT(*) FROM community_comments c WHERE c.post_id=p.id AND c.store_id=p.store_id AND c.status='approved') AS comments,
+      (SELECT COUNT(*) FROM community_saves s WHERE s.post_id=p.id AND s.store_id=p.store_id) AS saves
     FROM community_posts p WHERE p.id=? AND p.store_id=?`),
   listCommunityPosts: db.prepare(`SELECT p.*,
-      (SELECT COUNT(*) FROM community_reactions r WHERE r.post_id=p.id AND r.type='like') AS likes,
-      (SELECT COUNT(*) FROM community_comments c WHERE c.post_id=p.id AND c.status='approved') AS comments,
-      (SELECT COUNT(*) FROM community_saves s WHERE s.post_id=p.id) AS saves
+      (SELECT COUNT(*) FROM community_reactions r WHERE r.post_id=p.id AND r.store_id=p.store_id AND r.type='like') AS likes,
+      (SELECT COUNT(*) FROM community_comments c WHERE c.post_id=p.id AND c.store_id=p.store_id AND c.status='approved') AS comments,
+      (SELECT COUNT(*) FROM community_saves s WHERE s.post_id=p.id AND s.store_id=p.store_id) AS saves
     FROM community_posts p WHERE p.status='approved' AND p.store_id=@store_id ORDER BY p.pinned DESC, p.created_at DESC LIMIT @limit`),
   listCommunityPostsAll: db.prepare(`SELECT p.*,
-      (SELECT COUNT(*) FROM community_reactions r WHERE r.post_id=p.id AND r.type='like') AS likes,
-      (SELECT COUNT(*) FROM community_comments c WHERE c.post_id=p.id AND c.status='approved') AS comments,
-      (SELECT COUNT(*) FROM community_saves s WHERE s.post_id=p.id) AS saves
+      (SELECT COUNT(*) FROM community_reactions r WHERE r.post_id=p.id AND r.store_id=p.store_id AND r.type='like') AS likes,
+      (SELECT COUNT(*) FROM community_comments c WHERE c.post_id=p.id AND c.store_id=p.store_id AND c.status='approved') AS comments,
+      (SELECT COUNT(*) FROM community_saves s WHERE s.post_id=p.id AND s.store_id=p.store_id) AS saves
     FROM community_posts p WHERE p.store_id=@store_id ORDER BY p.created_at DESC LIMIT @limit`),
   updCommunityPostStatus: db.prepare(`UPDATE community_posts SET status=@status, pinned=@pinned, updated_at=@updated_at WHERE id=@id AND store_id=@store_id`),
   delCommunityPost: db.prepare(`DELETE FROM community_posts WHERE id=? AND store_id=?`),
-  insCommunityComment: db.prepare(`INSERT INTO community_comments (id,post_id,user_id,author_name,text,status,created_at) VALUES (@id,@post_id,@user_id,@author_name,@text,@status,@created_at)`),
-  listCommunityComments: db.prepare(`SELECT * FROM community_comments WHERE post_id=? AND status='approved' ORDER BY created_at ASC LIMIT ?`),
-  upsertCommunityReaction: db.prepare(`INSERT INTO community_reactions (post_id,user_id,type,created_at) VALUES (?,?,?,?) ON CONFLICT(post_id,user_id,type) DO NOTHING`),
-  delCommunityReaction: db.prepare(`DELETE FROM community_reactions WHERE post_id=? AND user_id=? AND type=?`),
-  userCommunityReaction: db.prepare(`SELECT post_id FROM community_reactions WHERE post_id=? AND user_id=? AND type=? LIMIT 1`),
-  upsertCommunitySave: db.prepare(`INSERT INTO community_saves (post_id,user_id,created_at) VALUES (?,?,?) ON CONFLICT(post_id,user_id) DO NOTHING`),
-  delCommunitySave: db.prepare(`DELETE FROM community_saves WHERE post_id=? AND user_id=?`),
-  userCommunitySave: db.prepare(`SELECT post_id FROM community_saves WHERE post_id=? AND user_id=? LIMIT 1`),
+  insCommunityComment: db.prepare(`INSERT INTO community_comments (store_id,id,post_id,user_id,author_name,text,status,created_at) VALUES (@store_id,@id,@post_id,@user_id,@author_name,@text,@status,@created_at)`),
+  listCommunityComments: db.prepare(`SELECT * FROM community_comments WHERE post_id=? AND store_id=? AND status='approved' ORDER BY created_at ASC LIMIT ?`),
+  upsertCommunityReaction: db.prepare(`INSERT INTO community_reactions (store_id,post_id,user_id,type,created_at) VALUES (?,?,?,?,?) ON CONFLICT(post_id,user_id,type) DO UPDATE SET store_id=excluded.store_id`),
+  delCommunityReaction: db.prepare(`DELETE FROM community_reactions WHERE post_id=? AND store_id=? AND user_id=? AND type=?`),
+  userCommunityReaction: db.prepare(`SELECT post_id FROM community_reactions WHERE post_id=? AND store_id=? AND user_id=? AND type=? LIMIT 1`),
+  upsertCommunitySave: db.prepare(`INSERT INTO community_saves (store_id,post_id,user_id,created_at) VALUES (?,?,?,?) ON CONFLICT(post_id,user_id) DO UPDATE SET store_id=excluded.store_id`),
+  delCommunitySave: db.prepare(`DELETE FROM community_saves WHERE post_id=? AND store_id=? AND user_id=?`),
+  userCommunitySave: db.prepare(`SELECT post_id FROM community_saves WHERE post_id=? AND store_id=? AND user_id=? LIMIT 1`),
   insCommunityStory: db.prepare(`INSERT INTO community_stories (store_id,id,post_id,author_name,title,media,caption,status,created_at,expires_at)
     VALUES (@store_id,@id,@post_id,@author_name,@title,@media,@caption,@status,@created_at,@expires_at)`),
   listCommunityStories: db.prepare(`SELECT * FROM community_stories WHERE status='approved' AND expires_at>@now AND store_id=@store_id ORDER BY created_at DESC LIMIT @limit`),
@@ -1179,8 +1202,9 @@ function normalizeStoreId(value = '') {
 function rowToCommunityPost(r, viewerId = '') {
   if (!r) return null;
   const viewer = String(viewerId || '').trim();
+  const storeId = r.store_id || 'store_main';
   return {
-    storeId: r.store_id || 'store_main',
+    storeId,
     id: r.id,
     userId: r.user_id || '',
     authorName: r.author_name || 'สมาชิก',
@@ -1198,13 +1222,13 @@ function rowToCommunityPost(r, viewerId = '') {
     likes: Number(r.likes || 0),
     comments: Number(r.comments || 0),
     saves: Number(r.saves || 0),
-    liked: viewer ? !!S.userCommunityReaction.get(r.id, viewer, 'like') : false,
-    saved: viewer ? !!S.userCommunitySave.get(r.id, viewer) : false,
+    liked: viewer ? !!S.userCommunityReaction.get(r.id, storeId, viewer, 'like') : false,
+    saved: viewer ? !!S.userCommunitySave.get(r.id, storeId, viewer) : false,
   };
 }
 function rowToCommunityComment(r) {
   if (!r) return null;
-  return { id: r.id, postId: r.post_id, userId: r.user_id || '', authorName: r.author_name || 'สมาชิก', text: r.text || '', status: r.status || 'approved', createdAt: r.created_at };
+  return { storeId: r.store_id || 'store_main', id: r.id, postId: r.post_id, userId: r.user_id || '', authorName: r.author_name || 'สมาชิก', text: r.text || '', status: r.status || 'approved', createdAt: r.created_at };
 }
 function rowToCommunityStory(r) {
   if (!r) return null;
@@ -1217,8 +1241,9 @@ function normalizeArray(value) {
 function articleToPost(article) {
   const body = String(article?.body || '').trim();
   const caption = [article?.excerpt, body.split(/\n+/)[0]].filter(Boolean).join('\n\n').slice(0, 1200);
+  const storeId = normalizeStoreId(article?.storeId);
   return {
-    id: `post_${article.id}`,
+    id: `post_${storeId}_${article.id}`,
     userId: '',
     authorName: 'ทีมจูนนุชฟอร์ไลฟ์',
     authorRole: 'admin',
@@ -1275,6 +1300,7 @@ export function createCommunityComment(postId, comment = {}) {
   const post = getCommunityPost(postId, { storeId });
   if (!post) return null;
   const row = {
+    store_id: storeId,
     id: comment.id || `cc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     post_id: postId,
     user_id: comment.userId || '',
@@ -1288,21 +1314,22 @@ export function createCommunityComment(postId, comment = {}) {
 }
 export function listCommunityComments(postId, options = {}) {
   const limit = Math.min(200, Math.max(1, Number(options.limit || 50) || 50));
-  if (!getCommunityPost(postId, { storeId: options.storeId })) return [];
-  return S.listCommunityComments.all(postId, limit).map(rowToCommunityComment);
+  const storeId = normalizeStoreId(options.storeId);
+  if (!getCommunityPost(postId, { storeId })) return [];
+  return S.listCommunityComments.all(postId, storeId, limit).map(rowToCommunityComment);
 }
 export function setCommunityReaction(postId, userId, type = 'like', active = true, options = {}) {
   const storeId = normalizeStoreId(options.storeId);
   if (!getCommunityPost(postId, { storeId })) return null;
-  if (active) S.upsertCommunityReaction.run(postId, userId, type, Date.now());
-  else S.delCommunityReaction.run(postId, userId, type);
+  if (active) S.upsertCommunityReaction.run(storeId, postId, userId, type, Date.now());
+  else S.delCommunityReaction.run(postId, storeId, userId, type);
   return getCommunityPost(postId, { storeId, viewerId: userId });
 }
 export function setCommunitySave(postId, userId, active = true, options = {}) {
   const storeId = normalizeStoreId(options.storeId);
   if (!getCommunityPost(postId, { storeId })) return null;
-  if (active) S.upsertCommunitySave.run(postId, userId, Date.now());
-  else S.delCommunitySave.run(postId, userId);
+  if (active) S.upsertCommunitySave.run(storeId, postId, userId, Date.now());
+  else S.delCommunitySave.run(postId, storeId, userId);
   return getCommunityPost(postId, { storeId, viewerId: userId });
 }
 export function createCommunityStory(story = {}) {
@@ -1333,19 +1360,20 @@ export function seedCommunityFromArticles(options = {}) {
   const articles = listArticles(Boolean(options.all), { storeId: options.storeId });
   let posts = 0;
   let stories = 0;
+  const storeId = normalizeStoreId(options.storeId);
   for (const article of articles) {
     if (!article?.id) continue;
-    const postId = `post_${article.id}`;
+    const postId = `post_${storeId}_${article.id}`;
     if (!getCommunityPost(postId, { storeId: options.storeId })) {
-      createCommunityPost({ ...articleToPost(article), storeId: options.storeId });
+      createCommunityPost({ ...articleToPost({ ...article, storeId }), storeId, id: postId });
       posts += 1;
     }
-    const storyId = `story_${article.id}`;
-    const existingStory = S.listCommunityStoriesAll.all({ store_id: normalizeStoreId(options.storeId), limit: 500 }).find((item) => item.id === storyId);
+    const storyId = `story_${storeId}_${article.id}`;
+    const existingStory = S.listCommunityStoriesAll.all({ store_id: storeId, limit: 500 }).find((item) => item.id === storyId);
     if (!existingStory && article.cover) {
       createCommunityStory({
         id: storyId,
-        storeId: options.storeId,
+        storeId,
         postId,
         authorName: 'ทีมจูนนุชฟอร์ไลฟ์',
         title: article.title,

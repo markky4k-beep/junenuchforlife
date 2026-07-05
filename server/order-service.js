@@ -50,6 +50,25 @@ export function createOrderService(deps = {}) {
       country,
     };
   }
+  function normalizeVariantRows(raw = []) {
+    return (Array.isArray(raw) ? raw : []).map((item, index) => {
+      const id = String(item?.id || item?.key || `variant_${index + 1}`).trim();
+      const label = String(item?.label || item?.name || id).trim();
+      const price = Number(item?.price ?? item?.salePrice ?? 0);
+      const stock = Math.max(0, parseInt(item?.stock, 10) || 0);
+      const options = item?.options && typeof item.options === 'object' && !Array.isArray(item.options) ? item.options : {};
+      return {
+        id,
+        label,
+        price: Number.isFinite(price) && price > 0 ? price : 0,
+        stock,
+        options,
+      };
+    }).filter((item) => item.id && item.label);
+  }
+  function optionSummaryOf(variant = {}) {
+    return Object.entries(variant?.options || {}).map(([key, value]) => `${key}: ${value}`).join(', ');
+  }
 
   function newOrderId() {
     return 'VYU-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 5)).toUpperCase().slice(-7);
@@ -65,12 +84,28 @@ export function createOrderService(deps = {}) {
       const product = productMap.get(String(it?.id || ''));
       if (!product || !product.active) continue;
       const qty = Math.max(1, Math.min(99, parseInt(it?.qty, 10) || 1));
-      if (product.stock <= 0) throw new Error(`"${product.name}" สินค้าหมดแล้ว`);
-      if (product.stock < qty) throw new Error(`"${product.name}" เหลือเพียง ${product.stock} ชิ้น`);
-      const unit = effPrice(product);
+      const variants = normalizeVariantRows(product?.extra?.variants);
+      const variantId = String(it?.variantId || '').trim();
+      const variant = variantId ? variants.find((item) => item.id === variantId) : (variants.length === 1 ? variants[0] : null);
+      if (variants.length && !variant) throw new Error(`กรุณาเลือกตัวเลือกของ "${product.name}" ก่อนสั่งซื้อ`);
+      const variantLabel = variant ? variant.label : '';
+      const optionSummary = variant ? optionSummaryOf(variant) : '';
+      const effectiveStock = variant ? variant.stock : Number(product.stock || 0);
+      if (effectiveStock <= 0) throw new Error(`"${product.name}${variantLabel ? ` · ${variantLabel}` : ''}" สินค้าหมดแล้ว`);
+      if (effectiveStock < qty) throw new Error(`"${product.name}${variantLabel ? ` · ${variantLabel}` : ''}" เหลือเพียง ${effectiveStock} ชิ้น`);
+      const unit = variant?.price || effPrice(product);
       subtotal += unit * qty;
-      detailed.push({ id: product.id, name: product.name, price: unit, qty });
-      lines.push(`• ${product.name} x${qty} = ฿${(unit * qty).toLocaleString()}`);
+      detailed.push({
+        id: product.id,
+        productId: product.id,
+        name: product.name,
+        price: unit,
+        qty,
+        variantId: variant?.id || '',
+        variantLabel,
+        optionSummary,
+      });
+      lines.push(`• ${product.name}${variantLabel ? ` · ${variantLabel}` : ''} x${qty} = ฿${(unit * qty).toLocaleString()}`);
     }
     if (!detailed.length) throw new Error('รายการสินค้าไม่ถูกต้อง');
     return { subtotal, detailed, lines };
@@ -96,13 +131,23 @@ export function createOrderService(deps = {}) {
 
     const normalizedStoreId = String(storeId || '').trim() || 'store_main';
     const { subtotal, detailed, lines } = await buildDetailedOrderItems(items, { storeId: normalizedStoreId });
+    const id = newOrderId();
     const normalizedCustomer = normalizeCustomer(customer);
+    normalizedCustomer._ops = {
+      timeline: [{
+        type: 'order_created',
+        title: `สร้างออเดอร์ ${id}`,
+        detail: `ช่องทาง ${channel === 'line_oa' ? 'LINE OA' : 'เว็บไซต์'} · ${detailed.map((item) => `${item.name}${item.variantLabel ? ` · ${item.variantLabel}` : ''} ×${item.qty}`).join(', ')}`,
+        at: Date.now(),
+        actor: channel === 'line_oa' ? 'line_oa' : 'web',
+        status: 'awaiting_payment',
+      }],
+    };
     const couponResult = await evalCoupon(coupon, subtotal, { storeId: normalizedStoreId });
     if (!couponResult.ok) throw new Error(couponResult.error || 'คูปองไม่ถูกต้อง');
     const discount = couponResult.discount || 0;
     const shipping = shippingFor(normalizedCustomer.country, subtotal - discount);
     const total = subtotal - discount + shipping;
-    const id = newOrderId();
     const accessToken = newOrderAccessToken();
     const normalizedSessionId = normalizeChatSessionId(typeof sessionId === 'string' ? sessionId : '');
     const reservedCoupon = couponResult.coupon || '';
