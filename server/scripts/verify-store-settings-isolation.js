@@ -5,7 +5,7 @@ import '../env.js';
 import crypto from 'crypto';
 import {
   createUser, deleteUser, createToken, deleteToken,
-  createStore, getSetting, setSetting, getStoreSetting, setStoreSetting,
+  createStore, deleteStoreCascade, getSetting, setSetting, getStoreSetting, setStoreSetting,
 } from '../db.js';
 import { hashPassword, newToken } from '../auth.js';
 
@@ -34,6 +34,7 @@ async function main() {
     await createToken(token, userId, 10 * 60 * 1000);
     cleanups.push(() => deleteToken(token));
     await createStore({ id: storeId, name: `ISO Settings ${stamp}`, slug: storeId, subdomain: `iso-settings-${stamp}` });
+    cleanups.push(() => deleteStoreCascade(storeId));
 
     const globalBefore = String(await getSetting(TEST_KEY) ?? '');
     const marker = `ISOLATION_${stamp}`;

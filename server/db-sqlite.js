@@ -553,11 +553,18 @@ export function countOrders({ paid, status, deliveredOnly = false, search = '', 
   const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
   return db.prepare(`SELECT COUNT(*) n FROM orders${where}`).get(...params).n;
 }
-export function listOrderIdentityRows() {
-  return db.prepare(`SELECT status, customer FROM orders ORDER BY created_at DESC`).all().map((row) => ({ status: row.status, customer: JSON.parse(row.customer || '{}') }));
+export function listOrderIdentityRows(options = {}) {
+  const storeId = String(options.storeId || '').trim();
+  const rows = storeId
+    ? db.prepare(`SELECT status, customer FROM orders WHERE store_id=? ORDER BY created_at DESC`).all(normalizeStoreId(storeId))
+    : db.prepare(`SELECT status, customer FROM orders ORDER BY created_at DESC`).all();
+  return rows.map((row) => ({ status: row.status, customer: JSON.parse(row.customer || '{}') }));
 }
-export function listDeliveredOrderTimingRows() {
-  return db.prepare(`SELECT created_at, updated_at FROM orders WHERE status='delivered' ORDER BY created_at DESC`).all();
+export function listDeliveredOrderTimingRows(options = {}) {
+  const storeId = String(options.storeId || '').trim();
+  return storeId
+    ? db.prepare(`SELECT created_at, updated_at FROM orders WHERE status='delivered' AND store_id=? ORDER BY created_at DESC`).all(normalizeStoreId(storeId))
+    : db.prepare(`SELECT created_at, updated_at FROM orders WHERE status='delivered' ORDER BY created_at DESC`).all();
 }
 export function listExpiredOrderReservations(beforeTs, limit = 50) { return S.listExpiredReservations.all(beforeTs, limit).map(rowToOrder); }
 export function updateOrder(id, patch) {

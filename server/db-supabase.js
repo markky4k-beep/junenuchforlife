@@ -397,21 +397,31 @@ export async function countOrders({ paid, status, deliveredOnly = false, search 
   fail(error, 'countOrders');
   return count || 0;
 }
-export async function listOrderIdentityRows() {
-  const rows = await selectAllPages((from, to) => supabase
-    .from('orders')
-    .select('status,customer')
-    .order('created_at', { ascending: false })
-    .range(from, to));
+export async function listOrderIdentityRows(options = {}) {
+  const storeId = String(options.storeId || '').trim();
+  const rows = await selectAllPages((from, to) => {
+    let q = supabase
+      .from('orders')
+      .select('status,customer');
+    if (storeId) q = applyStoreScope(q, storeId);
+    return q
+      .order('created_at', { ascending: false })
+      .range(from, to);
+  });
   return rows || [];
 }
-export async function listDeliveredOrderTimingRows() {
-  const rows = await selectAllPages((from, to) => supabase
-    .from('orders')
-    .select('created_at,updated_at')
-    .eq('status', 'delivered')
-    .order('created_at', { ascending: false })
-    .range(from, to));
+export async function listDeliveredOrderTimingRows(options = {}) {
+  const storeId = String(options.storeId || '').trim();
+  const rows = await selectAllPages((from, to) => {
+    let q = supabase
+      .from('orders')
+      .select('created_at,updated_at')
+      .eq('status', 'delivered');
+    if (storeId) q = applyStoreScope(q, storeId);
+    return q
+      .order('created_at', { ascending: false })
+      .range(from, to);
+  });
   return rows || [];
 }
 

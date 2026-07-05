@@ -20,7 +20,8 @@
     "migrate:supabase": "node server/scripts/migrate-sqlite-to-supabase.js",
     "export:supabase-sql": "node server/scripts/export-sqlite-to-supabase-sql.js",
     "verify:store-settings": "node server/scripts/verify-store-settings-isolation.js",
-    "verify:store-delete": "node server/scripts/verify-store-delete.js"
+    "verify:store-delete": "node server/scripts/verify-store-delete.js",
+    "verify:crm": "node server/scripts/verify-crm-smoke.js"
   },
   "dependencies": {
     "@line/bot-sdk": "^9.5.0",

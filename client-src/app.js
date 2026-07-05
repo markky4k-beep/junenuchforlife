@@ -270,16 +270,24 @@ function renderAdminStoreSwitcher() {
   const stores = Array.isArray(_adminStoresContext?.stores) ? _adminStoresContext.stores : [];
   const selected = adminSelectedStoreId();
   if (!stores.length) return '';
-  const allOption = isFullAdminClient(currentUser)
-    ? `<option value="all" ${selected === 'all' ? 'selected' : ''}>ทุกเว็บไซต์ (Inbox)</option>`
-    : '';
-  return `<label class="admin-store-switcher">
+  const options = [
+    ...(isFullAdminClient(currentUser) ? [{ id: 'all', name: 'ทุกเว็บไซต์ (Inbox)', meta: 'รวมทุกเว็บไซต์' }] : []),
+    ...stores.map((store) => ({ id: store.id, name: store.name || store.id, meta: store.subdomain || (store.isDefault ? 'main store' : 'store') })),
+  ];
+  const current = options.find((item) => item.id === selected) || options.find((item) => item.id !== 'all') || options[0];
+  return `<div class="admin-store-switcher admin-store-menu">
     <span>ร้านที่จัดการ</span>
-    <select id="adminStoreSwitcher">
-      ${allOption}
-      ${stores.map((store) => `<option value="${esc(store.id)}" ${store.id === selected ? 'selected' : ''}>${esc(store.name || store.id)}</option>`).join('')}
-    </select>
-  </label>`;
+    <button class="admin-store-current" type="button" aria-haspopup="menu" aria-expanded="false" data-admin-store-toggle>
+      <b>${esc(current?.name || 'เลือกร้าน')}</b>
+      <small>${esc(current?.meta || '')}</small>
+    </button>
+    <div class="admin-store-menu-list" role="menu">
+      ${options.map((item) => `<button class="${item.id === selected ? 'is-active' : ''}" type="button" role="menuitem" data-admin-store-pick="${esc(item.id)}">
+        <b>${esc(item.name)}</b>
+        <small>${esc(item.meta || '')}</small>
+      </button>`).join('')}
+    </div>
+  </div>`;
 }
 async function loadMe() {
   try {
@@ -4986,6 +4994,21 @@ async function hydrateProductDetail(id, fallbackP) {
   if (supportMount) supportMount.innerHTML = productSupportSection(p, rev);
   reviewsMount.innerHTML = reviewsHTML(p, rev);
   [supportMount, reviewsMount].forEach((m) => m && m.querySelectorAll('.reveal:not(.in)').forEach((el) => revealObserver.observe(el)));
+  hydrateProductRecommendations(id).catch(() => {});
+}
+// อัปเกรด "สินค้าที่เกี่ยวข้อง" เป็นคำแนะนำจากออเดอร์จริง (ซื้อคู่กันบ่อย) — ถ้า API ล้มใช้ heuristic เดิม
+async function hydrateProductRecommendations(id) {
+  const grid = document.getElementById('pdRelatedGrid');
+  if (!grid || grid.dataset.pid !== String(id)) return;
+  const data = await fetch('/api/products/' + encodeURIComponent(id) + '/recommendations?limit=4').then((r) => r.json()).catch(() => null);
+  const items = Array.isArray(data?.items) ? data.items.filter((item) => item && item.id !== id) : [];
+  if (!items.length || grid.dataset.pid !== String(id)) return;
+  grid.innerHTML = items.map((item, i) => productCard(item, i)).join('');
+  const head = document.getElementById('pdRelatedHead');
+  if (head && items.some((item) => item.recoReason === 'bought_together')) {
+    head.innerHTML = '<span class="eyebrow">AI แนะนำ</span><h2>ลูกค้ามักซื้อคู่กับสินค้านี้</h2>';
+  }
+  grid.querySelectorAll('.reveal:not(.in)').forEach((el) => revealObserver.observe(el));
 }
 async function viewProductDetail({ id }) {
   let p = productById(id);
@@ -5064,8 +5087,8 @@ async function viewProductDetail({ id }) {
       ${orgTrustHTML({ compact: true })}
     </section>
     <div id="pdReviewsMount" data-pid="${esc(id)}">${reviewsHTML(p, rev)}</div>
-    <div class="section-head reveal" style="margin-top:30px"><span class="eyebrow">สินค้าที่เกี่ยวข้อง</span><h2>อาจถูกใจคุณ</h2></div>
-    <div class="products">${related.map((r, i) => productCard(r, i)).join('')}</div>
+    <div class="section-head reveal" style="margin-top:30px" id="pdRelatedHead"><span class="eyebrow">สินค้าที่เกี่ยวข้อง</span><h2>อาจถูกใจคุณ</h2></div>
+    <div class="products" id="pdRelatedGrid" data-pid="${esc(id)}">${related.map((r, i) => productCard(r, i)).join('')}</div>
     ${p.stock > 0 ? `<div class="mobile-buybar">
       <div class="mobile-buybar-copy"><b>${esc(p.name)}</b><span>${baht(effPrice(p))}</span></div>
       <button class="btn btn-primary" data-buynow="${p.id}">ซื้อเลย</button>
@@ -5523,19 +5546,20 @@ function adminGuard(options = {}) {
 }
 function adminLayout(active, content) {
   const storeRole = currentStoreRoleClient(currentUser);
-  const storeScopedTabs = [['', 'แดชบอร์ด', '◴'], ['products', 'จัดการสินค้า', '❑'], ['community', 'ชุมชน', '◎'], ['articles', 'บทความเดิม', '✐'], ['inbox', 'Inbox แชต', '✉'], ['leads', 'ลีดลูกค้า', '◎'], ['orders', 'ออเดอร์', '❯'], ['coupons', 'คูปองส่วนลด', '٪'], ['site', 'ข้อมูลร้าน', '✎']];
+  const storeScopedTabs = [['', 'แดชบอร์ด', 'dashboard'], ['products', 'จัดการสินค้า', 'products'], ['community', 'ชุมชน', 'community'], ['articles', 'บทความเดิม', 'articles'], ['inbox', 'Inbox แชต', 'inbox'], ['leads', 'ลีดลูกค้า', 'leads'], ['customers', 'CRM ลูกค้า', 'customers'], ['orders', 'ออเดอร์', 'orders'], ['coupons', 'คูปองส่วนลด', 'coupons'], ['site', 'ข้อมูลร้าน', 'site']];
   const tabs = isChatAdminClient(currentUser) || (!isFullAdminClient(currentUser) && storeRole === 'chat_admin')
-    ? [['inbox', 'Inbox แชต', '✉']]
+    ? [['inbox', 'Inbox แชต', 'inbox']]
     : (isFullAdminClient(currentUser)
-      ? [['', 'แดชบอร์ด', '◴'], ['products', 'จัดการสินค้า', '❑'], ['community', 'ชุมชน', '◎'], ['articles', 'บทความเดิม', '✐'], ['inbox', 'Inbox แชต', '✉'], ['leads', 'ลีดลูกค้า', '◎'], ['orders', 'ออเดอร์', '❯'], ['coupons', 'คูปองส่วนลด', '٪'], ['users', 'ผู้ใช้', '◇'], ['stores', 'หลายเว็บไซต์', '◪'], ['site', 'ข้อมูลร้าน', '✎'], ['diagnostics', 'Diagnostics', '◫'], ['settings', 'ตั้งค่า API', '⚙']]
+      ? [['', 'แดชบอร์ด', 'dashboard'], ['products', 'จัดการสินค้า', 'products'], ['community', 'ชุมชน', 'community'], ['articles', 'บทความเดิม', 'articles'], ['inbox', 'Inbox แชต', 'inbox'], ['leads', 'ลีดลูกค้า', 'leads'], ['customers', 'CRM ลูกค้า', 'customers'], ['orders', 'ออเดอร์', 'orders'], ['coupons', 'คูปองส่วนลด', 'coupons'], ['users', 'ผู้ใช้', 'users'], ['stores', 'หลายเว็บไซต์', 'stores'], ['site', 'ข้อมูลร้าน', 'site'], ['diagnostics', 'Diagnostics', 'diagnostics'], ['settings', 'ตั้งค่า API', 'settings']]
       : storeScopedTabs);
   // ไอคอน + หมวดหมู่เมนู — จัดกลุ่มให้หาง่าย (มือถือจะยุบเป็น grid เดิมผ่าน display:contents)
-  const NAV_ICONS = { '': '📊', products: '📦', community: '🌱', articles: '📝', inbox: '💬', leads: '🎯', orders: '🧾', coupons: '🏷️', users: '👥', stores: '🌐', site: '🎨', diagnostics: '🩺', settings: '⚙️' };
-  const NAV_GROUP_OF = { '': 'ภาพรวม', orders: 'ภาพรวม', inbox: 'ภาพรวม', leads: 'ภาพรวม', products: 'ร้านค้า', coupons: 'ร้านค้า', site: 'ร้านค้า', stores: 'ร้านค้า', community: 'คอนเทนต์', articles: 'คอนเทนต์', users: 'ระบบ', settings: 'ระบบ', diagnostics: 'ระบบ' };
+  const NAV_ICONS = { '': 'dashboard', customers: 'customers', products: 'products', community: 'community', articles: 'articles', inbox: 'inbox', leads: 'leads', orders: 'orders', coupons: 'coupons', users: 'users', stores: 'stores', site: 'site', diagnostics: 'diagnostics', settings: 'settings' };
+  const NAV_GROUP_OF = { '': 'ภาพรวม', orders: 'ภาพรวม', inbox: 'ภาพรวม', leads: 'ภาพรวม', customers: 'ภาพรวม', products: 'ร้านค้า', coupons: 'ร้านค้า', site: 'ร้านค้า', stores: 'ร้านค้า', community: 'คอนเทนต์', articles: 'คอนเทนต์', users: 'ระบบ', settings: 'ระบบ', diagnostics: 'ระบบ' };
   const navLink = ([k, l, ic]) => {
     const isInbox = k === 'inbox';
     const badge = isInbox && _adminInboxUnreadTotal ? `<span class="admin-nav-badge">${_adminInboxUnreadTotal > 99 ? '99+' : _adminInboxUnreadTotal}</span>` : '';
-    return `<a href="${routeHref('/admin' + (k ? '/' + k : ''))}" data-admin-nav="${esc(k || 'dashboard')}" class="${active === k ? 'on' : ''}"><span>${NAV_ICONS[k] ?? ic}</span>${l}${badge}</a>`;
+    const iconName = NAV_ICONS[k] || ic || 'dashboard';
+    return `<a href="${routeHref('/admin' + (k ? '/' + k : ''))}" data-admin-nav="${esc(k || 'dashboard')}" class="${active === k ? 'on' : ''}"><span class="admin-3d-icon" data-admin-icon="${esc(iconName)}" aria-hidden="true"></span>${l}${badge}</a>`;
   };
   const showNavLabels = tabs.length > 3;
   const nav = ['ภาพรวม', 'ร้านค้า', 'คอนเทนต์', 'ระบบ'].map((groupName) => {
@@ -6225,6 +6249,110 @@ function barRows(items, labelKey, valKey, fmt = (v) => v) {
   const max = Math.max(1, ...items.map((x) => x[valKey]));
   return items.map((x) => `<div class="bar-row"><span class="bar-lbl">${x[labelKey]}</span><div class="bar"><i style="width:${(x[valKey] / max * 100).toFixed(0)}%"></i></div><b>${fmt(x[valKey])}</b></div>`).join('');
 }
+function growthActionStore() {
+  try { return JSON.parse(localStorage.getItem('adminGrowthActions:v1') || '{}') || {}; }
+  catch { return {}; }
+}
+function setGrowthActionDone(actionId = '') {
+  if (!actionId) return;
+  const store = growthActionStore();
+  store[`${adminSelectedStoreId()}::${actionId}`] = Date.now();
+  try { localStorage.setItem('adminGrowthActions:v1', JSON.stringify(store)); } catch {}
+}
+function isGrowthActionDone(actionId = '') {
+  return Boolean(growthActionStore()[`${adminSelectedStoreId()}::${actionId}`]);
+}
+function buildGrowthRecommendations({ analytics = {}, stats = {}, products = [], orders = [] } = {}) {
+  const totals = analytics.totals || {};
+  const topProducts = Array.isArray(analytics.topProducts) ? analytics.topProducts : [];
+  const awaitingOrders = asArray(orders).filter((order) => ['awaiting_payment', 'expired'].includes(String(order.status || '')));
+  const lowStock = asArray(products).filter((p) => p.active !== false && Number(p.stock || 0) <= 5);
+  const topProductName = topProducts[0]?.name || '';
+  const topProduct = topProductName
+    ? asArray(products).find((p) => productCardName(p) === topProductName || p.name === topProductName)
+    : null;
+  const aov = Math.max(0, Number(totals.aov || 0));
+  return [
+    {
+      id: 'payment-recovery',
+      tone: awaitingOrders.length ? 'urgent' : 'setup',
+      title: awaitingOrders.length ? 'Recover pending payments' : 'Validate checkout flow',
+      detail: awaitingOrders.length
+        ? `${awaitingOrders.length} orders should be followed up today through Inbox or LINE.`
+        : 'No pending payment queue right now. Open Orders to verify checkout and payment flow.',
+      impact: awaitingOrders.length ? 'Recover revenue that may otherwise be lost.' : 'Reduce launch risk before real customers order.',
+      action: 'open-orders',
+      confirm: awaitingOrders.length ? 'Open order queue' : 'Open orders',
+    },
+    {
+      id: 'lead-followup',
+      tone: Number(stats.leads || 0) ? 'urgent' : 'setup',
+      title: Number(stats.leads || 0) ? 'Follow up leads' : 'Improve lead capture',
+      detail: Number(stats.leads || 0)
+        ? `${Number(stats.leads || 0)} leads are waiting. Open Inbox and clear the sales conversation queue.`
+        : 'No leads yet. Open Brand Settings to improve CTA and contact points.',
+      impact: 'Turn existing interest into sales conversations.',
+      action: Number(stats.leads || 0) ? 'open-inbox' : 'open-site-contact',
+      confirm: Number(stats.leads || 0) ? 'Open Inbox' : 'Open CTA settings',
+    },
+    {
+      id: 'pin-top-product',
+      tone: topProduct ? 'growth' : 'setup',
+      title: topProduct ? 'Pin best seller' : 'Create first hero product',
+      detail: topProduct
+        ? `Pin "${topProductName}" to the top and mark it as recommended.`
+        : 'No clear best seller yet. Open Products and create or choose a hero item.',
+      impact: 'Help customers see the strongest product first.',
+      action: topProduct ? 'pin-product' : 'open-products',
+      productId: topProduct?.id || '',
+      confirm: topProduct ? 'Pin product' : 'Open Products',
+    },
+    {
+      id: 'bundle-coupon',
+      tone: aov ? 'growth' : 'setup',
+      title: aov ? 'Lift AOV with bundle offer' : 'Start AOV tracking',
+      detail: aov
+        ? `Current AOV is ${baht(aov)}. Create a bundle coupon with minimum ${baht(Math.max(500, Math.round(aov * 1.2)))}.`
+        : 'Create a starter coupon or bundle to begin measuring order value.',
+      impact: 'Increase order value without heavy discounting.',
+      action: 'create-bundle-coupon',
+      minTotal: Math.max(500, Math.round(aov * 1.2)),
+      value: aov >= 1500 ? 7 : 5,
+      confirm: 'Create coupon draft',
+    },
+    {
+      id: 'stock-health',
+      tone: lowStock.length ? 'urgent' : 'ok',
+      title: lowStock.length ? 'Fix low stock items' : 'Stock looks healthy',
+      detail: lowStock.length
+        ? `${lowStock.length} active items are low or out of stock.`
+        : 'No active low-stock items detected.',
+      impact: lowStock.length ? 'Prevent customers from ordering unavailable items.' : 'Keep the catalog flow smooth.',
+      action: lowStock.length ? 'open-products' : 'mark-done',
+      confirm: lowStock.length ? 'Open stock list' : 'Mark done',
+    },
+  ];
+}
+function renderGrowthRecommendations(items = []) {
+  return `<div class="growth-list growth-ai-list">${items.map((item, index) => {
+    const done = isGrowthActionDone(item.id);
+    return `<article class="growth-ai-item ${done ? 'is-done' : ''} tone-${esc(item.tone || 'setup')}">
+      <div class="growth-ai-index">${done ? '✓' : String(index + 1).padStart(2, '0')}</div>
+      <div class="growth-ai-copy">
+        <b>${esc(item.title)}</b>
+        <span>${esc(item.detail)}</span>
+        <small>${esc(item.impact)}</small>
+      </div>
+      <button class="btn-mini growth-ai-apply" type="button"
+        data-growth-action="${esc(item.action)}"
+        data-growth-id="${esc(item.id)}"
+        data-growth-product="${esc(item.productId || '')}"
+        data-growth-min="${esc(item.minTotal || '')}"
+        data-growth-value="${esc(item.value || '')}"
+        data-growth-label="${esc(item.title)}">${done ? 'Done' : esc(item.confirm || 'Confirm')}</button>
+    </article>`;
+  }).join('')}</div>`;
+}
 async function viewAdminDash() {
   if (!adminGuard()) return loadingView();
   await ensureAdminStoresContext();
@@ -6232,7 +6360,12 @@ async function viewAdminDash() {
   const s = await (await api('/api/admin/stats')).json();
   const dashProducts = await (await api('/api/admin/products')).json().catch(() => []);
   const dashOrdersData = await (await api('/api/admin/orders?limit=8')).json().catch(() => ({ items: [] }));
+  const followUpsData = await (await api('/api/admin/customers/follow-ups')).json().catch(() => ({ items: [] }));
   const t = a.totals;
+  const followUps = asArray(followUpsData.items);
+  const followUpHtml = followUps.length
+    ? `<div class="crm-followup-list">${followUps.map((item) => `<a href="${routeHref(item.href || '/admin/customers')}" class="crm-followup-item ft-${esc(item.type || 'other')}"><span class="crm-followup-icon">${esc(item.icon || '📌')}</span><div class="crm-followup-copy"><b>${esc(item.title)}</b><span>${esc(item.detail)}</span></div><span class="crm-followup-go">จัดการ →</span></a>`).join('')}</div>`
+    : '<p class="muted">วันนี้ไม่มีลูกค้าที่ต้องเร่งติดตาม 🎉</p>';
   const tiles = `<div class="stat-cards">
     <div class="stat-card"><span>ยอดขายรวม</span><b>${baht(t.revenue)}</b></div>
     <div class="stat-card"><span>ออเดอร์</span><b>${t.orders}</b></div>
@@ -6242,12 +6375,12 @@ async function viewAdminDash() {
   const payItems = [{ label: 'PromptPay', n: a.payment.promptpay }, { label: 'บัตรเครดิต', n: a.payment.card }];
   const status = Object.entries(a.statusBreakdown).map(([k, v]) => `<span class="chip">${a.statusLabels[k] || k} · ${v}</span>`).join('') || '<span class="muted">—</span>';
   const top = a.topProducts.length ? barRows(a.topProducts, 'name', 'qty', (v) => v + ' ชิ้น') : '<p class="muted">ยังไม่มีข้อมูล</p>';
-  const growthItems = [
-    t.orders ? 'ติดตามออเดอร์รอชำระและหมดเวลาชำระ เพื่อกู้ยอดขายกลับมา' : 'เพิ่มสินค้าเด่นและทดสอบสั่งซื้อจริง 1 ออเดอร์',
-    s.leads ? `มีลีด ${s.leads} รายการ ควร follow-up ผ่าน Inbox/LINE ภายในวันนี้` : 'เพิ่ม CTA ขอคำปรึกษาในหน้าแรกเพื่อเก็บลีดเพิ่ม',
-    a.topProducts.length ? `ดันสินค้าขายดี "${a.topProducts[0].name}" เป็นสินค้าแนะนำหน้าแรก` : 'ยังไม่มีสินค้าขายดีชัดเจน ให้จัดชุดโปรโมชันเริ่มต้น',
-    t.aov ? `AOV ปัจจุบัน ${baht(t.aov)} ใช้ bundle/recommendation เพื่อเพิ่มมูลค่าต่อออเดอร์` : 'เปิดคูปองหรือชุดเซตเพื่อเริ่มเก็บข้อมูล AOV',
-  ];
+  const growthItems = buildGrowthRecommendations({
+    analytics: a,
+    stats: s,
+    products: dashProducts,
+    orders: asArray(dashOrdersData.items),
+  });
   const lowStockProducts = (Array.isArray(dashProducts) ? dashProducts : [])
     .filter((p) => p.active !== false && Number(p.stock || 0) <= 5)
     .sort((a, b) => Number(a.stock || 0) - Number(b.stock || 0))
@@ -6264,7 +6397,8 @@ async function viewAdminDash() {
     : '<p class="muted">ยังไม่มีออเดอร์ที่ต้องจัดการเร่งด่วน</p>';
   return adminLayout('', `<h2>แดชบอร์ด</h2>${tiles}
     <div class="dash-card"><div class="dash-head"><h3>ยอดขาย 30 วันล่าสุด</h3><span class="muted">รวม ${baht(t.revenue)} · ${t.paidOrders} ออเดอร์ที่ชำระแล้ว</span></div>${areaChart(a.series)}</div>
-    <div class="dash-card growth-card"><div class="dash-head"><h3>Growth checklist</h3><span class="muted">สิ่งที่ควรทำต่อเพื่อเพิ่มยอดขาย</span></div><div class="growth-list">${growthItems.map((item) => `<label><input type="checkbox"> <span>${esc(item)}</span></label>`).join('')}</div></div>
+    <div class="dash-card growth-card growth-ai-card"><div class="dash-head"><div><h3>AI Growth checklist</h3><span class="muted">Autopilot recommendations from sales, leads, orders, and products. Confirm an item to let the system apply the first safe step.</span></div><span class="status-badge s-paid">Autopilot</span></div>${renderGrowthRecommendations(growthItems)}</div>
+    <div class="dash-card crm-followup-card"><div class="dash-head"><div><h3>ลูกค้าที่ควรติดตามวันนี้</h3><span class="muted">AI จัดคิวจากออเดอร์ค้างจ่าย แชตที่ยังไม่ตอบ ลีดใหม่ และลูกค้าถึงรอบซื้อซ้ำ</span></div><a class="btn-mini" href="${routeHref('/admin/customers')}">เปิด CRM ลูกค้า</a></div>${followUpHtml}</div>
     <div class="dash-card today-work"><div class="dash-head"><h3>วันนี้ต้องทำอะไร</h3><span class="muted">คิวงานออเดอร์ที่ควรเคลียร์ก่อน</span></div>${todayWork}</div>
     <div class="dash-grid">
       <div class="dash-card stock-watch"><div class="dash-head"><h3>Low stock watch</h3><span class="muted">สินค้าที่ควรเติมหรือซ่อนก่อนลูกค้าสั่ง</span></div>${lowStock}</div>
@@ -6280,6 +6414,81 @@ async function viewAdminDash() {
       <div class="dash-card"><h3>สินค้าขายดี</h3>${top}</div>
     </div>
     <div class="dash-card"><h3>สถานะออเดอร์</h3><div class="chips">${status}</div></div>`);
+}
+// ── CRM ลูกค้า: โปรไฟล์รวมศูนย์จาก orders + leads + members + chat ──
+let _crmFilter = { q: '', segment: 'all' };
+function crmTimeLabel(ts = 0) {
+  const t = Number(ts || 0);
+  if (!t) return '-';
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 60) return `${Math.max(1, mins)} นาทีที่แล้ว`;
+  if (mins < 60 * 24) return `${Math.floor(mins / 60)} ชม.ที่แล้ว`;
+  return `${Math.floor(mins / (60 * 24))} วันก่อน`;
+}
+function crmCustomerCard(c, labels = {}) {
+  const displayName = c.name || c.phone || c.email || 'ลูกค้าไม่ระบุชื่อ';
+  const contactBits = [c.phone, c.email].filter(Boolean).map(esc).join(' · ');
+  const favorite = (c.topItems || [])[0]?.name || '';
+  const metrics = [
+    c.paidOrdersCount ? `ซื้อแล้ว ${c.paidOrdersCount} ครั้ง · ${baht(c.totalSpent)}` : '',
+    c.pendingOrders?.length ? `ค้างชำระ ${c.pendingOrders.length} ออเดอร์` : '',
+    c.leadStatus ? `ลีด: ${esc(c.leadStatus)}${c.leadCrop ? ` (${esc(c.leadCrop)})` : ''}` : '',
+    favorite ? `ชอบซื้อ: ${esc(favorite)}` : '',
+  ].filter(Boolean);
+  const actions = [
+    c.lastOrderId ? `<a class="btn-mini" href="${routeHref('/admin/order/' + c.lastOrderId)}">ออเดอร์ล่าสุด</a>` : '',
+    (c.sessionIds || []).length ? `<a class="btn-mini" href="${routeHref('/admin/inbox')}">เปิดแชต</a>` : '',
+    c.leadId ? `<a class="btn-mini" href="${routeHref('/admin/leads')}">ดูลีด</a>` : '',
+    c.phone ? `<a class="btn-mini" href="tel:${esc(c.phone)}">โทร</a>` : '',
+  ].filter(Boolean).join('');
+  return `<article class="adm-prod crm-customer">
+    <div class="crm-avatar seg-${esc(c.segment || 'visitor')}">${esc(String(displayName).trim().charAt(0).toUpperCase() || '?')}</div>
+    <div class="adm-prod-info">
+      <div class="crm-name-row"><b>${esc(displayName)}</b><span class="crm-badge seg-${esc(c.segment || 'visitor')}">${esc(labels[c.segment] || c.segment || '')}</span></div>
+      ${contactBits ? `<span class="muted">${contactBits}</span>` : ''}
+      <span class="muted">${metrics.join(' · ') || 'ยังไม่มีประวัติซื้อ'} · ล่าสุด ${crmTimeLabel(c.lastActiveAt)}${(c.channels || []).length ? ` · ${c.channels.map(esc).join('/')}` : ''}</span>
+    </div>
+    <div class="adm-prod-act">${actions}</div>
+  </article>`;
+}
+async function viewAdminCustomers() {
+  if (!adminGuard()) return loadingView();
+  await ensureAdminStoresContext();
+  const params = new URLSearchParams({ limit: '80' });
+  if (_crmFilter.q) params.set('q', _crmFilter.q);
+  if (_crmFilter.segment && _crmFilter.segment !== 'all') params.set('segment', _crmFilter.segment);
+  const [data, followUpsData] = await Promise.all([
+    api('/api/admin/customers?' + params.toString()).then((r) => r.json()).catch(() => ({})),
+    api('/api/admin/customers/follow-ups?limit=8').then((r) => r.json()).catch(() => ({ items: [] })),
+  ]);
+  const customers = asArray(data.customers);
+  const labels = data.segmentLabels || {};
+  const counts = data.segmentCounts || {};
+  const segChips = ['all', 'at_risk', 'vip', 'repeat', 'new_customer', 'dormant', 'lead'].map((seg) => {
+    const label = seg === 'all' ? `ทั้งหมด ${data.totalProfiles || 0}` : `${labels[seg] || seg} ${counts[seg] || 0}`;
+    return `<button type="button" class="btn-mini crm-seg ${_crmFilter.segment === seg ? 'on' : ''}" data-crm-segment="${esc(seg)}">${esc(label)}</button>`;
+  }).join('');
+  const followUps = asArray(followUpsData.items);
+  const followUpHtml = followUps.length
+    ? `<div class="crm-followup-list">${followUps.map((item) => `<a href="${routeHref(item.href || '/admin/customers')}" class="crm-followup-item ft-${esc(item.type || 'other')}"><span class="crm-followup-icon">${esc(item.icon || '📌')}</span><div class="crm-followup-copy"><b>${esc(item.title)}</b><span>${esc(item.detail)}</span></div><span class="crm-followup-go">จัดการ →</span></a>`).join('')}</div>`
+    : '<p class="muted">ไม่มีคิวติดตามที่ค้างอยู่ตอนนี้ 🎉</p>';
+  const rows = customers.length
+    ? `<div class="adm-list">${customers.map((c) => crmCustomerCard(c, labels)).join('')}</div>`
+    : '<div class="glass" style="padding:18px"><p class="muted" style="margin:0">ยังไม่พบลูกค้าตามเงื่อนไขที่เลือก</p></div>';
+  if (_crmFilter.q) {
+    _afterRender = () => {
+      const input = document.getElementById('crmSearchInput');
+      if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+    };
+  }
+  return adminLayout('customers', `<div class="admin-workspace"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Customer Data Platform</span><h2>CRM ลูกค้า</h2><p class="muted">โปรไฟล์ลูกค้ารวมศูนย์จากออเดอร์ แชต ลีด และสมาชิก — พร้อม segment และคิวติดตามอัตโนมัติ</p></div></div>
+    <div class="dash-card crm-followup-card"><div class="dash-head"><h3>คิวติดตามวันนี้</h3><span class="muted">จัดลำดับตามมูลค่าที่เสี่ยงหลุดและความสดของสัญญาณ</span></div>${followUpHtml}</div>
+    <div class="admin-filter-bar">
+      <input id="crmSearchInput" class="admin-filter-input" placeholder="ค้นหาชื่อ เบอร์ อีเมล หรือรหัสออเดอร์…" value="${esc(_crmFilter.q)}" autocomplete="off">
+      <div class="crm-seg-chips">${segChips}</div>
+    </div>
+    ${rows}
+    <p class="form-note" style="margin-top:12px">โปรไฟล์รวมข้อมูลจากออเดอร์ 500 รายการล่าสุด ลีด 300 รายการ สมาชิก และแชตทั้งหมดของร้านที่เลือก · อัปเดตอัตโนมัติทุก 1 นาที</p></div>`);
 }
 
 let _adminProducts = [];
@@ -8500,6 +8709,7 @@ const routes = [
   { re: /^\/admin\/articles\/?$/, view: viewAdminArticles },
   { re: /^\/admin\/inbox\/?$/, view: viewAdminInbox },
   { re: /^\/admin\/leads\/?$/, view: viewAdminLeads },
+  { re: /^\/admin\/customers\/?$/, view: viewAdminCustomers },
   { re: /^\/admin\/orders\/?$/, view: viewAdminOrders },
   { re: /^\/admin\/order\/([^/]+)$/, view: viewAdminOrderDetail, keys: ['id'] },
   { re: /^\/admin\/coupons\/?$/, view: viewAdminCoupons },
@@ -9380,6 +9590,24 @@ function updateShareImagePreview(url = '') {
 document.addEventListener('input', (e) => {
   if (e.target?.closest?.('#settingsForm')) updateSiteAdminPreviews();
 });
+// ── CRM: ค้นหาแบบหน่วงเวลา + สลับ segment ──
+let _crmSearchTimer = null;
+document.addEventListener('input', (e) => {
+  if (e.target?.id !== 'crmSearchInput') return;
+  clearTimeout(_crmSearchTimer);
+  const value = String(e.target.value || '');
+  _crmSearchTimer = setTimeout(() => {
+    _crmFilter.q = value.trim();
+    render();
+  }, 350);
+});
+document.addEventListener('click', (e) => {
+  const segBtn = e.target.closest('[data-crm-segment]');
+  if (!segBtn) return;
+  e.preventDefault();
+  _crmFilter.segment = String(segBtn.dataset.crmSegment || 'all');
+  render();
+});
 document.addEventListener('change', (e) => {
   if (e.target?.id !== 'shareImageFile' && e.target?.closest?.('#settingsForm')) updateSiteAdminPreviews();
 });
@@ -9568,6 +9796,27 @@ async function syncCropLandingSettings(form) {
 // ───────── admin/account click actions ─────────
 document.body.addEventListener('click', async (e) => {
   const id = e.target.id;
+  const storeMenuToggle = e.target.closest('[data-admin-store-toggle]');
+  if (storeMenuToggle) {
+    e.preventDefault();
+    const menu = storeMenuToggle.closest('.admin-store-menu');
+    const shouldOpen = !menu?.classList.contains('is-open');
+    document.querySelectorAll('.admin-store-menu.is-open').forEach((item) => {
+      item.classList.remove('is-open');
+      item.querySelector('[data-admin-store-toggle]')?.setAttribute('aria-expanded', 'false');
+    });
+    if (menu && shouldOpen) {
+      menu.classList.add('is-open');
+      storeMenuToggle.setAttribute('aria-expanded', 'true');
+    }
+    return;
+  }
+  if (!e.target.closest('.admin-store-menu')) {
+    document.querySelectorAll('.admin-store-menu.is-open').forEach((item) => {
+      item.classList.remove('is-open');
+      item.querySelector('[data-admin-store-toggle]')?.setAttribute('aria-expanded', 'false');
+    });
+  }
   const storyClose = e.target.closest('[data-story-close]');
   if (storyClose || (e.target.id === 'communityStoryModal')) {
     e.preventDefault();
@@ -10183,6 +10432,93 @@ document.body.addEventListener('click', async (e) => {
     scheduleCropDraftSave(120);
     return;
   }
+  const growthApply = e.target.closest('[data-growth-action]');
+  if (growthApply) {
+    e.preventDefault();
+    e.stopPropagation();
+    const action = String(growthApply.dataset.growthAction || '').trim();
+    const actionId = String(growthApply.dataset.growthId || '').trim();
+    const label = String(growthApply.dataset.growthLabel || 'AI Growth action').trim();
+    const ok = await confirmDialog({
+      title: 'Confirm AI Growth action',
+      message: `Apply "${label}" for the currently selected store? The system will only perform the safe first step and will not send messages to customers automatically.`,
+      confirmText: 'Apply action',
+      cancelText: 'Review first',
+      tone: 'info',
+    });
+    if (!ok) return;
+    growthApply.disabled = true;
+    try {
+      if (action === 'pin-product') {
+        const productId = String(growthApply.dataset.growthProduct || '').trim();
+        if (!productId) throw new Error('Missing product id');
+        const products = await (await api('/api/admin/products')).json();
+        const product = asArray(products).find((item) => String(item.id || '') === productId);
+        if (!product) throw new Error('Product not found');
+        const extra = { ...(product.extra || {}) };
+        extra.marketingBadge = extra.marketingBadge || 'Recommended';
+        const r = await api('/api/admin/products/' + encodeURIComponent(productId), {
+          method: 'PUT',
+          body: JSON.stringify({
+            active: true,
+            sort: -999,
+            tag: product.tag || 'Recommended',
+            extra,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'Pin product failed');
+        await refreshProductsCache();
+        setGrowthActionDone(actionId);
+        toast('Pinned recommended product', 'ok');
+        render();
+        return;
+      }
+      if (action === 'create-bundle-coupon') {
+        const minTotal = Math.max(0, parseInt(growthApply.dataset.growthMin, 10) || 500);
+        const value = Math.max(1, Math.min(30, parseInt(growthApply.dataset.growthValue, 10) || 5));
+        const code = `BUNDLE${Date.now().toString(36).slice(-5).toUpperCase()}`;
+        const r = await api('/api/admin/coupons', {
+          method: 'POST',
+          body: JSON.stringify({ code, type: 'percent', value, minTotal, maxUses: 50, active: true }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'Create coupon failed');
+        setGrowthActionDone(actionId);
+        toast(`Created coupon ${code}`, 'ok');
+        go('/admin/coupons');
+        return;
+      }
+      if (action === 'open-orders') {
+        setGrowthActionDone(actionId);
+        go('/admin/orders');
+        return;
+      }
+      if (action === 'open-inbox') {
+        setGrowthActionDone(actionId);
+        go('/admin/inbox');
+        return;
+      }
+      if (action === 'open-products') {
+        setGrowthActionDone(actionId);
+        go('/admin/products');
+        return;
+      }
+      if (action === 'open-site-contact') {
+        try { localStorage.setItem('adminSiteActiveSection:v1', 'contact'); } catch {}
+        setGrowthActionDone(actionId);
+        go('/admin/site');
+        return;
+      }
+      setGrowthActionDone(actionId);
+      toast('Marked as done', 'ok');
+      render();
+    } catch (err) {
+      toast(err.message || 'AI Growth action failed', 'err');
+      growthApply.disabled = false;
+    }
+    return;
+  }
   if (id === 'testLineBtn') {
     e.target.disabled = true;
     try { const r = await api('/api/admin/test-line', { method: 'POST' }); const d = await r.json(); if (!r.ok) throw new Error(d.error); toast('ส่งข้อความทดสอบไป LINE แล้ว', 'ok'); }
@@ -10266,6 +10602,8 @@ document.body.addEventListener('click', async (e) => {
   if (storePickBtn) {
     e.preventDefault();
     const nextStoreId = String(storePickBtn.dataset.adminStorePick || '').trim();
+    storePickBtn.closest('.admin-store-menu')?.classList.remove('is-open');
+    storePickBtn.closest('.admin-store-menu')?.querySelector('[data-admin-store-toggle]')?.setAttribute('aria-expanded', 'false');
     if (!nextStoreId || nextStoreId === adminSelectedStoreId()) return;
     setAdminSelectedStoreId(nextStoreId);
     _adminSelectedProductIds.clear();

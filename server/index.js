@@ -60,6 +60,7 @@ import { isSupabaseConfigured, supabaseEnv, uploadPublicAsset } from './supabase
 import { verifyBridgeRequest } from './lineoa-bridge.js';
 import { createOrderService } from './order-service.js';
 import { DEFAULT_ARTICLES } from './default-articles.js';
+import { buildCustomerProfiles, buildFollowUps, buildProductRecommendations, CRM_SEGMENT_LABELS } from './crm.js';
 import { createLineRuntime } from './lineoa-runtime.js';
 import { extractRequestHost, normalizeRequestedSubdomain, isValidStoreSubdomain, buildStoreId, rootDomainFromPublicUrl, buildStorePublicUrl, buildStoreBootstrapSettings } from './store-tenant.js';
 import { getVercelDomainConfig, provisionVercelProjectDomain, removeVercelProjectDomain, vercelDomainAutomationConfigured } from './vercel-domains.js';
@@ -2812,6 +2813,62 @@ function siteValueFromOverrides(k, overrides = {}) {
 function siteConfigWithOverrides(overrides = {}, keys = SITE_KEYS) {
   return Object.fromEntries(keys.map((key) => [key, siteValueFromOverrides(key, overrides)]));
 }
+const STRICT_STORE_DEFAULT_KEYS = new Set([
+  'SHIP_HOME',
+  'SHIP_FEE',
+  'SHIP_INTL_FEE',
+  'SHIP_FREE_OVER',
+  'SITE_STAT_ONTIME_TARGET_DAYS',
+]);
+function shouldIgnoreLegacyMainStoreCopy({ store = null, overrides = {}, key = '', value = '' } = {}) {
+  if (!store || store.isDefault === true || STRICT_STORE_DEFAULT_KEYS.has(key)) return false;
+  if (String(overrides.__STORE_CLONED_FROM || '').trim()) return false;
+  const next = String(value ?? '').trim();
+  if (!next) return false;
+  const mainValue = String(settingsCache[key] ?? process.env[key] ?? SITE_DEFAULTS[key] ?? '').trim();
+  return Boolean(mainValue) && next === mainValue;
+}
+function isolatedStoreSiteDefaults(store = {}, req = null) {
+  const name = String(store?.name || '').trim();
+  const publicUrl = req ? currentStorePublicUrl(req, store) : String(store?.publicUrl || store?.primaryDomain || '').trim();
+  return {
+    ...Object.fromEntries(SITE_KEYS.map((key) => [key, ''])),
+    SITE_NAME: name,
+    SITE_TAGLINE: '',
+    SITE_ANNOUNCE: '',
+    SITE_PRODUCT_CATEGORIES: '[]',
+    SITE_HERO_TITLE: name ? `${name} ออนไลน์` : '',
+    SITE_HERO_ACCENT: '',
+    SITE_HERO_TITLE2: '',
+    SITE_HERO_SUB: '',
+    SITE_FOOTER: name ? `© ${name}` : '',
+    PUBLIC_URL: publicUrl,
+    SHIP_HOME: SITE_DEFAULTS.SHIP_HOME,
+    SHIP_FEE: SITE_DEFAULTS.SHIP_FEE,
+    SHIP_INTL_FEE: SITE_DEFAULTS.SHIP_INTL_FEE,
+    SHIP_FREE_OVER: SITE_DEFAULTS.SHIP_FREE_OVER,
+    SALE_ACTIVE: '',
+    SALE_PERCENT: '0',
+    SALE_ENDS: '',
+    SALE_TEXT: '',
+    SITE_STAT_FARMERS: '0',
+    SITE_STAT_PRODUCTS: 'auto',
+    SITE_STAT_RATING: 'auto',
+    SITE_STAT_ONTIME: '0',
+    SITE_STAT_ONTIME_BASE_TOTAL: '0',
+    SITE_STAT_ONTIME_BASE_ONTIME: '0',
+    SITE_STAT_ONTIME_TARGET_DAYS: SITE_DEFAULTS.SITE_STAT_ONTIME_TARGET_DAYS,
+  };
+}
+function storeSiteValue(key, { store = null, overrides = {}, req = null, strict = false } = {}) {
+  const hasOverride = overrides && Object.prototype.hasOwnProperty.call(overrides, key) && overrides[key] !== undefined && overrides[key] !== null && overrides[key] !== '';
+  if (hasOverride && !(strict && shouldIgnoreLegacyMainStoreCopy({ store, overrides, key, value: overrides[key] }))) return String(overrides[key] ?? '');
+  if (strict && store && store.isDefault !== true) return String(isolatedStoreSiteDefaults(store, req)[key] ?? '');
+  return String(siteValue(key) ?? '');
+}
+function storeSiteConfig({ store = null, overrides = {}, keys = SITE_KEYS, req = null, strict = false } = {}) {
+  return Object.fromEntries(keys.map((key) => [key, storeSiteValue(key, { store, overrides, req, strict })]));
+}
 async function siteOverridesForRequest(req) {
   const storeSettings = await getRequestStoreSettings(req);
   return storeSettings && typeof storeSettings === 'object' ? storeSettings : {};
@@ -2870,17 +2927,17 @@ function storeTemplateSettings(templateKey = '', storeName = '') {
     blank: {},
     agri: {
       SITE_HERO_TITLE: `${name || 'ร้านใหม่'} - อาหารเสริมพืชและคำแนะนำครบ`,
-      SITE_HERO_SUBTITLE: 'จัดร้านให้พร้อมขายสินค้าเกษตร พร้อมพื้นที่ความรู้และรีวิวจากลูกค้าจริง',
+      SITE_HERO_SUB: 'จัดร้านให้พร้อมขายสินค้าเกษตร พร้อมพื้นที่ความรู้และรีวิวจากลูกค้าจริง',
       SITE_PRODUCT_INTRO: 'เลือกสินค้าแนะนำสำหรับพืชของคุณ',
     },
     pod: {
       SITE_HERO_TITLE: `${name || 'ร้านใหม่'} - พอตพร้อมส่งดีไซน์พรีเมียม`,
-      SITE_HERO_SUBTITLE: 'หน้าร้านสะอาด เลือกซื้อง่าย พร้อมระบบติดตามออเดอร์และแชต',
+      SITE_HERO_SUB: 'หน้าร้านสะอาด เลือกซื้อง่าย พร้อมระบบติดตามออเดอร์และแชต',
       SITE_PRODUCT_INTRO: 'รวมสินค้าแนะนำและโปรโมชันพร้อมส่ง',
     },
     course: {
       SITE_HERO_TITLE: `${name || 'ร้านใหม่'} - แหล่งเรียนรู้และคอร์สออนไลน์`,
-      SITE_HERO_SUBTITLE: 'ขายคอร์ส แบ่งปันประสบการณ์ และสร้างชุมชนผู้เรียนในที่เดียว',
+      SITE_HERO_SUB: 'ขายคอร์ส แบ่งปันประสบการณ์ และสร้างชุมชนผู้เรียนในที่เดียว',
       SITE_PRODUCT_INTRO: 'เลือกคอร์สหรือแพ็กเกจที่เหมาะกับคุณ',
     },
   };
@@ -3049,8 +3106,13 @@ function orderDeliveredOnTime(order, targetDays) {
   if (!createdAt || !updatedAt || updatedAt < createdAt) return false;
   return (updatedAt - createdAt) <= Math.max(1, targetDays) * 86400000;
 }
-async function computeFarmersHybridTotal(baseValue) {
-  const [orders, leads, users] = await Promise.all([listOrderIdentityRows(), listLeadIdentityRows(), listUserIdentityRows()]);
+async function computeFarmersHybridTotal(baseValue, options = {}) {
+  const scopedStoreId = String(options.storeId || '').trim();
+  const [orders, leads, users] = await Promise.all([
+    listOrderIdentityRows({ storeId: scopedStoreId }),
+    scopedStoreId ? Promise.resolve([]) : listLeadIdentityRows(),
+    scopedStoreId ? Promise.resolve([]) : listUserIdentityRows(),
+  ]);
   const seen = new Set();
   for (const lead of leads) {
     const id = recordIdentity(normalizePhone(lead.phone), `line:${normalizeLineId(lead.line_id)}`, `lead:${normalizeName(lead.name)}|${normalizeName(lead.province)}`);
@@ -3069,13 +3131,15 @@ async function computeFarmersHybridTotal(baseValue) {
   }
   return Math.max(0, Math.round(baseValue)) + seen.size;
 }
-async function computeOnTimeHybridRate() {
-  const fallbackRate = Math.min(100, Math.max(0, parseFloat(siteValue('SITE_STAT_ONTIME')) || 0));
-  const baseTotal = Math.max(0, Math.round(parseFloat(siteValue('SITE_STAT_ONTIME_BASE_TOTAL')) || 0));
-  const baseOnTimeInput = parseFloat(siteValue('SITE_STAT_ONTIME_BASE_ONTIME'));
+async function computeOnTimeHybridRate(options = {}) {
+  const siteStatValue = typeof options.siteValue === 'function' ? options.siteValue : siteValue;
+  const scopedStoreId = String(options.storeId || '').trim();
+  const fallbackRate = Math.min(100, Math.max(0, parseFloat(siteStatValue('SITE_STAT_ONTIME')) || 0));
+  const baseTotal = Math.max(0, Math.round(parseFloat(siteStatValue('SITE_STAT_ONTIME_BASE_TOTAL')) || 0));
+  const baseOnTimeInput = parseFloat(siteStatValue('SITE_STAT_ONTIME_BASE_ONTIME'));
   const baseOnTime = Math.max(0, Math.round(Number.isFinite(baseOnTimeInput) ? baseOnTimeInput : (baseTotal * fallbackRate / 100)));
-  const targetDays = Math.max(1, Math.round(parseFloat(siteValue('SITE_STAT_ONTIME_TARGET_DAYS')) || 7));
-  const delivered = await listDeliveredOrderTimingRows();
+  const targetDays = Math.max(1, Math.round(parseFloat(siteStatValue('SITE_STAT_ONTIME_TARGET_DAYS')) || 7));
+  const delivered = await listDeliveredOrderTimingRows({ storeId: scopedStoreId });
   const actualDelivered = delivered.length;
   const actualOnTime = delivered.filter((order) => orderDeliveredOnTime({ createdAt: order.created_at, updatedAt: order.updated_at }, targetDays)).length;
   const totalDelivered = baseTotal + actualDelivered;
@@ -3087,11 +3151,13 @@ async function computeOnTimeHybridRate() {
 async function computeSiteStats(options = {}) {
   const scopedStoreId = String(options.storeId || '').trim();
   const overrides = options.overrides && typeof options.overrides === 'object' ? options.overrides : {};
+  const store = options.store || null;
+  const req = options.req || null;
   const cacheFresh = !scopedStoreId && siteStatsCache && (Date.now() - siteStatsCacheAt) < SITE_STATS_CACHE_TTL_MS;
   if (cacheFresh) return siteStatsCache;
   if (!scopedStoreId && siteStatsCachePromise) return siteStatsCachePromise;
   const runner = (async () => {
-  const scopedSiteValue = (key) => siteValueFromOverrides(key, overrides);
+  const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(scopedStoreId && store && store.isDefault !== true) });
   const manual = (k, fb) => { const n = parseFloat(scopedSiteValue(k)); return Number.isFinite(n) ? n : fb; };
   const farmersBase = manual('SITE_STAT_FARMERS', 0);
   let products = manual('SITE_STAT_PRODUCTS', 0);
@@ -3105,8 +3171,8 @@ async function computeSiteStats(options = {}) {
     for (const s of Object.values(stats)) { sum += (s.avg || 0) * (s.count || 0); cnt += (s.count || 0); }
     rating = cnt ? Math.round((sum / cnt) * 10) / 10 : 5.0;   // ยังไม่มีรีวิว → แสดง 5.0
   }
-  farmers = await computeFarmersHybridTotal(farmersBase);
-  ontime = await computeOnTimeHybridRate();
+  farmers = await computeFarmersHybridTotal(farmersBase, { storeId: scopedStoreId });
+  ontime = await computeOnTimeHybridRate({ storeId: scopedStoreId, siteValue: scopedSiteValue });
   const result = {
     farmers: Math.max(0, Math.round(farmers)),
     products: Math.max(0, Math.round(products)),
@@ -3127,12 +3193,12 @@ app.get('/api/site', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const store = await getRequestStore(req);
   const overrides = await siteOverridesForRequest(req);
-  const productCategories = await resolvedPublicProductCategories({ storeId: store?.id, overrides });
+  const productCategories = await resolvedPublicProductCategories({ store, storeId: store?.id, overrides, req });
   res.json({
-    ...siteConfigWithOverrides(overrides, SITE_PUBLIC_KEYS),
+    ...storeSiteConfig({ store, overrides, keys: SITE_PUBLIC_KEYS, req, strict: true }),
     ...siteRealtimeConfig(),
     SITE_PRODUCT_CATEGORIES: JSON.stringify(productCategories),
-    stats: await computeSiteStats({ storeId: store?.id, overrides }),
+    stats: await computeSiteStats({ store, storeId: store?.id, overrides, req }),
     store: store ? {
       id: store.id,
       name: store.name,
@@ -3145,24 +3211,30 @@ app.get('/api/site', async (req, res) => {
 });
 app.get('/api/site/content', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  const store = await getRequestStore(req);
   const overrides = await siteOverridesForRequest(req);
-  res.json(siteConfigWithOverrides(overrides, SITE_HEAVY_KEYS));
+  res.json(storeSiteConfig({ store, overrides, keys: SITE_HEAVY_KEYS, req, strict: true }));
 });
-app.get('/api/reviews/gallery', async (_req, res) => {
+app.get('/api/reviews/gallery', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  const store = await getRequestStore(req);
+  if (store && store.isDefault !== true) {
+    return res.json({ updatedAt: Date.now(), total: 0, duplicatesRemoved: 0, duplicates: [], items: [] });
+  }
   res.json(mergedReviewGalleryData());
 });
 
 // ── flash sale / shipping / email helpers ──
-function saleConfig() {
-  const active = siteValue('SALE_ACTIVE') === '1';
-  const pct = Math.max(0, Math.min(90, parseInt(siteValue('SALE_PERCENT'), 10) || 0));
-  const ends = siteValue('SALE_ENDS') ? Date.parse(siteValue('SALE_ENDS')) : 0;
+function saleConfig(options = {}) {
+  const getSiteValue = typeof options.siteValue === 'function' ? options.siteValue : siteValue;
+  const active = getSiteValue('SALE_ACTIVE') === '1';
+  const pct = Math.max(0, Math.min(90, parseInt(getSiteValue('SALE_PERCENT'), 10) || 0));
+  const ends = getSiteValue('SALE_ENDS') ? Date.parse(getSiteValue('SALE_ENDS')) : 0;
   const live = active && pct > 0 && (!ends || ends > Date.now());
-  return { active: live, percent: pct, ends: ends || 0, text: siteValue('SALE_TEXT') };
+  return { active: live, percent: pct, ends: ends || 0, text: getSiteValue('SALE_TEXT') };
 }
-function effPrice(p) {
-  const s = saleConfig();
+function effPrice(p, options = {}) {
+  const s = options.sale || saleConfig(options);
   const manual = resolveManualProductCurrentPrice(p);
   if (manual > 0) return manual;
   return s.active ? Math.max(1, Math.round(p.price * (1 - s.percent / 100))) : p.price;
@@ -3187,10 +3259,10 @@ function resolveManualProductCurrentPrice(product = {}) {
 function resolveManualProductComparePrice(product = {}) {
   return resolveManualProductPricePair(product).compare;
 }
-function resolvePublicProductSalePrice(product = {}) {
+function resolvePublicProductSalePrice(product = {}, options = {}) {
   const pair = resolveManualProductPricePair(product);
   if (pair.compare > pair.current) return pair.current;
-  const flash = effPrice(product);
+  const flash = effPrice(product, options);
   return flash > 0 && flash < (parseInt(product?.price, 10) || 0) ? flash : 0;
 }
 function shippingFor(country, amount) {
@@ -3311,7 +3383,14 @@ function normalizeProductForClient(product = {}) {
 async function resolvedPublicProductCategories(options = {}) {
   const storeId = String(options.storeId || '').trim();
   const overrides = options.overrides && typeof options.overrides === 'object' ? options.overrides : {};
-  const configured = parseProductCategorySettings(siteValueFromOverrides('SITE_PRODUCT_CATEGORIES', overrides));
+  const store = options.store || null;
+  const req = options.req || null;
+  const configured = parseProductCategorySettings(storeSiteValue('SITE_PRODUCT_CATEGORIES', {
+    store,
+    overrides,
+    req,
+    strict: Boolean(store && store.isDefault !== true),
+  }));
   const liveProducts = await listProducts(false, { storeId });
   const live = liveProducts.map((item) => inferProductCategoryValue(item)).filter(Boolean);
   return [...new Set([...configured, ...live])];
@@ -3460,19 +3539,65 @@ app.post('/api/auth/logout', async (req, res) => {
 // ──────────── products (public) ────────────
 app.get('/api/products', async (req, res) => {
   const store = await getRequestStore(req);
-  const st = await allReviewStats({ storeId: store?.id }); const sale = saleConfig();
+  const overrides = await siteOverridesForRequest(req);
+  const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) });
+  const st = await allReviewStats({ storeId: store?.id }); const sale = saleConfig({ siteValue: scopedSiteValue });
   res.json((await listProducts(false, { storeId: store?.id })).map((p) => {
     const item = normalizeProductForClient(p);
-    return { ...item, rating: st[item.id]?.avg || 0, reviews: st[item.id]?.count || 0, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item) : 0) };
+    return { ...item, rating: st[item.id]?.avg || 0, reviews: st[item.id]?.count || 0, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0) };
   }));
 });
 app.get('/api/products/:id', async (req, res) => {
   const store = await getRequestStore(req);
   const p = await getProduct(req.params.id, { storeId: store?.id });
   if (!p || !p.active) return res.status(404).json({ error: 'ไม่พบสินค้า' });
-  const s = await reviewStats(p.id, { storeId: store?.id }); const sale = saleConfig();
+  const overrides = await siteOverridesForRequest(req);
+  const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) });
+  const s = await reviewStats(p.id, { storeId: store?.id }); const sale = saleConfig({ siteValue: scopedSiteValue });
   const item = normalizeProductForClient(p);
-  res.json({ ...item, rating: s.avg, reviews: s.count, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item) : 0) });
+  res.json({ ...item, rating: s.avg, reviews: s.count, salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0) });
+});
+// ── Recommendation API: "ลูกค้าที่ซื้อสินค้านี้มักซื้อคู่กับ" (co-occurrence จากออเดอร์จริง) ──
+const productRecoCache = new Map(); // storeId -> { at, engine }
+const PRODUCT_RECO_TTL_MS = 10 * 60 * 1000;
+async function getRecommendationEngine(storeId = '') {
+  const key = String(storeId || 'store_main');
+  const cached = productRecoCache.get(key);
+  if (cached && (Date.now() - cached.at) < PRODUCT_RECO_TTL_MS) return cached.engine;
+  const [orders, products] = await Promise.all([
+    listOrders(300, { storeId: key }),
+    listProducts(false, { storeId: key }),
+  ]);
+  const engine = buildProductRecommendations({ orders, products });
+  productRecoCache.set(key, { at: Date.now(), engine });
+  return engine;
+}
+app.get('/api/products/:id/recommendations', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const store = await getRequestStore(req);
+    const overrides = await siteOverridesForRequest(req);
+    const scopedSiteValue = (key) => storeSiteValue(key, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) });
+    const sale = saleConfig({ siteValue: scopedSiteValue });
+    const engine = await getRecommendationEngine(store?.id);
+    const st = await allReviewStats({ storeId: store?.id });
+    const picks = engine.recommendFor(req.params.id, Math.min(8, Math.max(2, parseInt(req.query.limit, 10) || 4)));
+    res.json({
+      ok: true,
+      items: picks.map(({ product, reason }) => {
+        const item = normalizeProductForClient(product);
+        return {
+          ...item,
+          rating: st[item.id]?.avg || 0,
+          reviews: st[item.id]?.count || 0,
+          salePrice: item.salePrice || (sale.active ? resolvePublicProductSalePrice(item, { sale }) : 0),
+          recoReason: reason,
+        };
+      }),
+    });
+  } catch (err) {
+    res.json({ ok: false, items: [], error: err?.message || 'recommendation_failed' });
+  }
 });
 
 // ──────────── articles (public) ────────────
@@ -3942,6 +4067,55 @@ app.put('/api/admin/articles/:id', requireStoreScopedAccess('staff'), async (req
 });
 app.delete('/api/admin/articles/:id', requireStoreScopedAccess('staff'), async (req, res) => { await deleteArticle(req.params.id, adminStoreScope(req)); res.json({ ok: true }); });
 
+// ── CRM / Customer Data Platform: โปรไฟล์ลูกค้ารวมศูนย์จาก orders + leads + members + chat ──
+const crmSnapshotCache = new Map(); // storeId -> { at, profiles }
+const CRM_SNAPSHOT_TTL_MS = 60 * 1000;
+async function getCrmProfiles(storeId = '') {
+  const scopeId = String(storeId || 'store_main') === 'all' ? '' : String(storeId || 'store_main');
+  const cacheKey = scopeId || '__all__';
+  const cached = crmSnapshotCache.get(cacheKey);
+  if (cached && (Date.now() - cached.at) < CRM_SNAPSHOT_TTL_MS) return cached.profiles;
+  const [orders, leads, users, chatMetaAll] = await Promise.all([
+    listOrders(500, scopeId ? { storeId: scopeId } : {}),
+    listLeads(300, scopeId ? { storeId: scopeId } : {}),
+    listUsers().catch(() => []),
+    listAllChatSessionMeta().catch(() => ({})),
+  ]);
+  const chatMeta = !scopeId ? (chatMetaAll || {}) : Object.fromEntries(
+    Object.entries(chatMetaAll || {}).filter(([, meta]) => String(meta?.storeId || 'store_main') === scopeId)
+  );
+  const profiles = buildCustomerProfiles({ orders, leads, users, chatMeta });
+  crmSnapshotCache.set(cacheKey, { at: Date.now(), profiles });
+  return profiles;
+}
+app.get('/api/admin/customers', requireStoreScopedAccess('staff'), async (req, res) => {
+  const { storeId } = adminStoreScope(req);
+  const profiles = await getCrmProfiles(storeId);
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const segment = String(req.query.segment || '').trim();
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 60));
+  let rows = profiles;
+  if (segment && segment !== 'all') rows = rows.filter((profile) => profile.segment === segment);
+  if (q) {
+    rows = rows.filter((profile) => [profile.name, profile.phone, profile.email, profile.lastOrderId]
+      .some((value) => String(value || '').toLowerCase().includes(q)));
+  }
+  const segmentCounts = {};
+  for (const profile of profiles) segmentCounts[profile.segment] = (segmentCounts[profile.segment] || 0) + 1;
+  res.json({
+    ok: true,
+    total: rows.length,
+    totalProfiles: profiles.length,
+    segmentCounts,
+    segmentLabels: CRM_SEGMENT_LABELS,
+    customers: rows.slice(0, limit),
+  });
+});
+app.get('/api/admin/customers/follow-ups', requireStoreScopedAccess('staff'), async (req, res) => {
+  const { storeId } = adminStoreScope(req);
+  const profiles = await getCrmProfiles(storeId);
+  res.json({ ok: true, items: buildFollowUps(profiles, { limit: Math.min(20, Math.max(3, parseInt(req.query.limit, 10) || 12)) }) });
+});
 app.get('/api/admin/leads', requireStoreScopedAccess('staff'), async (req, res) => {
   const { page, limit, offset, search, status } = parseAdminListQuery(req, 20);
   const { storeId } = adminStoreScope(req);
@@ -4157,7 +4331,6 @@ app.post('/api/admin/stores', requireAdmin, async (req, res) => {
   await addUserStoreRole(String(req.user?.id || '').trim(), store.id, ROLE_ADMIN);
   const cloneSettings = cloneFromStoreId ? await allStoreSettings(cloneFromStoreId).catch(() => ({})) : {};
   const seedSettings = {
-    ...siteConfig(),
     ...cloneSettings,
     ...buildStoreBootstrapSettings({ storeName: name, publicUrl }),
     ...storeTemplateSettings(templateKey, name),
@@ -4165,6 +4338,7 @@ app.post('/api/admin/stores', requireAdmin, async (req, res) => {
   for (const [key, value] of Object.entries(seedSettings)) {
     await setStoreSetting(store.id, key, String(value ?? ''));
   }
+  if (cloneFromStoreId) await setStoreSetting(store.id, '__STORE_CLONED_FROM', cloneFromStoreId);
   await recordSystemEvent({
     level: 'info',
     source: 'multi_tenant',
@@ -4309,14 +4483,17 @@ function storeRuntimeValue(overrides = {}, key = '') {
   if (direct !== undefined && direct !== null && direct !== '') return String(direct || '').trim();
   return String(settingsCache[key] ?? process.env[key] ?? SITE_DEFAULTS[key] ?? '').trim();
 }
+function storeRuntimeValueForStore(store = {}, overrides = {}, key = '', req = null) {
+  return String(storeSiteValue(key, { store, overrides, req, strict: true }) || '').trim();
+}
 function buildStoreSharePreview(req, store = {}, value = () => '') {
   const siteName = value('SITE_NAME');
   const tagline = value('SITE_TAGLINE');
   const title = value('SITE_SHARE_TITLE') || [siteName, tagline].filter(Boolean).join(' | ');
   const desc = value('SITE_SHARE_DESC') || value('SITE_HERO_SUB') || value('SITE_ANNOUNCE') || tagline;
   const baseUrl = String(currentStorePublicUrl(req, store) || siteValue('PUBLIC_URL') || '').trim().replace(/\/+$/, '');
-  const rawImage = value('SITE_SHARE_IMAGE') || '/brand-share.jpg?v=20260628-1';
-  const image = /^https?:\/\//i.test(rawImage) ? rawImage : `${baseUrl}${rawImage.startsWith('/') ? '' : '/'}${rawImage}`;
+  const rawImage = value('SITE_SHARE_IMAGE') || (store?.isDefault === true ? '/brand-share.jpg?v=20260628-1' : '');
+  const image = rawImage ? (/^https?:\/\//i.test(rawImage) ? rawImage : `${baseUrl}${rawImage.startsWith('/') ? '' : '/'}${rawImage}`) : '';
   return { title, desc, image, url: `${baseUrl || '/'}${baseUrl ? '/' : ''}` };
 }
 function buildStoreLaunchChecklist({ store = {}, value = () => '', productCount = 0, orderCount = 0, domainHealth = {}, webhookCounters = {} } = {}) {
@@ -4352,7 +4529,7 @@ app.get('/api/admin/production-qa', requireStoreScopedAccess('staff'), async (re
   if (!store?.id) return res.status(404).json({ error: 'store not found' });
   const storeId = store.id;
   const overrides = await allStoreSettings(storeId).catch(() => ({}));
-  const value = (key) => storeRuntimeValue(overrides, key);
+  const value = (key) => storeRuntimeValueForStore(store, overrides, key, req);
   const [products, orders, leads, articles, coupons, domainHealth, audits] = await Promise.all([
     listProducts(true, { storeId }).catch(() => []),
     listOrders(10, { storeId }).catch(() => []),
@@ -4505,10 +4682,10 @@ app.get('/api/admin/stores/:id/settings', requireStoreParamAccess('staff'), asyn
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
   const overrides = await allStoreSettings(store.id).catch(() => ({}));
-  const mergedSite = siteConfigWithOverrides(overrides);
+  const mergedSite = storeSiteConfig({ store, overrides, req, strict: true });
   const rows = STORE_SETTING_KEYS.map((key) => {
     const hasOverride = overrides[key] !== undefined && overrides[key] !== null && overrides[key] !== '';
-    const rawValue = hasOverride ? String(overrides[key] || '') : String(settingsCache[key] ?? process.env[key] ?? SITE_DEFAULTS[key] ?? '');
+    const rawValue = storeSiteValue(key, { store, overrides, req, strict: true });
     return {
       key,
       value: SECRET_KEYS.has(key) && hasOverride ? '' : rawValue,
@@ -4517,7 +4694,7 @@ app.get('/api/admin/stores/:id/settings', requireStoreParamAccess('staff'), asyn
       display: SECRET_KEYS.has(key) && rawValue ? '••••••' + rawValue.slice(-4) : rawValue,
     };
   });
-  res.json({ ok: true, store, site: mergedSite, settings: rows, overrides });
+  res.json({ ok: true, store, site: mergedSite, settings: rows, overrides, isolated: store.isDefault !== true });
 });
 app.put('/api/admin/stores/:id/settings', requireStoreParamAccess('admin'), async (req, res) => {
   const store = await getStore(req.params.id);
@@ -4543,7 +4720,7 @@ app.put('/api/admin/stores/:id/settings', requireStoreParamAccess('admin'), asyn
     data: { storeId: store.id, changedKeys },
   });
   const overrides = await allStoreSettings(store.id).catch(() => ({}));
-  res.json({ ok: true, store, changedKeys, site: siteConfigWithOverrides(overrides), overrides });
+  res.json({ ok: true, store, changedKeys, site: storeSiteConfig({ store, overrides, req, strict: true }), overrides, isolated: store.isDefault !== true });
 });
 app.put('/api/admin/users/:id', requireAdmin, async (req, res) => {
   const target = await getUserById(req.params.id);
@@ -4857,12 +5034,26 @@ app.post('/api/admin/diagnostics/recheck', requireAdmin, async (_req, res) => {
 });
 // ข้อมูลร้าน/แบรนด์สำหรับหลังบ้าน (ค่าจริง ไม่ปิดบัง)
 app.get('/api/admin/site', requireStoreScopedAccess('staff'), async (req, res) => {
+  const store = await getAdminSelectedStore(req);
   const { storeId } = adminStoreScope(req);
   const overrides = await allStoreSettings(storeId).catch(() => ({}));
-  res.json(siteConfigWithOverrides(overrides));
+  res.json({
+    ...storeSiteConfig({ store, overrides, req, strict: true }),
+    _store: store ? {
+      id: store.id,
+      name: store.name,
+      isDefault: store.isDefault === true,
+      publicUrl: currentStorePublicUrl(req, store),
+    } : null,
+    _isolated: store?.isDefault !== true,
+  });
 });
-app.get('/api/admin/reviews', requireAdmin, (_req, res) => {
+app.get('/api/admin/reviews', requireAdmin, async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  const store = await getAdminSelectedStore(req).catch(() => null);
+  if (store && store.isDefault !== true) {
+    return res.json({ updatedAt: Date.now(), total: 0, duplicatesRemoved: 0, duplicates: [], items: [], isolated: true });
+  }
   res.json(mergedReviewGalleryData());
 });
 app.put('/api/admin/reviews', requireAdmin, async (req, res) => {
@@ -5048,14 +5239,14 @@ async function renderSiteShell(req) {
   if (cached && (Date.now() - cached.at) < SHELL_RENDER_TTL_MS) return cached.html;
 
   const overrides = await siteOverridesForRequest(req).catch(() => ({}));
-  const S = (k) => String(siteValueFromOverrides(k, overrides) || '').trim();
+  const S = (k) => String(storeSiteValue(k, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) }) || '').trim();
   const siteName = S('SITE_NAME');
   const tagline = S('SITE_TAGLINE');
   const shareTitle = S('SITE_SHARE_TITLE') || [siteName, tagline].filter(Boolean).join(' | ');
   const shareDesc = S('SITE_SHARE_DESC') || S('SITE_HERO_SUB') || S('SITE_ANNOUNCE') || tagline;
   const baseUrl = String(currentStorePublicUrl(req, store) || requestBase).trim().replace(/\/+$/, '');
-  const shareImageRaw = S('SITE_SHARE_IMAGE') || '/brand-share.jpg?v=20260628-1';
-  const shareImage = /^https?:\/\//i.test(shareImageRaw) ? shareImageRaw : `${baseUrl}${shareImageRaw.startsWith('/') ? '' : '/'}${shareImageRaw}`;
+  const shareImageRaw = S('SITE_SHARE_IMAGE') || (store?.isDefault === true ? '/brand-share.jpg?v=20260628-1' : '');
+  const shareImage = shareImageRaw ? (/^https?:\/\//i.test(shareImageRaw) ? shareImageRaw : `${baseUrl}${shareImageRaw.startsWith('/') ? '' : '/'}${shareImageRaw}`) : '';
   const imageAlt = `ภาพแบรนด์${siteName}`;
 
   let html = loadShellTemplate();
