@@ -28,6 +28,8 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, '..', '..');
 const serverIndex = fs.readFileSync(path.join(rootDir, 'server', 'index.js'), 'utf8');
+const clientApp = fs.readFileSync(path.join(rootDir, 'client-src', 'app.js'), 'utf8');
+const buildClientAssets = fs.readFileSync(path.join(rootDir, 'server', 'scripts', 'build-client-assets.js'), 'utf8');
 
 function assert(condition, message, payload) {
   if (!condition) {
@@ -41,11 +43,39 @@ function expectSource(pattern, message) {
   assert(pattern.test(serverIndex), message, { pattern: String(pattern) });
 }
 
+function expectClientSource(pattern, message) {
+  assert(pattern.test(clientApp), message, { pattern: String(pattern) });
+}
+
+function expectBuildSource(pattern, message) {
+  assert(pattern.test(buildClientAssets), message, { pattern: String(pattern) });
+}
+
 async function ignoreCleanup(fn) {
   try { await fn(); } catch {}
 }
 
 async function staticAudit() {
+  expectSource(/function requestIsSecure\(req = \{\}\)/, 'request secure helper missing');
+  expectSource(/"frame-src 'none'"/, 'csp does not block frames');
+  expectSource(/"form-action 'self'"/, 'csp does not restrict form submission');
+  expectSource(/const BLOCKED_LEGACY_ADMIN_CLIENT_RE = .*route-admin/, 'legacy admin client paths are not blocked');
+  expectSource(/function logBlockedSurfaceProbe\(req,\s*category = 'blocked_surface'\)/, 'blocked surface probe logging missing');
+  expectClientSource(/document\.addEventListener\('contextmenu',\s*\(event\)\s*=>\s*\{[\s\S]*?event\.preventDefault\(\);/, 'context menu blocker is missing');
+  expectClientSource(/function blockedInspectionShortcut\(event\)/, 'inspection shortcut blocker helper is missing');
+  expectClientSource(/document\.body\.classList\.toggle\('devtools-guard-active',\s*next\)/, 'devtools guard body toggle is missing');
+  expectSource(/const OPAQUE_ADMIN_CLIENT_PATHS = Object\.freeze\(\{\s*app: '\/api\/admin\/client\/a\.js',\s*route: '\/api\/admin\/client\/b\.js',?\s*\}\);/, 'admin client paths are not opaque');
+  expectBuildSource(/routeChunkStubSource\('r4',\s*extracted\.functions\)/, 'admin route chunk stub is not mapped to r4');
+  expectSource(/const BLOCKED_LEGACY_ASSET_PATH_RE = [\s\S]*route-\(\?:calc\|community\|account\)\\\.js/, 'legacy public route assets are not blocked');
+  expectClientSource(/loadRuntimeScriptOnce\('\/m1\.js'\)/, 'marketing runtime path is not opaque');
+  expectClientSource(/const ROUTE_CHUNK_ASSETS = \{\s*r1: '\/x1\.js',\s*r2: '\/x2\.js',\s*r3: '\/x3\.js',\s*r4: '\/api\/admin\/client\/b\.js',\s*\};/, 'route chunk assets are not using opaque paths');
+  expectClientSource(/function renderAdminStoreSwitcher\(\)\s*\{[\s\S]*?if \(!canAccessMultistoreConsoleClient\(\)\) return '';/, 'admin store switcher is not hidden for sub-store admin');
+  expectClientSource(/fullAdminTabs\.filter\(\(\[key\]\) => canAccessMultistoreConsoleClient\(\) \|\| !\['stores', 'users'\]\.includes\(key\)\)/, 'full admin navigation does not hide stores/users when multistore console is disabled');
+  expectClientSource(/viewAdminUsers\(\)[\s\S]*?if \(!canAccessMultistoreConsoleClient\(\)\) \{[\s\S]*?go\('\/admin\/site'\)[\s\S]*?return loadingView\(\);[\s\S]*?\}/, 'admin users page is not redirecting sub-store away');
+  expectClientSource(/viewAdminStores\(\)[\s\S]*?if \(!canAccessMultistoreConsoleClient\(\)\) \{[\s\S]*?go\('\/admin\/site'\)[\s\S]*?return loadingView\(\);[\s\S]*?\}/, 'admin stores page is not redirecting sub-store away');
+  expectSource(/function multistoreConsoleEnabledForStore\(store = null\) \{\s*return !store \|\| store\.isDefault === true;\s*\}/, 'server multistore console gate no longer restricts to default store');
+  expectSource(/app\.get\('\/api\/admin\/users',\s*requireAdmin,\s*requireMultistoreConsole,/, 'admin users endpoint is not protected by multistore console');
+  expectSource(/app\.get\('\/api\/admin\/stores\/check-subdomain',\s*requireAdmin,\s*requireMultistoreConsole,/, 'store creation helper endpoint is not protected by multistore console');
   expectSource(/app\.get\('\/api\/admin\/products',\s*requireStoreScopedAccess\('staff'\)/, 'admin products list is not store-role guarded');
   expectSource(/app\.post\('\/api\/admin\/products',\s*requireStoreScopedAccess\('staff'\)/, 'admin products create is not store-role guarded');
   expectSource(/app\.get\('\/api\/admin\/orders',\s*requireStoreScopedAccess\('staff'\)/, 'admin orders list is not store-role guarded');

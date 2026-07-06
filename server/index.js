@@ -75,6 +75,10 @@ const uploadsDir = path.join(publicDir, 'uploads');
 const adminHtmlFile = path.join(privateBuildDir, 'admin.html');
 const adminClientFile = path.join(privateBuildDir, 'admin-app.js');
 const adminRouteClientFile = path.join(privateBuildDir, 'admin-route.js');
+const OPAQUE_ADMIN_CLIENT_PATHS = Object.freeze({
+  app: '/api/admin/client/a.js',
+  route: '/api/admin/client/b.js',
+});
 const reviewGalleryFile = path.join(publicDir, 'review-gallery.json');
 const isServerless = Boolean(process.env.VERCEL);
 const DEBUG_SERVER_URL = String(process.env.DEBUG_SERVER_URL || '').trim();
@@ -1523,10 +1527,15 @@ const io = isServerless
   ? { on() {}, to() { return { emit() {} }; } }
   : new SocketIOServer(server);
 
+function requestIsSecure(req = {}) {
+  return req.secure || String(req.headers?.['x-forwarded-proto'] || '').includes('https');
+}
+
 // ──────────────────── security hardening ────────────────────
 // ป้องกัน clickjacking / sniffing / รั่ว referrer + จำกัดแหล่งทรัพยากร (กันสแครป/แกะ stack)
 app.use((req, res, next) => {
   const isCropPreview = req.path.startsWith('/crops/') && String(req.query?.preview || '') === '1';
+  const secureRequest = requestIsSecure(req);
   const localAssetOrigins = ' http://localhost:3005 http://127.0.0.1:3005';
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', isCropPreview ? 'SAMEORIGIN' : 'DENY');
@@ -1534,22 +1543,25 @@ app.use((req, res, next) => {
   res.setHeader('Origin-Agent-Cluster', '?1');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), interest-cohort=()');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('X-DNS-Prefetch-Control', 'off');
   if (req.path.startsWith('/secure-admin') || req.path.startsWith('/api/admin')) {
     res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
   }
-  res.setHeader('Content-Security-Policy', [
+  const cspDirectives = [
     "default-src 'self'", "base-uri 'self'", "object-src 'none'", `frame-ancestors ${isCropPreview ? "'self'" : "'none'"}`,
+    "frame-src 'none'", "form-action 'self'", "manifest-src 'self'", "prefetch-src 'self'",
     `img-src 'self' data: blob: https:${localAssetOrigins}`, `media-src 'self' https: data: blob:${localAssetOrigins}`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
     "script-src 'self' https://cdn.jsdelivr.net https://www.googletagmanager.com https://connect.facebook.net https://analytics.tiktok.com 'wasm-unsafe-eval'",
     "worker-src 'self' blob:",
     "connect-src 'self' ws: wss: https: blob: data:",
-  ].join('; '));
-  if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  ];
+  if (secureRequest) cspDirectives.push('upgrade-insecure-requests');
+  res.setHeader('Content-Security-Policy', cspDirectives.join('; '));
+  if (secureRequest) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
 app.use(async (req, res, next) => {
@@ -2711,13 +2723,35 @@ function createCompressionMiddleware({ threshold = 1024 } = {}) {
     next();
   };
 }
-function denyAdminSurface(res) {
+function logBlockedSurfaceProbe(req, category = 'blocked_surface') {
+  if (!req?.path) return;
+  void recordSystemEvent({
+    level: 'warn',
+    source: 'surface_guard',
+    type: category,
+    message: `Blocked request ${req.method} ${req.path}`,
+    data: {
+      method: req.method,
+      path: req.path,
+      ip: requestIp(req),
+      referer: req.headers?.referer || '',
+      userAgent: req.headers?.['user-agent'] || '',
+    },
+    alert: true,
+    dedupeKey: `surface:${category}:${req.path}:${requestIp(req)}`,
+  }).catch(() => null);
+}
+function denyAdminSurface(req, res, category = 'blocked_surface') {
   setSensitiveNoStore(res);
+  logBlockedSurfaceProbe(req, category);
   return res.status(404).type('text/plain').send('Not Found');
 }
 const BLOCKED_SOURCE_PATH_RE = /^\/(?:client-src|server|supabase|private-build|\.git|\.codex|node_modules|tmp)(?:\/|$)|^\/(?:package(?:-lock)?\.json|\.env(?:\..*)?|tsconfig\.json|vite\.config\.[cm]?js|vercel\.json)$|^\/.*\.map$/i;
+const BLOCKED_LEGACY_ASSET_PATH_RE = /^\/(?:app\.js|client-core\.js|bg3d\.js|marketing-module\.js|route-(?:calc|community|account)\.js)$/i;
+const BLOCKED_LEGACY_ADMIN_CLIENT_RE = /^\/api\/admin\/client\/(?:app|route-admin)\.js$/i;
 app.use((req, res, next) => {
-  if (BLOCKED_SOURCE_PATH_RE.test(req.path)) return denyAdminSurface(res);
+  if (BLOCKED_SOURCE_PATH_RE.test(req.path)) return denyAdminSurface(req, res, 'blocked_source_probe');
+  if (BLOCKED_LEGACY_ASSET_PATH_RE.test(req.path) || BLOCKED_LEGACY_ADMIN_CLIENT_RE.test(req.path)) return denyAdminSurface(req, res, 'legacy_asset_probe');
   next();
 });
 function requestHasBody(req) {
@@ -2751,9 +2785,33 @@ async function requireOpaqueAdmin(req, res, next) {
     adminKeyAccepted: Boolean(req.adminKeyAccepted),
   });
   // #endregion
-  if (!allowed) return denyAdminSurface(res);
+  if (!allowed) return denyAdminSurface(req, res, 'opaque_admin_probe');
   return next();
 }
+app.get('/manifest.json', async (req, res) => {
+  setSensitiveNoStore(res);
+  const store = await getRequestStore(req).catch(() => null);
+  const overrides = await siteOverridesForRequest(req).catch(() => ({}));
+  const strict = Boolean(store && store.isDefault !== true);
+  const value = (key) => String(storeSiteValue(key, { store, overrides, req, strict }) || '').trim();
+  const siteName = value('SITE_NAME') || 'Storefront';
+  const tagline = value('SITE_TAGLINE');
+  const shareDesc = value('SITE_SHARE_DESC') || value('SITE_HERO_SUB') || value('SITE_ANNOUNCE') || tagline || 'เว็บไซต์ร้านค้าของคุณ';
+  res.json({
+    name: tagline ? `${siteName} | ${tagline}` : siteName,
+    short_name: siteName.slice(0, 24) || 'Storefront',
+    description: shareDesc,
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'portrait',
+    background_color: '#f7f6fc',
+    theme_color: '#7b5cff',
+    icons: [
+      { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
+    ],
+  });
+});
 app.use(createCompressionMiddleware({ threshold: 1200 }));
 app.use(express.static(publicDir, {
   etag: false,
@@ -2851,13 +2909,13 @@ app.get(/^\/secure-admin(?:\/.*)?$/, requireOpaqueAdmin, (_req, res) => {
   // #endregion
   res.sendFile(adminHtmlFile);
 });
-app.get('/api/admin/client/app.js', requireOpaqueAdmin, (_req, res) => {
+app.get(OPAQUE_ADMIN_CLIENT_PATHS.app, requireOpaqueAdmin, (_req, res) => {
   setSensitiveNoStore(res);
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
   res.type('application/javascript');
   res.sendFile(adminClientFile);
 });
-app.get('/api/admin/client/route-admin.js', requireOpaqueAdmin, (_req, res) => {
+app.get(OPAQUE_ADMIN_CLIENT_PATHS.route, requireOpaqueAdmin, (_req, res) => {
   setSensitiveNoStore(res);
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
   res.type('application/javascript');
@@ -6035,6 +6093,9 @@ function setShellMeta(html, attrName, attrValue, content) {
   const re = new RegExp(`(<meta\\s+${attrName}="${attrValue.replace(/[.:]/g, '\\$&')}"\\s+content=")[^"]*(")`);
   return html.replace(re, `$1${escapeHtmlAttribute(content)}$2`);
 }
+function setShellPattern(html = '', pattern, replacement) {
+  return html.replace(pattern, replacement);
+}
 const SHELL_RENDER_TTL_MS = 30000;
 const shellRenderCache = new Map();
 async function renderSiteShell(req) {
@@ -6048,6 +6109,8 @@ async function renderSiteShell(req) {
   const S = (k) => String(storeSiteValue(k, { store, overrides, req, strict: Boolean(store && store.isDefault !== true) }) || '').trim();
   const siteName = S('SITE_NAME');
   const tagline = S('SITE_TAGLINE');
+  const footerText = S('SITE_FOOTER') || (siteName ? `© ${siteName}` : '© แบรนด์ของคุณ');
+  const dockTitle = S('SITE_DOCK_TITLE') || S('SITE_HOME_CONTACT_TITLE') || 'ติดต่อร้าน';
   const shareTitle = S('SITE_SHARE_TITLE') || [siteName, tagline].filter(Boolean).join(' | ');
   const shareDesc = S('SITE_SHARE_DESC') || S('SITE_HERO_SUB') || S('SITE_ANNOUNCE') || tagline;
   const baseUrl = String(currentStorePublicUrl(req, store) || requestBase).trim().replace(/\/+$/, '');
@@ -6074,6 +6137,10 @@ async function renderSiteShell(req) {
     /<script type="application\/ld\+json">[\s\S]*?<\/script>/,
     `<script type="application/ld+json">${JSON.stringify({ '@context': 'https://schema.org', '@type': 'Store', name: siteName, description: shareDesc, slogan: tagline })}</script>`
   );
+  html = setShellPattern(html, /(<a href="\/#\/" class="brand"><span class="brand-dot"><\/span>)[^<]*(<\/a>)/, `$1${escapeHtmlAttribute(siteName || 'แบรนด์ของคุณ')}$2`);
+  html = setShellPattern(html, /(<footer class="site-footer">\s*<div class="brand"><span class="brand-dot"><\/span>)[^<]*(<\/div>)/, `$1${escapeHtmlAttribute(siteName || 'แบรนด์ของคุณ')}$2`);
+  html = setShellPattern(html, /(<footer class="site-footer">[\s\S]*?<p>)[\s\S]*?(<\/p>)/, `$1${escapeHtmlAttribute(footerText)}$2`);
+  html = setShellPattern(html, /(<span class="chat-title">)[^<]*(<\/span>)/, `$1${escapeHtmlAttribute(dockTitle)}$2`);
   shellRenderCache.set(cacheKey, { html, at: Date.now() });
   if (shellRenderCache.size > 200) {
     const oldestKey = shellRenderCache.keys().next().value;

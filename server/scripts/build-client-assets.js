@@ -7,6 +7,30 @@ import { minify } from 'terser';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..', '..');
 const routerMarker = '// ════════════════════════ Router ════════════════════════';
+const PUBLIC_RUNTIME_FILES = Object.freeze({
+  app: path.join(projectRoot, 'public', 'assets', 'runtime', 'a.js'),
+  core: path.join(projectRoot, 'public', 'assets', 'runtime', 'c.js'),
+  bg3d: path.join(projectRoot, 'public', 'assets', 'runtime', 'b.js'),
+});
+const PUBLIC_OPAQUE_FILES = Object.freeze({
+  marketing: { publicPath: '/m1.js', dest: path.join(projectRoot, 'public', 'm1.js') },
+  routeA: { publicPath: '/x1.js', dest: path.join(projectRoot, 'public', 'x1.js') },
+  routeB: { publicPath: '/x2.js', dest: path.join(projectRoot, 'public', 'x2.js') },
+  routeC: { publicPath: '/x3.js', dest: path.join(projectRoot, 'public', 'x3.js') },
+});
+const ADMIN_OPAQUE_ROUTES = Object.freeze({
+  app: '/api/admin/client/a.js',
+  route: '/api/admin/client/b.js',
+});
+const LEGACY_PUBLIC_ARTIFACTS = [
+  path.join(projectRoot, 'public', 'app.js'),
+  path.join(projectRoot, 'public', 'client-core.js'),
+  path.join(projectRoot, 'public', 'bg3d.js'),
+  path.join(projectRoot, 'public', 'marketing-module.js'),
+  path.join(projectRoot, 'public', 'route-calc.js'),
+  path.join(projectRoot, 'public', 'route-community.js'),
+  path.join(projectRoot, 'public', 'route-account.js'),
+];
 
 function collectTopLevelDeclarations(block = '') {
   const out = [];
@@ -186,10 +210,10 @@ function routeChunkStubSource(chunkName = '', functions = []) {
 
 function routeChunkRuntimeSource() {
   return `const ROUTE_CHUNK_ASSETS = {
-  calc: '/route-calc.js',
-  community: '/route-community.js',
-  account: '/route-account.js',
-  admin: '/api/admin/client/route-admin.js',
+  r1: '${PUBLIC_OPAQUE_FILES.routeA.publicPath}',
+  r2: '${PUBLIC_OPAQUE_FILES.routeB.publicPath}',
+  r3: '${PUBLIC_OPAQUE_FILES.routeC.publicPath}',
+  r4: '${ADMIN_OPAQUE_ROUTES.route}',
 };
 const routeChunkTasks = new Map();
 window.__NFLRouteExports = window.__NFLRouteExports || {};
@@ -247,9 +271,9 @@ function injectBeforeRouter(source = '', code = '') {
 
 function transformPublicApp(source = '') {
   const publicChunks = [
-    { name: 'calc', functions: ['viewCalc', 'updateCalcPage'] },
-    { name: 'community', functions: ['viewCommunity', 'viewArticles', 'viewArticle'] },
-    { name: 'account', functions: ['viewAccount'] },
+    { name: 'r1', dest: PUBLIC_OPAQUE_FILES.routeA.dest, functions: ['viewCalc', 'updateCalcPage'] },
+    { name: 'r2', dest: PUBLIC_OPAQUE_FILES.routeB.dest, functions: ['viewCommunity', 'viewArticles', 'viewArticle'] },
+    { name: 'r3', dest: PUBLIC_OPAQUE_FILES.routeC.dest, functions: ['viewAccount'] },
   ];
   let next = source;
   const chunkTasks = [];
@@ -259,7 +283,7 @@ function transformPublicApp(source = '') {
     next = extracted.source;
     chunkTasks.push({
       code: routeChunkSource(spec.name, extracted.functions),
-      dest: path.join(projectRoot, 'public', `route-${spec.name}.js`),
+      dest: spec.dest,
       module: false,
     });
     stubParts.push(routeChunkStubSource(spec.name, extracted.functions));
@@ -296,11 +320,11 @@ function transformAdminApp(source = '') {
     'viewAdminOrderDetail',
   ];
   const extracted = stripFunctionDeclarations(source, adminFunctions);
-  const next = injectBeforeRouter(extracted.source, routeChunkStubSource('admin', extracted.functions));
+  const next = injectBeforeRouter(extracted.source, routeChunkStubSource('r4', extracted.functions));
   return {
     code: next,
     extraTasks: [{
-      code: routeChunkSource('admin', extracted.functions),
+      code: routeChunkSource('r4', extracted.functions),
       dest: path.join(projectRoot, 'private-build', 'admin-route.js'),
       module: false,
     }],
@@ -385,10 +409,7 @@ const adminApp = transformAdminApp(appSource);
 const tasks = [
   {
     code: publicApp.code,
-    dest: [
-      path.join(projectRoot, 'public', 'app.js'),
-      path.join(projectRoot, 'public', 'assets', 'runtime', 'a.js'),
-    ],
+    dest: PUBLIC_RUNTIME_FILES.app,
     module: false,
   },
   {
@@ -398,29 +419,24 @@ const tasks = [
   },
   {
     src: path.join(projectRoot, 'client-src', 'modules', 'core.js'),
-    dest: [
-      path.join(projectRoot, 'public', 'client-core.js'),
-      path.join(projectRoot, 'public', 'assets', 'runtime', 'c.js'),
-    ],
+    dest: PUBLIC_RUNTIME_FILES.core,
     module: false,
   },
   {
     src: path.join(projectRoot, 'client-src', 'modules', 'marketing.js'),
-    dest: path.join(projectRoot, 'public', 'marketing-module.js'),
+    dest: PUBLIC_OPAQUE_FILES.marketing.dest,
     module: false,
   },
   {
     src: path.join(projectRoot, 'client-src', 'bg3d.js'),
-    dest: [
-      path.join(projectRoot, 'public', 'bg3d.js'),
-      path.join(projectRoot, 'public', 'assets', 'runtime', 'b.js'),
-    ],
+    dest: PUBLIC_RUNTIME_FILES.bg3d,
     module: true,
   },
   ...publicApp.extraTasks,
   ...adminApp.extraTasks,
 ];
 
+await Promise.all(LEGACY_PUBLIC_ARTIFACTS.map((file) => fs.rm(file, { force: true })));
 await Promise.all(tasks.map(buildTask));
 await Promise.all([
   copyAsset(path.join(projectRoot, 'public', 'styles.css'), path.join(projectRoot, 'public', 'assets', 'runtime', 's.css')),
@@ -449,6 +465,13 @@ async function stampAssetVersions(htmlFile, hashByAsset) {
   await fs.writeFile(htmlFile, html, 'utf8');
 }
 
+async function normalizeAdminShellAssetPaths(htmlFile) {
+  let html = await fs.readFile(htmlFile, 'utf8');
+  html = html.replace(/\/api\/admin\/client\/app\.js(\?v=[A-Za-z0-9._-]+)?/g, ADMIN_OPAQUE_ROUTES.app);
+  html = html.replace(/\/api\/admin\/client\/route-admin\.js(\?v=[A-Za-z0-9._-]+)?/g, ADMIN_OPAQUE_ROUTES.route);
+  await fs.writeFile(htmlFile, html, 'utf8');
+}
+
 const [stylesHash, appHash, clientCoreHash, bg3dHash, supabaseHash, threeHash, adminAppHash] = await Promise.all([
   contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 's.css')),
   contentHash(path.join(projectRoot, 'public', 'assets', 'runtime', 'a.js')),
@@ -467,21 +490,15 @@ await stampAssetVersions(shellDest, {
   '/assets/runtime/b.js': bg3dHash,
   '/assets/runtime/v1.js': supabaseHash,
   '/assets/runtime/v2.js': threeHash,
-  '/styles.css': stylesHash,
-  '/client-core.js': clientCoreHash,
-  '/app.js': appHash,
-  '/bg3d.js': bg3dHash,
 });
 await fs.rm(path.join(projectRoot, 'public', 'index.html'), { force: true });
+await normalizeAdminShellAssetPaths(path.join(projectRoot, 'private-build', 'admin.html'));
 await stampAssetVersions(path.join(projectRoot, 'private-build', 'admin.html'), {
   '/assets/runtime/s.css': stylesHash,
   '/assets/runtime/c.js': clientCoreHash,
   '/assets/runtime/b.js': bg3dHash,
   '/assets/runtime/v1.js': supabaseHash,
   '/assets/runtime/v2.js': threeHash,
-  '/styles.css': stylesHash,
-  '/client-core.js': clientCoreHash,
-  '/api/admin/client/app.js': adminAppHash,
-  '/bg3d.js': bg3dHash,
+  [ADMIN_OPAQUE_ROUTES.app]: adminAppHash,
 });
 console.log(`built ${tasks.length} client assets (styles=${stylesHash} core=${clientCoreHash} app=${appHash} bg3d=${bg3dHash} sb=${supabaseHash} three=${threeHash} admin=${adminAppHash})`);

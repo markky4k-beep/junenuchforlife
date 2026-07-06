@@ -1,7 +1,7 @@
 {
-  "name": "VAYU — Premium Vape",
-  "short_name": "VAYU",
-  "description": "ร้านพอตและอุปกรณ์พรีเมียม จัดส่งทั่วโลก พร้อม Live Chat",
+  "name": "Storefront",
+  "short_name": "Storefront",
+  "description": "เว็บไซต์ร้านค้าของคุณ พร้อมรายละเอียดสินค้า บทความ รีวิว และระบบติดต่อทีมร้าน",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

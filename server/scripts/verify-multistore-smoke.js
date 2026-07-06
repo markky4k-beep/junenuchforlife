@@ -160,6 +160,15 @@ async function main() {
     try { return new URL(store.publicUrl || '').host; } catch { return store.primaryDomain || ''; }
   })();
   assert(storeHost, 'store_host_missing', store);
+  const subStoreConsole = await api.request('/api/admin/stores', { host: storeHost });
+  assert(subStoreConsole?.multistoreConsoleEnabled === false, 'substore_multistore_console_should_be_disabled', subStoreConsole);
+  assert(Array.isArray(subStoreConsole?.stores) && subStoreConsole.stores.length === 1 && subStoreConsole.stores[0]?.id === store.id, 'substore_store_list_should_only_include_current_store', subStoreConsole);
+  await api.request('/api/admin/users', { host: storeHost })
+    .then((payload) => assert(false, 'substore_users_endpoint_should_404', payload))
+    .catch((err) => assert(err.status === 404, 'substore_users_expected_404', { status: err.status, payload: err.payload }));
+  await api.request(`/api/admin/stores/check-subdomain?subdomain=${encodeURIComponent(`${subdomain}-check`)}`, { host: storeHost })
+    .then((payload) => assert(false, 'substore_check_subdomain_endpoint_should_404', payload))
+    .catch((err) => assert(err.status === 404, 'substore_check_subdomain_expected_404', { status: err.status, payload: err.payload }));
 
   const productId = `p_${TEST_PREFIX.replace(/-/g, '_')}`;
   const product = await api.request('/api/admin/products', {
