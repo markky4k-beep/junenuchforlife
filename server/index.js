@@ -3,6 +3,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
@@ -47,6 +48,8 @@ import {
   writeSessionCookies,
   clearSessionCookies,
   createAdminGrant,
+  ensureCsrfCookie,
+  readCsrfToken,
   withResolvedAdminRole,
   canAccessAdminShell,
   canAccessAdminInbox,
@@ -71,6 +74,7 @@ const privateBuildDir = path.join(__dirname, '..', 'private-build');
 const uploadsDir = path.join(publicDir, 'uploads');
 const adminHtmlFile = path.join(privateBuildDir, 'admin.html');
 const adminClientFile = path.join(privateBuildDir, 'admin-app.js');
+const adminRouteClientFile = path.join(privateBuildDir, 'admin-route.js');
 const reviewGalleryFile = path.join(publicDir, 'review-gallery.json');
 const isServerless = Boolean(process.env.VERCEL);
 const DEBUG_SERVER_URL = String(process.env.DEBUG_SERVER_URL || '').trim();
@@ -2612,11 +2616,95 @@ function setSensitiveNoStore(res) {
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
 }
+function setImmutableAssetCache(res, maxAgeSeconds = 31536000) {
+  res.setHeader('Cache-Control', `public, max-age=${Math.max(60, Number(maxAgeSeconds) || 31536000)}, immutable`);
+  res.removeHeader('Pragma');
+  res.removeHeader('Expires');
+}
+function appendVaryHeader(res, value = '') {
+  const current = String(res.getHeader('Vary') || '').trim();
+  const parts = current ? current.split(',').map((item) => item.trim()).filter(Boolean) : [];
+  if (!parts.includes(value)) parts.push(value);
+  if (parts.length) res.setHeader('Vary', parts.join(', '));
+}
+function requestOriginAllowed(req) {
+  const candidate = String(req.headers.origin || req.headers.referer || '').trim();
+  if (!candidate) return true;
+  try {
+    const url = new URL(candidate);
+    const host = extractRequestHost(req);
+    return extractRequestHost({ headers: { host: url.host } }) === host;
+  } catch {
+    return false;
+  }
+}
+function sameToken(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  if (!left.length || left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+function createCompressionMiddleware({ threshold = 1024 } = {}) {
+  const textTypeRe = /^(text\/|application\/(?:json|javascript|x-javascript|xml)|image\/svg\+xml)/i;
+  return (req, res, next) => {
+    const method = String(req.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD'].includes(method)) return next();
+    if (req.headers.range || req.headers['x-no-compression']) return next();
+    const acceptEncoding = String(req.headers['accept-encoding'] || '').toLowerCase();
+    const algorithm = acceptEncoding.includes('br') ? 'br' : (acceptEncoding.includes('gzip') ? 'gzip' : '');
+    if (!algorithm) return next();
+    appendVaryHeader(res, 'Accept-Encoding');
+    const originalWrite = res.write.bind(res);
+    const originalEnd = res.end.bind(res);
+    const chunks = [];
+    res.write = (chunk, encoding, callback) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      if (typeof callback === 'function') callback();
+      return true;
+    };
+    res.end = (chunk, encoding, callback) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      const body = chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
+      const status = Number(res.statusCode || 200);
+      const type = String(res.getHeader('Content-Type') || '').split(';')[0].trim().toLowerCase();
+      const canCompress = body.length >= threshold
+        && body.length > 0
+        && status >= 200
+        && status !== 204
+        && status !== 304
+        && !res.getHeader('Content-Encoding')
+        && textTypeRe.test(type);
+      if (!canCompress) {
+        if (!res.getHeader('Content-Length')) res.setHeader('Content-Length', String(body.length));
+        return originalEnd(body, undefined, callback);
+      }
+      const finalize = (err, compressed) => {
+        if (err || !compressed?.length || compressed.length >= body.length) {
+          if (!res.getHeader('Content-Length')) res.setHeader('Content-Length', String(body.length));
+          return originalEnd(body, undefined, callback);
+        }
+        res.removeHeader('Content-Length');
+        res.setHeader('Content-Encoding', algorithm === 'br' ? 'br' : 'gzip');
+        return originalEnd(compressed, undefined, callback);
+      };
+      if (algorithm === 'br') {
+        return zlib.brotliCompress(body, {
+          params: {
+            [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT,
+            [zlib.constants.BROTLI_PARAM_QUALITY]: 5,
+          },
+        }, finalize);
+      }
+      return zlib.gzip(body, { level: 6 }, finalize);
+    };
+    next();
+  };
+}
 function denyAdminSurface(res) {
   setSensitiveNoStore(res);
   return res.status(404).type('text/plain').send('Not Found');
 }
-const BLOCKED_SOURCE_PATH_RE = /^\/(?:client-src|server|supabase|private-build|\.git|\.codex|node_modules|tmp)(?:\/|$)|^\/(?:package(?:-lock)?\.json|\.env(?:\..*)?|tsconfig\.json|vite\.config\.[cm]?js|vercel\.json)$/i;
+const BLOCKED_SOURCE_PATH_RE = /^\/(?:client-src|server|supabase|private-build|\.git|\.codex|node_modules|tmp)(?:\/|$)|^\/(?:package(?:-lock)?\.json|\.env(?:\..*)?|tsconfig\.json|vite\.config\.[cm]?js|vercel\.json)$|^\/.*\.map$/i;
 app.use((req, res, next) => {
   if (BLOCKED_SOURCE_PATH_RE.test(req.path)) return denyAdminSurface(res);
   next();
@@ -2655,18 +2743,55 @@ async function requireOpaqueAdmin(req, res, next) {
   if (!allowed) return denyAdminSurface(res);
   return next();
 }
+app.use(createCompressionMiddleware({ threshold: 1200 }));
 app.use(express.static(publicDir, {
   etag: false,
   lastModified: false,
   setHeaders(res, filePath) {
     const ext = path.extname(filePath).toLowerCase();
     const base = path.basename(filePath).toLowerCase();
-    if (base === 'sw.js' || ext === '.html' || ext === '.js' || ext === '.json' || ext === '.map') {
+    const relativePath = path.relative(publicDir, filePath).replace(/\\/g, '/');
+    const isRuntimeAsset = relativePath.startsWith('assets/runtime/');
+    if (base === 'sw.js' || ext === '.html' || ext === '.map') {
       setSensitiveNoStore(res);
+      return;
+    }
+    if (isRuntimeAsset) {
+      setImmutableAssetCache(res);
+      return;
+    }
+    if (ext === '.json') {
+      res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+      return;
+    }
+    if (['.css', '.js', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.ico', '.woff', '.woff2', '.mp4', '.webm'].includes(ext)) {
+      res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
     }
   },
 }));
 app.use(authMiddleware);
+app.use((req, res, next) => {
+  const method = String(req.method || 'GET').toUpperCase();
+  const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+  if (!req.path.startsWith('/api/') || !isWrite) return next();
+  if (req.path === '/api/integrations/line/webhook' || req.path.startsWith('/api/webhooks/')) return next();
+  const hasBearerAuth = /^Bearer\s+/i.test(String(req.headers.authorization || ''));
+  const hasSessionCookie = Boolean(req.cookies?.nfl_session || req.cookies?.['__Host-nfl_session']);
+  const requiresOriginCheck = !hasBearerAuth && (req.path.startsWith('/api/auth') || (req.path.startsWith('/api/admin') && hasSessionCookie) || Boolean(req.user));
+  if (requiresOriginCheck && !requestOriginAllowed(req)) {
+    setSensitiveNoStore(res);
+    return res.status(403).json({ error: 'Origin ไม่ถูกต้อง' });
+  }
+  const requiresCsrf = !hasBearerAuth && ((req.path.startsWith('/api/admin') && hasSessionCookie) || Boolean(req.user));
+  if (!requiresCsrf) return next();
+  const csrfHeader = String(req.headers['x-csrf-token'] || req.headers['x-xsrf-token'] || '').trim();
+  const csrfCookie = readCsrfToken(req);
+  if (!csrfHeader || !csrfCookie || !sameToken(csrfHeader, csrfCookie)) {
+    setSensitiveNoStore(res);
+    return res.status(403).json({ error: 'CSRF token ไม่ถูกต้อง' });
+  }
+  return next();
+});
 app.use('/api/auth', authLimiter);
 app.use('/api/admin', adminLimiter);
 app.use((req, res, next) => {
@@ -2705,6 +2830,7 @@ app.use((req, res, next) => {
 
 app.get(/^\/secure-admin(?:\/.*)?$/, requireOpaqueAdmin, (_req, res) => {
   setSensitiveNoStore(res);
+  ensureCsrfCookie(_req, res);
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
   // #region debug-point D:secure-admin-serve
   reportServerDebug('D', 'server/index.js:/secure-admin', '[DEBUG] secure-admin shell served', {
@@ -2719,6 +2845,12 @@ app.get('/api/admin/client/app.js', requireOpaqueAdmin, (_req, res) => {
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
   res.type('application/javascript');
   res.sendFile(adminClientFile);
+});
+app.get('/api/admin/client/route-admin.js', requireOpaqueAdmin, (_req, res) => {
+  setSensitiveNoStore(res);
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
+  res.type('application/javascript');
+  res.sendFile(adminRouteClientFile);
 });
 
 app.get('/api/health', (_req, res) => res.json(buildHealthSnapshot()));
@@ -2903,6 +3035,7 @@ const SITE_DEFAULTS = {
   SITE_TAGLINE: 'นวัตกรรมเพื่อเกษตรกรไทย',
   SITE_ANNOUNCE: 'อาหารเสริมพืช · ฮอร์โมน · สารจับใบ · สมุนไพรสุขภาพ · จัดส่งทั่วไทย',
   SITE_PRODUCT_CATEGORIES: '["สินค้าเดี่ยว","ชุดเซต","โปรโมชั่น","สุขภาพ","ความงาม"]',
+  SITE_PRODUCT_BRAND_GROUPS: '[]',
   SITE_HERO_TITLE: 'เพิ่มผลผลิต',
   SITE_HERO_ACCENT: 'อย่างแม่นยำ',
   SITE_HERO_TITLE2: 'ด้วยสูตรที่เหมาะกับพืช',
@@ -3005,11 +3138,35 @@ function isolatedStoreSiteDefaults(store = {}, req = null) {
     SITE_TAGLINE: '',
     SITE_ANNOUNCE: '',
     SITE_PRODUCT_CATEGORIES: '[]',
+    SITE_PRODUCT_BRAND_GROUPS: '[]',
     SITE_HERO_TITLE: name ? `${name} ออนไลน์` : '',
     SITE_HERO_ACCENT: '',
     SITE_HERO_TITLE2: '',
     SITE_HERO_SUB: '',
     SITE_FOOTER: name ? `© ${name}` : '',
+    SITE_HOME_FEATURED_EYEBROW: 'สินค้าแนะนำ',
+    SITE_HOME_FEATURED_TITLE: 'รวมสินค้าที่จัดให้อ่านง่ายและเลือกซื้อได้ไว',
+    SITE_HOME_CONSULT_EYEBROW: 'ติดต่อร้าน',
+    SITE_HOME_CONSULT_TITLE: 'ส่งข้อมูลให้ร้านติดต่อกลับ',
+    SITE_HOME_CONSULT_BODY: 'กรอกข้อมูลสั้น ๆ เพื่อให้ร้านติดต่อกลับ หรือพาไปคุยต่อใน LINE ตามช่องทางที่สะดวก',
+    SITE_HOME_CONTACT_TITLE: 'ช่องทางติดต่อ',
+    SITE_HOME_CONTACT_BODY: 'โทรหรือทัก LINE เพื่อสอบถามรายละเอียดเพิ่มเติมได้ทันที',
+    SITE_HOME_CONTACT_NOTE: 'เหมาะกับร้านที่ต้องการให้ลูกค้าเริ่มคุยได้เร็วจากทุกอุปกรณ์',
+    SITE_HOME_CONTACT_CALL_PRIMARY_LABEL: 'โทรหาร้าน',
+    SITE_HOME_CONTACT_CALL_SECONDARY_LABEL: 'โทรสำรอง',
+    SITE_HOME_CONTACT_PERSONAL_LABEL: 'LINE',
+    SITE_HOME_CONTACT_OA_LABEL: 'LINE OA',
+    CONTACT_PRIMARY_LABEL: 'ทีมร้าน',
+    CONTACT_SECONDARY_LABEL: 'เบอร์ติดต่อสำรอง',
+    SITE_DOCK_TITLE: 'ติดต่อร้าน',
+    SITE_DOCK_BODY: 'โทรหรือทัก LINE เพื่อสอบถามรายละเอียดเพิ่มเติมได้ทันที',
+    SITE_DOCK_LIVECHAT_LABEL: 'LIVECHAT',
+    SITE_DOCK_CALL_LABEL: 'โทรเลย',
+    SITE_DOCK_PERSONAL_LABEL: 'LINE',
+    SITE_DOCK_OA_LABEL: 'LINE OA',
+    SITE_TRUST_ITEMS: 'ตั้งชื่อแบรนด์และคุมโทนร้านได้เองทั้งหมด\nเพิ่มสินค้า ปรับราคา และจัดลำดับหน้าเว็บได้จากหลังบ้าน\nรองรับแชต ออเดอร์ และติดตามสถานะในระบบเดียว\nเริ่มจากหน้าโล่งสะอาด แล้วค่อยเติมคอนเทนต์ของแบรนด์ตามต้องการ',
+    SITE_CASE_STUDIES: 'แบรนด์ใหม่ :: เริ่มจากหน้าร้านสะอาดแล้วค่อยเติมสินค้า รีวิว และเรื่องราวของแบรนด์ได้เอง\nร้านขายของทั่วไป :: ใช้หน้าเว็บเดียวจัดการสินค้า แชต และออเดอร์โดยไม่ต้องอิงคอนเทนต์ของร้านอื่น\nทีมขายออนไลน์ :: ให้ลูกค้ากรอกข้อมูลสั้น ๆ หรือทัก LINE ต่อ แล้วติดตามงานต่อในหลังบ้านได้ทันที',
+    SITE_CHECKOUT_POINTS: 'รองรับการสั่งซื้อและติดตามสถานะออเดอร์ในระบบเดียว\nลูกค้าติดต่อร้านผ่าน LINE หรือฟอร์มสั้นได้ทันที\nร้านจัดการสินค้า ราคา และโปรโมชันได้เองจากหลังบ้าน',
     PUBLIC_URL: publicUrl,
     SHIP_HOME: SITE_DEFAULTS.SHIP_HOME,
     SHIP_FEE: SITE_DEFAULTS.SHIP_FEE,
@@ -3361,12 +3518,19 @@ app.get('/api/site', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const store = await getRequestStore(req);
   const overrides = await siteOverridesForRequest(req);
-  const productCategories = await resolvedPublicProductCategories({ store, storeId: store?.id, overrides, req });
+  const value = (key) => storeRuntimeValueForStore(store, overrides, key, req);
+  const [productCategories, productBrandGroups, products, stats] = await Promise.all([
+    resolvedPublicProductCategories({ store, storeId: store?.id, overrides, req }),
+    resolvedPublicProductBrandGroups({ store, storeId: store?.id, overrides, req }),
+    listProducts(false, { storeId: store?.id }).catch(() => []),
+    computeSiteStats({ store, storeId: store?.id, overrides, req }),
+  ]);
   res.json({
     ...storeSiteConfig({ store, overrides, keys: SITE_PUBLIC_KEYS, req, strict: true }),
     ...siteRealtimeConfig(),
     SITE_PRODUCT_CATEGORIES: JSON.stringify(productCategories),
-    stats: await computeSiteStats({ store, storeId: store?.id, overrides, req }),
+    SITE_PRODUCT_BRAND_GROUPS: JSON.stringify(productBrandGroups),
+    stats,
     store: store ? {
       id: store.id,
       name: store.name,
@@ -3374,6 +3538,8 @@ app.get('/api/site', async (req, res) => {
       subdomain: store.subdomain,
       primaryDomain: store.primaryDomain,
       publicUrl: currentStorePublicUrl(req, store),
+      isDefault: store.isDefault === true,
+      gates: buildStoreFeatureGates({ store, value, products }),
     } : null,
   });
 });
@@ -3466,26 +3632,66 @@ const PRODUCT_CATEGORY_ALIAS_MAP = {
   ความงาม: 'ความงาม',
 };
 const PRODUCT_STRUCTURAL_TAGS = new Set(['เกษตร', 'สินค้าเดี่ยว', 'ชุดแพ็ก', 'ชุดเซต', 'โปรโมชั่น', 'สุขภาพ', 'ความงาม']);
+const PRODUCT_TYPE_ALIAS_MAP = {
+  agri: 'agri',
+  agriculture: 'agri',
+  lifestyle: 'general',
+  general: 'general',
+  goods: 'general',
+  retail: 'general',
+  pod: 'pod',
+  vape: 'pod',
+  course: 'digital',
+  digital: 'digital',
+  service: 'digital',
+};
 function normalizeProductCategoryValue(value = '') {
   const text = String(value || '').trim();
   if (!text) return '';
   return PRODUCT_CATEGORY_ALIAS_MAP[text] || text;
+}
+function normalizeProductTypeValue(value = '') {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  return PRODUCT_TYPE_ALIAS_MAP[text] || '';
+}
+function normalizeProductBrandGroupValue(value = '') {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
 }
 function normalizeProductTagValue(value = '') {
   const text = String(value || '').trim();
   if (!text || PRODUCT_STRUCTURAL_TAGS.has(text)) return '';
   return text;
 }
-function inferProductCategoryValue({ extra = {}, category = '', tag = '', segment = 'agri' } = {}) {
+function inferProductTypeValue({ extra = {}, category = '', tag = '', segment = 'agri' } = {}) {
+  const explicit = normalizeProductTypeValue(extra?.productType || extra?.type || '');
+  if (explicit) return explicit;
+  const normalizedCategory = normalizeProductCategoryValue(extra?.category || category || tag || '');
+  if (normalizedCategory === 'พอต') return 'pod';
+  if (segment === 'lifestyle' || ['สุขภาพ', 'ความงาม'].includes(normalizedCategory)) return 'general';
+  return 'agri';
+}
+function inferProductCategoryValue({ extra = {}, category = '', tag = '', segment = 'agri', productType = '' } = {}) {
   const explicit = normalizeProductCategoryValue(extra?.category || category || '');
   if (explicit) return explicit;
   const tagText = normalizeProductCategoryValue(tag || '');
   if (tagText) return tagText;
-  return segment === 'lifestyle' ? 'สุขภาพ' : 'สินค้าเดี่ยว';
+  const type = normalizeProductTypeValue(productType) || inferProductTypeValue({ extra, category, tag, segment });
+  if (type === 'pod') return 'พอต';
+  if (type === 'agri') return 'สินค้าเดี่ยว';
+  return 'สุขภาพ';
+}
+function productLegacySegmentValue({ extra = {}, category = '', tag = '', segment = 'agri', productType = '' } = {}) {
+  const type = normalizeProductTypeValue(productType) || inferProductTypeValue({ extra, category, tag, segment });
+  return type === 'agri' ? 'agri' : 'lifestyle';
 }
 function ensureProductCategoryExtra(extra = {}, source = {}) {
   const next = (extra && typeof extra === 'object' && !Array.isArray(extra)) ? { ...extra } : {};
-  next.category = inferProductCategoryValue({ extra: next, category: source.category, tag: source.tag, segment: source.segment });
+  next.category = inferProductCategoryValue({ extra: next, category: source.category, tag: source.tag, segment: source.segment, productType: source.productType });
+  next.productType = inferProductTypeValue({ extra: next, category: next.category, tag: source.tag, segment: source.segment });
+  const brandGroup = normalizeProductBrandGroupValue(next.brandGroup || source?.brandGroup || source?.extra?.brandGroup || '');
+  if (brandGroup) next.brandGroup = brandGroup;
+  else delete next.brandGroup;
   const rawAlt = normalizeProductSalePriceValue(next.salePrice ?? next.comparePrice ?? source?.salePrice ?? source?.comparePrice);
   delete next.salePrice;
   if (rawAlt) next.comparePrice = rawAlt;
@@ -3532,6 +3738,18 @@ function parseProductCategorySettings(raw = '') {
 function serializeProductCategorySettings(list = []) {
   return JSON.stringify(parseProductCategorySettings(list));
 }
+function parseProductBrandGroupSettings(raw = '') {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return [...new Set(parsed.map((item) => normalizeProductBrandGroupValue(item)).filter(Boolean))];
+  } catch {}
+  return [...new Set(text.split(/\r?\n|,/).map((item) => normalizeProductBrandGroupValue(item)).filter(Boolean))];
+}
+function serializeProductBrandGroupSettings(list = []) {
+  return JSON.stringify(parseProductBrandGroupSettings(list));
+}
 function normalizeProductForClient(product = {}) {
   const extra = ensureProductCategoryExtra(product?.extra, product);
   const price = Math.max(0, parseInt(product?.price, 10) || 0);
@@ -3539,6 +3757,7 @@ function normalizeProductForClient(product = {}) {
   const pair = resolveManualProductPricePair({ ...product, extra, price });
   return {
     ...product,
+    segment: productLegacySegmentValue({ ...product, extra, productType: extra.productType }),
     price,
     sort,
     extra,
@@ -3561,6 +3780,21 @@ async function resolvedPublicProductCategories(options = {}) {
   }));
   const liveProducts = await listProducts(false, { storeId });
   const live = liveProducts.map((item) => inferProductCategoryValue(item)).filter(Boolean);
+  return [...new Set([...configured, ...live])];
+}
+async function resolvedPublicProductBrandGroups(options = {}) {
+  const storeId = String(options.storeId || '').trim();
+  const overrides = options.overrides && typeof options.overrides === 'object' ? options.overrides : {};
+  const store = options.store || null;
+  const req = options.req || null;
+  const configured = parseProductBrandGroupSettings(storeSiteValue('SITE_PRODUCT_BRAND_GROUPS', {
+    store,
+    overrides,
+    req,
+    strict: Boolean(store && store.isDefault !== true),
+  }));
+  const liveProducts = await listProducts(false, { storeId });
+  const live = liveProducts.map((item) => normalizeProductBrandGroupValue(item?.extra?.brandGroup || item?.brandGroup || '')).filter(Boolean);
   return [...new Set([...configured, ...live])];
 }
 async function replaceProductCategoryAcrossCatalog({ sourceCategory = '', targetCategory = '', mode = 'merge', storeId = '' } = {}) {
@@ -3608,6 +3842,52 @@ async function replaceProductCategoryAcrossCatalog({ sourceCategory = '', target
   }
   return { sourceCategory: source, targetCategory: target, updatedProducts, categories: nextCategories };
 }
+async function replaceProductBrandGroupAcrossCatalog({ sourceBrandGroup = '', targetBrandGroup = '', mode = 'merge', storeId = '' } = {}) {
+  const normalizedStoreId = String(storeId || '').trim();
+  const source = normalizeProductBrandGroupValue(sourceBrandGroup);
+  const target = normalizeProductBrandGroupValue(targetBrandGroup);
+  if (!source) throw new Error('กรุณาเลือกกลุ่มแบรนด์ต้นทาง');
+  if (!target) throw new Error('กรุณาระบุกลุ่มแบรนด์ปลายทาง');
+  if (source === target) throw new Error(mode === 'rename' ? 'ชื่อกลุ่มแบรนด์ใหม่ต้องไม่ซ้ำกับชื่อเดิม' : 'กลุ่มต้นทางและปลายทางต้องไม่ซ้ำกัน');
+
+  const products = await listProducts(true, { storeId: normalizedStoreId });
+  let updatedProducts = 0;
+  for (const product of products) {
+    const currentBrandGroup = normalizeProductBrandGroupValue(product?.extra?.brandGroup || product?.brandGroup || '');
+    if (currentBrandGroup !== source) continue;
+    const extra = ensureProductCategoryExtra(product?.extra, product);
+    extra.brandGroup = target;
+    await updateProduct(product.id, {
+      storeId: normalizedStoreId || product.storeId,
+      extra,
+      tag: sanitizeProductTag(product),
+      model: normalizeProductModelValue(product?.model || ''),
+      segment: productLegacySegmentValue({ ...product, extra, productType: extra.productType }),
+    });
+    updatedProducts += 1;
+  }
+
+  const storeOverrides = normalizedStoreId ? await allStoreSettings(normalizedStoreId).catch(() => ({})) : {};
+  const currentGroups = parseProductBrandGroupSettings(siteValueFromOverrides('SITE_PRODUCT_BRAND_GROUPS', storeOverrides));
+  const sourceIndex = currentGroups.indexOf(source);
+  let nextGroups = currentGroups.slice();
+  if (mode === 'rename') {
+    nextGroups = nextGroups.map((item) => (item === source ? target : item));
+  } else {
+    nextGroups = nextGroups.filter((item) => item !== source);
+    if (!nextGroups.includes(target)) {
+      const insertAt = sourceIndex >= 0 ? sourceIndex : nextGroups.length;
+      nextGroups.splice(insertAt, 0, target);
+    }
+  }
+  nextGroups = [...new Set(nextGroups.map((item) => normalizeProductBrandGroupValue(item)).filter(Boolean))];
+  if (normalizedStoreId) await setStoreSetting(normalizedStoreId, 'SITE_PRODUCT_BRAND_GROUPS', serializeProductBrandGroupSettings(nextGroups));
+  else {
+    await setSetting('SITE_PRODUCT_BRAND_GROUPS', serializeProductBrandGroupSettings(nextGroups));
+    await ensureSettingsFresh(true);
+  }
+  return { sourceBrandGroup: source, targetBrandGroup: target, updatedProducts, brandGroups: nextGroups };
+}
 function orderEmailHTML(o, heading) {
   const items = o.items.map((it) => `<tr><td style="padding:4px 0">${it.name} ×${it.qty}</td><td align="right">฿${(it.price * it.qty).toLocaleString()}</td></tr>`).join('');
   return `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#1b1733">
@@ -3634,6 +3914,7 @@ app.post('/api/auth/register', async (req, res) => {
   const user = await createUser({ id: 'u_' + crypto.randomBytes(6).toString('hex'), email: String(email).toLowerCase(), name: displayName, username: displayName, avatar: '', salt, hash, role: ROLE_USER });
   const token = newToken(); await createToken(token, user.id);
   writeSessionCookies(req, res, { token, adminGrant: '' });
+  ensureCsrfCookie(req, res, { rotate: true });
   res.json({ user: publicUser(user) });
 });
 app.post('/api/auth/login', async (req, res) => {
@@ -3654,6 +3935,7 @@ app.post('/api/auth/login', async (req, res) => {
   });
   // #endregion
   writeSessionCookies(req, res, { token, adminGrant: adminKey && isAdminRole(user.role) ? createAdminGrant(user.id) : '' });
+  ensureCsrfCookie(req, res, { rotate: true });
   // #region debug-point E:login-response
   reportServerDebug('E', 'server/index.js:/api/auth/login', '[DEBUG] login issued session cookies', {
     email: String(email || '').trim().toLowerCase(),
@@ -3668,6 +3950,7 @@ app.post('/api/auth/login', async (req, res) => {
 });
 app.get('/api/auth/me', async (req, res) => {
   setSensitiveNoStore(res);
+  ensureCsrfCookie(req, res);
   const user = publicUser(req.user);
   if (user?.id) {
     user.storeRoles = await listUserStoreRoles(user.id).catch(() => []);
@@ -3701,6 +3984,7 @@ app.post('/api/auth/logout', async (req, res) => {
   setSensitiveNoStore(res);
   if (req.token) await deleteToken(req.token);
   clearSessionCookies(req, res);
+  ensureCsrfCookie(req, res, { rotate: true });
   res.json({ ok: true });
 });
 
@@ -4345,7 +4629,7 @@ app.post('/api/admin/products', requireStoreScopedAccess('staff'), async (req, r
     const pricing = canonicalizeProductPricingPayload({ price: parseInt(b.price, 10) || 0, salePrice: b.salePrice, comparePrice: b.comparePrice, extra });
     extra = pricing.extra;
     const id = b.id || ('p_' + crypto.randomBytes(4).toString('hex'));
-    const p = await createProduct({ storeId, id, name: b.name, tag: sanitizeProductTag(b), price: pricing.price, short: b.short, desc: b.desc, specs: b.specs || {}, segment: b.segment || 'agri', extra, icon: b.icon || 'pod', image, video: (b.video || '').trim(), images, model: normalizeProductModelValue(b.model), stock: parseInt(b.stock, 10) || 0, active: b.active !== false, sort: parseInt(b.sort, 10) || 0 });
+    const p = await createProduct({ storeId, id, name: b.name, tag: sanitizeProductTag(b), price: pricing.price, short: b.short, desc: b.desc, specs: b.specs || {}, segment: productLegacySegmentValue({ ...b, extra, productType: extra.productType }), extra, icon: b.icon || 'pod', image, video: (b.video || '').trim(), images, model: normalizeProductModelValue(b.model), stock: parseInt(b.stock, 10) || 0, active: b.active !== false, sort: parseInt(b.sort, 10) || 0 });
     res.json({ ok: true, product: p });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -4380,6 +4664,7 @@ app.put('/api/admin/products/:id', requireStoreScopedAccess('staff'), async (req
     }, current);
     patch.price = pricing.price;
     patch.extra = pricing.extra;
+    patch.segment = productLegacySegmentValue({ ...current, ...patch, extra: patch.extra, productType: patch.extra?.productType });
     const p = await updateProduct(req.params.id, patch);
     if (!p) return res.status(404).json({ error: 'ไม่พบสินค้า' });
     res.json({ ok: true, product: p });
@@ -4397,6 +4682,19 @@ app.post('/api/admin/product-categories/merge', requireAdmin, async (req, res) =
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(400).json({ error: err.message || 'จัดการหมวดหมู่ไม่สำเร็จ' });
+  }
+});
+app.post('/api/admin/product-brand-groups/merge', requireAdmin, async (req, res) => {
+  try {
+    const result = await replaceProductBrandGroupAcrossCatalog({
+      sourceBrandGroup: req.body?.sourceBrandGroup,
+      targetBrandGroup: req.body?.targetBrandGroup,
+      mode: req.body?.mode || 'merge',
+      storeId: requestedAdminStoreId(req),
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'จัดการกลุ่มแบรนด์ไม่สำเร็จ' });
   }
 });
 
@@ -4903,20 +5201,67 @@ function buildStoreSharePreview(req, store = {}, value = () => '') {
   const image = rawImage ? (/^https?:\/\//i.test(rawImage) ? rawImage : `${baseUrl}${rawImage.startsWith('/') ? '' : '/'}${rawImage}`) : '';
   return { title, desc, image, url: `${baseUrl || '/'}${baseUrl ? '/' : ''}` };
 }
-function buildStoreLaunchChecklist({ store = {}, value = () => '', productCount = 0, orderCount = 0, domainHealth = {}, webhookCounters = {} } = {}) {
+const STORE_LAUNCH_GATE_THRESHOLD = 85;
+function buildStorePreviewFeatureState({ store = {}, value = () => '', products = [] } = {}) {
   const has = (key) => String(value(key) || '').trim().length > 0;
-  const shareReady = has('SITE_SHARE_TITLE') || has('SITE_SHARE_DESC') || has('SITE_SHARE_IMAGE');
-  const lineReady = has('CONTACT_LINE_ID') || has('CONTACT_LINE_OA_ID') || has('CONTACT_LINE_PERSONAL_URL') || has('LINE_CHANNEL_ACCESS_TOKEN');
+  const productList = Array.isArray(products) ? products : [];
+  const productCount = productList.length;
+  const productVisualCount = productList.filter((item) => {
+    if (String(item?.image || '').trim()) return true;
+    return Array.isArray(item?.images) && item.images.some((src) => String(src || '').trim());
+  }).length;
+  const shareReady = has('SITE_SHARE_TITLE') && has('SITE_SHARE_DESC') && has('SITE_SHARE_IMAGE');
+  const personalLineReady = has('CONTACT_LINE_ID') || has('CONTACT_LINE_PERSONAL_URL');
+  const oaLineReady = has('CONTACT_LINE_OA_ID') || has('LINE_OA_URL');
+  const lineReady = personalLineReady || oaLineReady || has('LINE_CHANNEL_ACCESS_TOKEN');
   const smtpReady = has('SMTP_HOST') && (has('SMTP_USER') || has('SMTP_FROM'));
+  const brandReady = has('SITE_NAME') && (has('SITE_TAGLINE') || has('SITE_FOOTER'));
+  const heroReady = has('SITE_HERO_TITLE') && has('SITE_HERO_SUB');
+  const homeContactReady = has('SITE_HOME_CONTACT_TITLE') && has('SITE_HOME_CONTACT_BODY') && has('SITE_HOME_CONTACT_NOTE')
+    && has('SITE_HOME_CONTACT_CALL_PRIMARY_LABEL') && has('SITE_HOME_CONTACT_PERSONAL_LABEL') && has('SITE_HOME_CONTACT_OA_LABEL');
+  const dockReady = has('SITE_DOCK_TITLE') && has('SITE_DOCK_BODY') && has('SITE_DOCK_LIVECHAT_LABEL')
+    && has('SITE_DOCK_CALL_LABEL') && has('SITE_DOCK_PERSONAL_LABEL') && has('SITE_DOCK_OA_LABEL');
+  const chatReady = has('CONTACT_PRIMARY_PHONE') && personalLineReady && oaLineReady && homeContactReady && dockReady;
+  const previewChecks = [brandReady, heroReady, shareReady, has('CONTACT_PRIMARY_PHONE'), lineReady, chatReady, productCount >= 3, productVisualCount >= Math.min(3, Math.max(1, productCount))];
+  const previewPercent = previewChecks.length ? Math.round((previewChecks.filter(Boolean).length / previewChecks.length) * 100) : 0;
+  return {
+    productCount,
+    productVisualCount,
+    shareReady,
+    lineReady,
+    smtpReady,
+    brandReady,
+    heroReady,
+    chatReady,
+    previewPercent,
+    previewReady: previewPercent >= STORE_LAUNCH_GATE_THRESHOLD,
+  };
+}
+function buildStoreFeatureGates({ store = {}, value = () => '', products = [] } = {}) {
+  if (store?.isDefault === true) return { previewPercent: 100, previewReady: true, calcReady: true, cropReady: true, chatReady: true };
+  const state = buildStorePreviewFeatureState({ store, value, products });
+  return {
+    previewPercent: state.previewPercent,
+    previewReady: state.previewReady,
+    calcReady: state.previewReady && String(value('SITE_CALC_KNOWLEDGE') || '').trim().length > 0,
+    cropReady: state.previewReady && String(value('SITE_CROP_LANDING_DATA') || '').trim().length > 0,
+    chatReady: state.chatReady,
+  };
+}
+function buildStoreLaunchChecklist({ store = {}, value = () => '', products = [], orderCount = 0, domainHealth = {}, webhookCounters = {} } = {}) {
+  const has = (key) => String(value(key) || '').trim().length > 0;
+  const state = buildStorePreviewFeatureState({ store, value, products });
   const items = [
-    { key: 'name', label: 'ตั้งชื่อเว็บ', ok: has('SITE_NAME'), detail: has('SITE_NAME') ? value('SITE_NAME') : 'กรอกชื่อเว็บของร้านนี้', href: '/admin/site' },
-    { key: 'brand', label: 'ชื่อแบรนด์', ok: has('SITE_NAME'), detail: has('SITE_NAME') ? value('SITE_NAME') : 'ตั้งชื่อแบรนด์ของร้าน', href: '/admin/site' },
-    { key: 'hero', label: 'Hero หน้าแรก', ok: has('SITE_HERO_TITLE') && (has('SITE_HERO_SUB') || has('SITE_HERO_ACCENT')), detail: has('SITE_HERO_TITLE') ? 'มี hero พร้อมใช้งาน' : 'ตั้งหัวข้อและคำโปรยหน้าแรก', href: '/admin/site' },
-    { key: 'share', label: 'การ์ดแชร์ LINE/Facebook', ok: shareReady, warn: !shareReady, detail: shareReady ? 'ตั้งค่าแชร์ลิงก์รายร้านแล้ว' : 'ตั้งหัวข้อ คำอธิบาย หรือรูปแชร์ของร้าน', href: '/admin/site' },
-    { key: 'line', label: 'LINE สำหรับติดต่อ', ok: lineReady, detail: lineReady ? 'มี LINE ติดต่อหรือ token แล้ว' : 'ตั้ง LINE ID, LINE OA หรือ Channel token', href: '/admin/site' },
+    { key: 'brand', label: 'แบรนด์และคำโปรย', ok: state.brandReady, detail: state.brandReady ? `${value('SITE_NAME')}${has('SITE_TAGLINE') ? ` · ${value('SITE_TAGLINE')}` : ''}` : 'ใส่ชื่อร้านและคำโปรยเพื่อให้หน้าเว็บดูครบ', href: '/admin/stores' },
+    { key: 'hero', label: 'Hero หน้าแรก', ok: state.heroReady, detail: state.heroReady ? 'มีหัวข้อและคำโปรยหน้าแรกแล้ว' : 'ตั้ง Hero title และ subtitle ก่อนเปิด preview', href: '/admin/stores' },
+    { key: 'share', label: 'การ์ดแชร์พร้อมรูป', ok: state.shareReady, warn: !state.shareReady, detail: state.shareReady ? 'มี title, description และรูปแชร์ของร้านแล้ว' : 'ตั้ง title, description และรูปแชร์ของร้านก่อน', href: '/admin/stores' },
+    { key: 'contact', label: 'เบอร์ติดต่อหลัก', ok: has('CONTACT_PRIMARY_PHONE'), detail: has('CONTACT_PRIMARY_PHONE') ? value('CONTACT_PRIMARY_PHONE') : 'ใส่เบอร์ติดต่อหลักของร้านนี้', href: '/admin/stores' },
+    { key: 'line', label: 'ปุ่ม + แอดไลน์', ok: state.lineReady, detail: state.lineReady ? 'ลูกค้ากดเพิ่มเพื่อน LINE ของร้านนี้ได้แล้ว' : 'ต้องตั้ง LINE ID, LINE OA ID หรือลิงก์ LINE ก่อนใช้งาน', href: '/admin/stores' },
+    { key: 'chat', label: 'หน้าช่องแชทและ Contact Dock', ok: state.chatReady, detail: state.chatReady ? 'ตั้งข้อมูล LIVECHAT / โทร / LINE ส่วนตัว / LINE OA ครบแล้ว' : 'กรอกข้อมูลบล็อกติดต่อและปุ่มใน dock ให้ครบก่อนเปิดร้าน', href: '/admin/stores' },
     { key: 'promptpay', label: 'PromptPay', ok: has('PROMPTPAY_ID'), detail: has('PROMPTPAY_ID') ? 'พร้อมรับชำระเงิน' : 'ใส่ PromptPay ID ก่อนขายจริง', href: '/admin/site' },
-    { key: 'smtp', label: 'SMTP อีเมล', ok: smtpReady, warn: !smtpReady, detail: smtpReady ? 'พร้อมส่งอีเมลระบบ' : 'ยังไม่ตั้ง SMTP หรือ SMTP_FROM', href: '/admin/site' },
-    { key: 'product', label: 'เพิ่มสินค้าแรก', ok: productCount > 0, detail: productCount > 0 ? `มีสินค้า ${productCount} รายการ` : 'เพิ่มสินค้าอย่างน้อย 1 รายการ', href: '/admin/products' },
+    { key: 'smtp', label: 'SMTP อีเมล', ok: state.smtpReady, warn: !state.smtpReady, detail: state.smtpReady ? 'พร้อมส่งอีเมลระบบ' : 'ยังไม่ตั้ง SMTP หรือ SMTP_FROM', href: '/admin/site' },
+    { key: 'product', label: 'เพิ่มสินค้าอย่างน้อย 3 รายการ', ok: state.productCount >= 3, detail: state.productCount >= 3 ? `มีสินค้า ${state.productCount} รายการ` : `ตอนนี้มี ${state.productCount} รายการ · ควรมีอย่างน้อย 3 เพื่อให้ preview ดูเต็ม`, href: '/admin/products' },
+    { key: 'product_media', label: 'เติมรูปสินค้าให้ preview', ok: state.productVisualCount >= Math.min(3, Math.max(1, state.productCount)), warn: state.productCount > 0 && state.productVisualCount === 0, detail: state.productVisualCount >= Math.min(3, Math.max(1, state.productCount)) ? `มีรูปสินค้าพร้อม ${state.productVisualCount} รายการ` : `มีรูปสินค้า ${state.productVisualCount}/${Math.min(3, Math.max(1, state.productCount || 3))} รายการ`, href: '/admin/products' },
     { key: 'checkout', label: 'ทดสอบสั่งซื้อ', ok: orderCount > 0, warn: orderCount <= 0, detail: orderCount > 0 ? `มีออเดอร์ ${orderCount} รายการล่าสุด` : 'ยังไม่พบออเดอร์ร้านนี้', href: '/admin/orders' },
     { key: 'domain', label: 'DNS / SSL', ok: domainHealth?.dns?.ready === true && domainHealth?.ssl?.ready === true, detail: domainHealth?.host || store.primaryDomain || store.publicUrl || 'ยังไม่พบโดเมน', href: '/admin/stores' },
     { key: 'webhook', label: 'LINE webhook ล่าสุด', ok: Math.max(0, Number(webhookCounters.failed || 0)) === 0, warn: Math.max(0, Number(webhookCounters.received || 0)) === 0, detail: `ok ${Math.max(0, Number(webhookCounters.success || 0))} / fail ${Math.max(0, Number(webhookCounters.failed || 0))}`, href: '/admin/diagnostics' },
@@ -4949,7 +5294,7 @@ app.get('/api/admin/production-qa', requireStoreScopedAccess('staff'), async (re
   const health = buildHealthSnapshot();
   const webhookCounters = summarizeLineWebhookAudits(audits);
   const sharePreview = buildStoreSharePreview(req, store, value);
-  const checklist = buildStoreLaunchChecklist({ store, value, productCount: products.length, orderCount: orders.length, domainHealth, webhookCounters });
+  const checklist = buildStoreLaunchChecklist({ store, value, products, orderCount: orders.length, domainHealth, webhookCounters });
   const smokeBaseUrl = String(domainHealth.publicUrl || sharePreview.url || '').replace(/\/+$/, '');
   res.json({
     ok: true,
@@ -5606,8 +5951,30 @@ app.get('/robots.txt', (req, res) => {
   res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: ${base}/sitemap.xml\n`);
 });
 app.get('/sitemap.xml', async (req, res) => {
-  const base = cfg('PUBLIC_URL') || `${req.protocol}://${req.get('host')}`;
-  const urls = ['/', '/#/products', '/#/about', '/crops/durian', '/crops/mango', '/crops/rice', '/crops/vegetables', ...(await listProducts(false)).map((p) => '/#/product/' + p.id)];
+  const store = await getRequestStore(req).catch(() => null);
+  const overrides = await siteOverridesForRequest(req).catch(() => ({}));
+  const value = (key) => storeSiteValue(key, { store, overrides, req, strict: true });
+  const products = await listProducts(false, { storeId: store?.id }).catch(() => []);
+  const base = String(currentStorePublicUrl(req, store) || cfg('PUBLIC_URL') || `${req.protocol}://${req.get('host')}`).trim().replace(/\/+$/, '');
+  const productCount = Array.isArray(products) ? products.length : 0;
+  const productVisualCount = (Array.isArray(products) ? products : []).filter((item) => {
+    if (String(item?.image || '').trim()) return true;
+    return Array.isArray(item?.images) && item.images.some((src) => String(src || '').trim());
+  }).length;
+  const previewChecks = [
+    String(value('SITE_NAME') || '').trim() && (String(value('SITE_TAGLINE') || '').trim() || String(value('SITE_FOOTER') || '').trim()),
+    String(value('SITE_HERO_TITLE') || '').trim() && String(value('SITE_HERO_SUB') || '').trim(),
+    String(value('SITE_SHARE_TITLE') || '').trim() && String(value('SITE_SHARE_DESC') || '').trim() && String(value('SITE_SHARE_IMAGE') || '').trim(),
+    String(value('CONTACT_PRIMARY_PHONE') || '').trim(),
+    String(value('CONTACT_LINE_ID') || value('CONTACT_LINE_OA_ID') || value('CONTACT_LINE_PERSONAL_URL') || value('LINE_OA_URL') || '').trim(),
+    productCount >= 3,
+    productVisualCount >= Math.min(3, Math.max(1, productCount)),
+  ];
+  const previewPercent = previewChecks.length ? Math.round((previewChecks.filter(Boolean).length / previewChecks.length) * 100) : 0;
+  const cropUrls = store?.isDefault === true || (previewPercent >= 85 && String(value('SITE_CROP_LANDING_DATA') || '').trim())
+    ? ['/crops/durian', '/crops/mango', '/crops/rice', '/crops/vegetables']
+    : [];
+  const urls = ['/', '/#/products', '/#/about', ...cropUrls, ...products.map((p) => '/#/product/' + p.id)];
   res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((u) => `  <url><loc>${base}${u}</loc></url>`).join('\n')}\n</urlset>`);
 });
 
@@ -5688,6 +6055,7 @@ async function renderSiteShell(req) {
 }
 app.get('*', async (req, res) => {  // SPA fallback + ซ่อนหน้า 404 ของเซิร์ฟเวอร์
   setSensitiveNoStore(res);
+  ensureCsrfCookie(req, res);
   try {
     res.type('html').send(await renderSiteShell(req));
   } catch (err) {

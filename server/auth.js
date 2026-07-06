@@ -3,13 +3,22 @@ import { getToken, getUserById, deleteToken } from './db.js';
 
 // ───────────── password (scrypt) ─────────────
 const ADMIN_ACCESS_KEY = String(process.env.ADMIN_ACCESS_KEY || '').trim();
+const SESSION_SIGNING_SECRET = String(process.env.SESSION_SIGNING_SECRET || '').trim();
+const SESSION_SIGNING_SECRET_PREVIOUS = String(process.env.SESSION_SIGNING_SECRET_PREVIOUS || '').trim();
 const SESSION_COOKIE = '__Host-nfl_session';
 const ADMIN_GRANT_COOKIE = '__Host-nfl_admin';
+const CSRF_COOKIE = '__Host-nfl_csrf';
 const DEV_SESSION_COOKIE = 'nfl_session';
 const DEV_ADMIN_GRANT_COOKIE = 'nfl_admin';
+const DEV_CSRF_COOKIE = 'nfl_csrf';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const ADMIN_GRANT_TTL_MS = 1000 * 60 * 60 * 12;
-const ADMIN_GRANT_SECRET = String(process.env.SESSION_SIGNING_SECRET || ADMIN_ACCESS_KEY).trim();
+const SIGNING_SECRETS = [...new Set([
+  SESSION_SIGNING_SECRET,
+  SESSION_SIGNING_SECRET_PREVIOUS,
+  ADMIN_ACCESS_KEY,
+].map((value) => String(value || '').trim()).filter(Boolean))];
+const PRIMARY_SIGNING_SECRET = SIGNING_SECRETS[0] || '';
 const DEBUG_SERVER_URL = String(process.env.DEBUG_SERVER_URL || '').trim();
 const DEBUG_SESSION_ID = String(process.env.DEBUG_SESSION_ID || 'admin-login-lockdown').trim();
 export const ROLE_USER = 'user';
@@ -43,8 +52,9 @@ function fromBase64Url(input) {
   return Buffer.from(padded, 'base64').toString('utf8');
 }
 
-function signValue(value) {
-  return toBase64Url(crypto.createHmac('sha256', ADMIN_GRANT_SECRET).update(String(value || '')).digest());
+function signValue(value, secret = PRIMARY_SIGNING_SECRET) {
+  if (!secret) return '';
+  return toBase64Url(crypto.createHmac('sha256', secret).update(String(value || '')).digest());
 }
 
 function sameText(a, b) {
@@ -77,7 +87,14 @@ function serializeCookie(name, value, options = {}) {
   if (options.secure !== false) parts.push('Secure');
   if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
   if (options.maxAge !== undefined) parts.push(`Max-Age=${Math.max(0, Math.floor(options.maxAge))}`);
+  if (options.priority) parts.push(`Priority=${options.priority}`);
   return parts.join('; ');
+}
+
+function appendSetCookieHeader(res, values = []) {
+  const current = res.getHeader('Set-Cookie');
+  const existing = Array.isArray(current) ? current : (current ? [current] : []);
+  res.setHeader('Set-Cookie', [...existing, ...values.filter(Boolean)]);
 }
 
 function cookieBaseOptions(req) {
@@ -94,13 +111,19 @@ function resolvedCookieNames(req) {
   return {
     session: base.secure ? SESSION_COOKIE : DEV_SESSION_COOKIE,
     adminGrant: base.secure ? ADMIN_GRANT_COOKIE : DEV_ADMIN_GRANT_COOKIE,
+    csrf: base.secure ? CSRF_COOKIE : DEV_CSRF_COOKIE,
     legacySession: SESSION_COOKIE,
     legacyAdminGrant: ADMIN_GRANT_COOKIE,
+    legacyCsrf: CSRF_COOKIE,
   };
 }
 
+export function newCsrfToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
+
 export function createAdminGrant(userId, ttlMs = ADMIN_GRANT_TTL_MS) {
-  if (!ADMIN_GRANT_SECRET || !userId) return '';
+  if (!PRIMARY_SIGNING_SECRET || !userId) return '';
   const payload = toBase64Url(JSON.stringify({
     uid: String(userId),
     exp: Date.now() + Math.max(60_000, parseInt(ttlMs, 10) || ADMIN_GRANT_TTL_MS),
@@ -109,11 +132,14 @@ export function createAdminGrant(userId, ttlMs = ADMIN_GRANT_TTL_MS) {
 }
 
 export function verifyAdminGrant(grant, userId = '') {
-  if (!ADMIN_GRANT_SECRET || !grant) return false;
+  if (!SIGNING_SECRETS.length || !grant) return false;
   const [payload, signature] = String(grant || '').split('.');
   if (!payload || !signature) return false;
-  const expected = signValue(payload);
-  if (!sameText(signature, expected)) return false;
+  const validSignature = SIGNING_SECRETS.some((secret) => {
+    const expected = signValue(payload, secret);
+    return expected && sameText(signature, expected);
+  });
+  if (!validSignature) return false;
   try {
     const data = JSON.parse(fromBase64Url(payload));
     if (!data?.uid || Number(data?.exp || 0) <= Date.now()) return false;
@@ -128,8 +154,8 @@ export function writeSessionCookies(req, res, { token = '', adminGrant = '' } = 
   const base = cookieBaseOptions(req);
   const names = resolvedCookieNames(req);
   res.setHeader('Set-Cookie', [
-    serializeCookie(names.session, token, { ...base, maxAge: token ? Math.floor(SESSION_TTL_MS / 1000) : 0 }),
-    serializeCookie(names.adminGrant, adminGrant, { ...base, maxAge: adminGrant ? Math.floor(ADMIN_GRANT_TTL_MS / 1000) : 0 }),
+    serializeCookie(names.session, token, { ...base, maxAge: token ? Math.floor(SESSION_TTL_MS / 1000) : 0, priority: 'High' }),
+    serializeCookie(names.adminGrant, adminGrant, { ...base, sameSite: 'Strict', maxAge: adminGrant ? Math.floor(ADMIN_GRANT_TTL_MS / 1000) : 0, priority: 'High' }),
     ...(names.session !== names.legacySession
       ? [serializeCookie(names.legacySession, '', { ...base, secure: true, maxAge: 0 })]
       : []),
@@ -141,6 +167,34 @@ export function writeSessionCookies(req, res, { token = '', adminGrant = '' } = 
 
 export function clearSessionCookies(req, res) {
   writeSessionCookies(req, res, { token: '', adminGrant: '' });
+}
+
+export function readCsrfToken(req) {
+  const cookies = req?.cookies || parseCookies(req?.headers?.cookie || '');
+  const names = resolvedCookieNames(req);
+  return String(cookies[names.csrf] || cookies[names.legacyCsrf] || '').trim();
+}
+
+export function ensureCsrfCookie(req, res, { rotate = false } = {}) {
+  const cookies = req?.cookies || parseCookies(req?.headers?.cookie || '');
+  const base = cookieBaseOptions(req);
+  const names = resolvedCookieNames(req);
+  const current = String(cookies[names.csrf] || cookies[names.legacyCsrf] || '').trim();
+  const token = rotate || !current ? newCsrfToken() : current;
+  const cookieHeaders = [
+    serializeCookie(names.csrf, token, {
+      ...base,
+      httpOnly: false,
+      sameSite: 'Strict',
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
+      priority: 'High',
+    }),
+    ...(names.csrf !== names.legacyCsrf
+      ? [serializeCookie(names.legacyCsrf, '', { ...base, secure: true, maxAge: 0 })]
+      : []),
+  ];
+  appendSetCookieHeader(res, cookieHeaders);
+  return token;
 }
 
 export function hashPassword(password) {
