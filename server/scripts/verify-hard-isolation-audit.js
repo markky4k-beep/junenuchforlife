@@ -30,6 +30,8 @@ const rootDir = path.join(__dirname, '..', '..');
 const serverIndex = fs.readFileSync(path.join(rootDir, 'server', 'index.js'), 'utf8');
 const clientApp = fs.readFileSync(path.join(rootDir, 'client-src', 'app.js'), 'utf8');
 const buildClientAssets = fs.readFileSync(path.join(rootDir, 'server', 'scripts', 'build-client-assets.js'), 'utf8');
+const generatedAdminApp = fs.readFileSync(path.join(rootDir, 'private-build', 'admin-app.js'), 'utf8');
+const generatedAdminHtml = fs.readFileSync(path.join(rootDir, 'private-build', 'admin.html'), 'utf8');
 
 function assert(condition, message, payload) {
   if (!condition) {
@@ -51,6 +53,14 @@ function expectBuildSource(pattern, message) {
   assert(pattern.test(buildClientAssets), message, { pattern: String(pattern) });
 }
 
+function expectGeneratedAdminApp(pattern, message) {
+  assert(pattern.test(generatedAdminApp), message, { pattern: String(pattern) });
+}
+
+function expectGeneratedAdminHtml(pattern, message) {
+  assert(pattern.test(generatedAdminHtml), message, { pattern: String(pattern) });
+}
+
 async function ignoreCleanup(fn) {
   try { await fn(); } catch {}
 }
@@ -69,6 +79,11 @@ async function staticAudit() {
   expectSource(/const BLOCKED_LEGACY_ASSET_PATH_RE = [\s\S]*route-\(\?:calc\|community\|account\)\\\.js/, 'legacy public route assets are not blocked');
   expectClientSource(/loadRuntimeScriptOnce\('\/m1\.js'\)/, 'marketing runtime path is not opaque');
   expectClientSource(/const ROUTE_CHUNK_ASSETS = \{\s*r1: '\/x1\.js',\s*r2: '\/x2\.js',\s*r3: '\/x3\.js',\s*r4: '\/api\/admin\/client\/b\.js',\s*\};/, 'route chunk assets are not using opaque paths');
+  expectGeneratedAdminApp(/ROUTE_CHUNK_ASSETS=\{r1:"\/x1\.js",r2:"\/x2\.js",r3:"\/x3\.js",r4:"\/api\/admin\/client\/b\.js"\}/, 'generated admin app route chunk map drifted from opaque r4 mapping');
+  expectGeneratedAdminApp(/ensureRouteChunkLoaded\("r4"\)|ensureRouteChunkLoaded\('r4'\)/, 'generated admin app does not lazy-load admin route chunk via r4');
+  assert(!/\/api\/admin\/client\/route-admin\.js/.test(generatedAdminApp), 'generated admin app still references legacy route-admin.js');
+  expectGeneratedAdminHtml(/<script src="\/api\/admin\/client\/a\.js\?v=[A-Za-z0-9._-]+"><\/script>/, 'generated admin html does not load opaque admin bootstrap chunk');
+  assert(!/\/api\/admin\/client\/route-admin\.js/.test(generatedAdminHtml), 'generated admin html still references legacy route-admin.js');
   expectClientSource(/function renderAdminStoreSwitcher\(\)\s*\{[\s\S]*?if \(!canAccessMultistoreConsoleClient\(\)\) return '';/, 'admin store switcher is not hidden for sub-store admin');
   expectClientSource(/fullAdminTabs\.filter\(\(\[key\]\) => canAccessMultistoreConsoleClient\(\) \|\| !\['stores', 'users'\]\.includes\(key\)\)/, 'full admin navigation does not hide stores/users when multistore console is disabled');
   expectClientSource(/viewAdminUsers\(\)[\s\S]*?if \(!canAccessMultistoreConsoleClient\(\)\) \{[\s\S]*?go\('\/admin\/site'\)[\s\S]*?return loadingView\(\);[\s\S]*?\}/, 'admin users page is not redirecting sub-store away');

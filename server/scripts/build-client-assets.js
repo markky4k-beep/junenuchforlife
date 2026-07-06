@@ -32,6 +32,15 @@ const LEGACY_PUBLIC_ARTIFACTS = [
   path.join(projectRoot, 'public', 'route-account.js'),
 ];
 
+async function replaceFileAtomic(dest, data, options = undefined) {
+  const dir = path.dirname(dest);
+  const temp = path.join(dir, `.${path.basename(dest)}.${process.pid}.${Date.now()}.tmp`);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(temp, data, options);
+  await fs.rm(dest, { force: true });
+  await fs.rename(temp, dest);
+}
+
 function collectTopLevelDeclarations(block = '') {
   const out = [];
   for (const line of String(block || '').split(/\r?\n/)) {
@@ -369,8 +378,7 @@ async function buildTask(task) {
   const banner = '/* generated file: edit client-src sources, not public output */\n';
   const destinations = Array.isArray(task.dest) ? task.dest : [task.dest];
   for (const dest of destinations) {
-    await fs.mkdir(path.dirname(dest), { recursive: true });
-    await fs.writeFile(dest, banner + result.code + '\n', 'utf8');
+    await replaceFileAtomic(dest, banner + result.code + '\n', 'utf8');
   }
 }
 
@@ -393,13 +401,12 @@ async function minifyVendor(src, dest, { module = false } = {}) {
     sourceMap: false,
   });
   if (!result.code) throw new Error(`vendor_build_failed:${path.basename(src)}`);
-  await fs.mkdir(path.dirname(dest), { recursive: true });
-  await fs.writeFile(dest, result.code + '\n', 'utf8');
+  await replaceFileAtomic(dest, result.code + '\n', 'utf8');
 }
 
 async function copyAsset(src, dest) {
-  await fs.mkdir(path.dirname(dest), { recursive: true });
-  await fs.copyFile(src, dest);
+  const content = await fs.readFile(src);
+  await replaceFileAtomic(dest, content);
 }
 
 const appSource = await fs.readFile(path.join(projectRoot, 'client-src', 'app.js'), 'utf8');
@@ -462,14 +469,14 @@ async function stampAssetVersions(htmlFile, hashByAsset) {
     const escaped = assetPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     html = html.replace(new RegExp(`(${escaped})(\\?v=[A-Za-z0-9._-]+)?`, 'g'), `$1?v=${hash}`);
   }
-  await fs.writeFile(htmlFile, html, 'utf8');
+  await replaceFileAtomic(htmlFile, html, 'utf8');
 }
 
 async function normalizeAdminShellAssetPaths(htmlFile) {
   let html = await fs.readFile(htmlFile, 'utf8');
   html = html.replace(/\/api\/admin\/client\/app\.js(\?v=[A-Za-z0-9._-]+)?/g, ADMIN_OPAQUE_ROUTES.app);
   html = html.replace(/\/api\/admin\/client\/route-admin\.js(\?v=[A-Za-z0-9._-]+)?/g, ADMIN_OPAQUE_ROUTES.route);
-  await fs.writeFile(htmlFile, html, 'utf8');
+  await replaceFileAtomic(htmlFile, html, 'utf8');
 }
 
 const [stylesHash, appHash, clientCoreHash, bg3dHash, supabaseHash, threeHash, adminAppHash] = await Promise.all([
@@ -482,7 +489,7 @@ const [stylesHash, appHash, clientCoreHash, bg3dHash, supabaseHash, threeHash, a
   contentHash(path.join(projectRoot, 'private-build', 'admin-app.js')),
 ]);
 const shellDest = path.join(projectRoot, 'private-build', 'shell.html');
-await fs.copyFile(path.join(projectRoot, 'client-src', 'index.html'), shellDest);
+await copyAsset(path.join(projectRoot, 'client-src', 'index.html'), shellDest);
 await stampAssetVersions(shellDest, {
   '/assets/runtime/s.css': stylesHash,
   '/assets/runtime/c.js': clientCoreHash,

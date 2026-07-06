@@ -129,6 +129,8 @@ let _adminInboxAudioCtx = null;
 let _adminInboxLastNoticeKey = '';
 let _adminInboxUnreadTotal = 0;
 let _adminInboxSummaryTimer = null;
+let _adminInboxSummaryTask = null;
+let _adminInboxSummaryAt = 0;
 let _chatSocket = null;
 let _chatSocketReady = false;
 let _chatSocketJoined = false;
@@ -548,19 +550,30 @@ function updateAdminInboxNavBadges() {
   });
   refreshAttentionTitle();
 }
-async function refreshAdminInboxSummary() {
+async function refreshAdminInboxSummary(options = {}) {
   if (!canAccessAdminInboxClient(currentUser)) {
     _adminInboxUnreadTotal = 0;
     updateAdminInboxNavBadges();
     return;
   }
+  const force = options === true || options?.force === true;
+  if (!force && _adminInboxSummaryTask) return _adminInboxSummaryTask;
+  if (!force && _adminInboxSummaryAt && (Date.now() - _adminInboxSummaryAt) < 8000) return _adminInboxUnreadTotal;
   try {
-    const res = await api('/api/admin/inbox/summary');
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.error || 'โหลดสรุป inbox ไม่สำเร็จ');
-    _adminInboxUnreadTotal = Math.max(0, Number(data?.unreadTotal || 0));
-    updateAdminInboxNavBadges();
+    _adminInboxSummaryTask = (async () => {
+      const res = await api('/api/admin/inbox/summary');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'โหลดสรุป inbox ไม่สำเร็จ');
+      _adminInboxUnreadTotal = Math.max(0, Number(data?.unreadTotal || 0));
+      _adminInboxSummaryAt = Date.now();
+      updateAdminInboxNavBadges();
+      return _adminInboxUnreadTotal;
+    })();
+    await _adminInboxSummaryTask;
   } catch {}
+  finally {
+    _adminInboxSummaryTask = null;
+  }
 }
 function adminInboxToastRoot() {
   if (typeof document === 'undefined') return null;
@@ -3151,7 +3164,7 @@ function initMarketing() {
     window.NFLClientModules.marketing.init();
     return;
   }
-  loadRuntimeScriptOnce('/marketing-module.js').catch(() => {});
+  loadRuntimeScriptOnce('/m1.js').catch(() => {});
 }
 function trackEvent(name, params = {}) {
   const payload = { ...params };
@@ -3265,6 +3278,101 @@ function toast(msg, type = 'info') {
   t.textContent = msg; t.className = 'toast show ' + type;
   clearTimeout(t._t); t._t = setTimeout(() => (t.className = 'toast'), 2800);
 }
+const clientSecurityDeterrent = {
+  initialized: false,
+  overlay: null,
+  devtoolsOpen: false,
+  lastToastAt: 0,
+  checkTimer: 0,
+};
+function shouldEnableClientSecurityDeterrent() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+  const host = String(window.location?.hostname || '').trim().toLowerCase();
+  const search = String(window.location?.search || '');
+  const pathName = String(window.location?.pathname || '').replace(/\/+$/, '') || '/';
+  if (pathName === '/secure-admin') return false;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return false;
+  if (/[?&](inspect|debug|allow_inspect)=1\b/.test(search)) return false;
+  return true;
+}
+function securityNotice(message = '', type = 'warn', cooldownMs = 2800) {
+  const now = Date.now();
+  if ((now - Number(clientSecurityDeterrent.lastToastAt || 0)) < cooldownMs) return;
+  clientSecurityDeterrent.lastToastAt = now;
+  toast(message, type);
+}
+function ensureSecurityOverlay() {
+  if (clientSecurityDeterrent.overlay?.isConnected) return clientSecurityDeterrent.overlay;
+  const overlay = document.createElement('div');
+  overlay.className = 'devtools-guard-overlay';
+  overlay.id = 'devtoolsGuardOverlay';
+  overlay.setAttribute('aria-hidden', 'true');
+  overlay.innerHTML = `<div class="devtools-guard-card glass">
+    <span class="eyebrow">Protected Surface</span>
+    <h2>ตรวจพบเครื่องมือตรวจสอบ</h2>
+    <p>เพื่อความปลอดภัย ระบบจะจำกัดการใช้งานชั่วคราว กรุณาปิด Developer Tools แล้วรีเฟรชหน้าอีกครั้ง</p>
+  </div>`;
+  document.body.appendChild(overlay);
+  clientSecurityDeterrent.overlay = overlay;
+  return overlay;
+}
+function setDevtoolsGuard(active = false) {
+  if (!shouldEnableClientSecurityDeterrent()) {
+    clientSecurityDeterrent.devtoolsOpen = false;
+    document.body.classList.remove('devtools-guard-active');
+    const overlay = document.getElementById('devtoolsGuardOverlay');
+    if (overlay) {
+      overlay.classList.remove('show');
+      overlay.setAttribute('aria-hidden', 'true');
+    }
+    return;
+  }
+  const next = active === true;
+  if (clientSecurityDeterrent.devtoolsOpen === next) return;
+  clientSecurityDeterrent.devtoolsOpen = next;
+  document.body.classList.toggle('devtools-guard-active', next);
+  const overlay = ensureSecurityOverlay();
+  overlay.classList.toggle('show', next);
+  overlay.setAttribute('aria-hidden', next ? 'false' : 'true');
+  if (next) securityNotice('ตรวจพบ Developer Tools ระบบจำกัดการใช้งานชั่วคราว', 'err', 5000);
+}
+function looksLikeDevtoolsOpen() {
+  if (!shouldEnableClientSecurityDeterrent()) return false;
+  if (document.visibilityState === 'hidden') return false;
+  const widthGap = Math.max(0, window.outerWidth - window.innerWidth);
+  const heightGap = Math.max(0, window.outerHeight - window.innerHeight);
+  return widthGap > 260 || heightGap > 260;
+}
+function blockedInspectionShortcut(event) {
+  const key = String(event.key || '').toLowerCase();
+  return key === 'f12'
+    || (event.ctrlKey && event.shiftKey && ['i', 'j', 'c'].includes(key))
+    || (event.ctrlKey && key === 'u')
+    || (event.metaKey && event.altKey && key === 'i');
+}
+function initClientSecurityDeterrent() {
+  if (clientSecurityDeterrent.initialized || typeof window === 'undefined' || typeof document === 'undefined') return;
+  clientSecurityDeterrent.initialized = true;
+  if (!shouldEnableClientSecurityDeterrent()) return;
+  ensureSecurityOverlay();
+  document.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    securityNotice('ปิดเมนูคลิกขวาเพื่อเพิ่มความปลอดภัยของหน้าเว็บ', 'warn', 2400);
+  }, true);
+  window.addEventListener('keydown', (event) => {
+    if (!blockedInspectionShortcut(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    securityNotice('ปิดการใช้คีย์ลัดสำหรับตรวจสอบหน้าเว็บ', 'warn', 2400);
+    setDevtoolsGuard(true);
+  }, true);
+  const syncDevtoolsState = () => setDevtoolsGuard(looksLikeDevtoolsOpen());
+  window.addEventListener('resize', syncDevtoolsState, { passive: true });
+  document.addEventListener('visibilitychange', syncDevtoolsState);
+  clientSecurityDeterrent.checkTimer = window.setInterval(syncDevtoolsState, 1500);
+  syncDevtoolsState();
+}
+initClientSecurityDeterrent();
 function closeConfirmDialog(answer = false) {
   const dialog = document.getElementById('confirmDialog');
   if (!dialog) return;
@@ -7157,7 +7265,7 @@ async function deleteAdminInboxSession(sessionId = '') {
     messages: state.sessionId === normalizedSessionId ? [] : state.messages,
     detail: state.sessionId === normalizedSessionId ? null : state.detail,
   });
-  await refreshAdminInboxSummary().catch(() => {});
+  await refreshAdminInboxSummary({ force: true }).catch(() => {});
   await refreshAdminInboxDom();
   toast(`ลบห้อง #${normalizedSessionId} แล้ว`, 'ok');
 }
@@ -7179,7 +7287,7 @@ async function ensureAdminInboxRealtime() {
         incomingSessionId
       );
     }
-    refreshAdminInboxSummary().catch(() => {});
+    refreshAdminInboxSummary({ force: true }).catch(() => {});
     if (currentPath() === '/admin/inbox') {
       refreshAdminInboxDom({ stickBottom: incomingSessionId && incomingSessionId === activeSessionId }).catch(() => {});
     }
@@ -7709,43 +7817,65 @@ function productForm(p) {
         <span class="muted">โฟกัสเฉพาะข้อมูลที่ต้องใช้จริงก่อน ส่วนรายละเอียดลึกอยู่ในเมนูขั้นสูงด้านล่าง</span>
       </div>
     </div>
-    <div class="form-note">ฟอร์มนี้แยกประเภทสินค้า กลุ่มแบรนด์ และหมวดหมู่ออกจากกันแล้ว เพื่อให้รองรับหลายร้านและหลายโมเดลธุรกิจในอนาคต</div>
-    <div class="pf-grid">
-      <label>ชื่อสินค้า<input name="name" required value="${e.name || ''}"></label>
-      <label>ประเภทสินค้า<select name="productType">${productTypeOptions}</select></label>
-      <label>กลุ่มแบรนด์<input name="brandGroup" list="productBrandGroupOptions" value="${esc(selectedBrandGroup)}" placeholder="พิมพ์ชื่อเองได้ เช่น Nuch / Premium / Summer Drop"></label>
-      <label>หมวดหมู่<select name="category">${categoryOptions}</select></label>
-      <label>ป้ายโปรโมชัน (tag)<input name="tag" value="${e.tag || ''}" placeholder="เช่น แพ็กคู่ / แพ็กสุดคุ้ม / โปรแรง"></label>
-      <label>ป้ายหน้าเว็บ<input name="marketingBadge" value="${esc(productMarketingBadge(e))}" placeholder="เช่น ขายดี / แนะนำ / พร้อมส่ง"></label>
-      <label>ชื่อสั้นบนการ์ด<input name="cardName" value="${esc(extra.cardName || '')}" placeholder="เว้นว่างเพื่อใช้ชื่อสินค้าหลัก"></label>
-      <label>ราคาหลัก (บาท)<input name="price" type="number" required value="${e.price || ''}"></label>
-      <label>ราคาเทียบอีกฝั่ง (บาท)<input name="salePrice" type="number" min="0" value="${parseInt(e?.salePrice ?? extra.salePrice ?? extra.comparePrice ?? 0, 10) || ''}" placeholder="ใส่อีกราคาเพื่อให้ระบบคำนวณก่อนลด/หลังลดอัตโนมัติ"></label>
-      <label>สต็อก<input name="stock" type="number" value="${e.stock ?? 0}"></label>
-      <label>ลำดับขึ้นก่อน<input name="sort" type="number" value="${productSortValue(e)}" placeholder="0"></label>
-      <label>ไอคอน (ถ้าไม่อัปโหลดรูป)<select name="icon">${icons.map((i) => `<option value="${i}" ${e.icon === i ? 'selected' : ''}>${i}</option>`).join('')}</select></label>
-      <label class="pf-check"><input type="checkbox" name="active" ${e.active === false ? '' : 'checked'}> เปิดขาย</label>
-      <label class="pf-check"><input type="checkbox" name="featured" ${productIsFeatured(e) ? 'checked' : ''}> สินค้าแนะนำ</label>
+    <div class="product-form-guide">
+      <article class="product-form-guide-card">
+        <b>1. กรอกข้อมูลหลัก</b>
+        <span>เริ่มจากชื่อสินค้า ประเภท หมวดหมู่ ราคา และสต็อกก่อนก็พอ</span>
+      </article>
+      <article class="product-form-guide-card">
+        <b>2. ใส่รูปและคำโปรย</b>
+        <span>ถ้ามีแค่รูปหลักกับคำโปรยสั้น ก็พร้อมขึ้นหน้าเว็บได้แล้ว</span>
+      </article>
+      <article class="product-form-guide-card">
+        <b>3. ค่อยเปิดขั้นสูง</b>
+        <span>Variant, SEO, FAQ และข้อมูลเฉพาะทาง อยู่ในส่วนขั้นสูงทั้งหมด</span>
+      </article>
     </div>
-    <datalist id="productBrandGroupOptions">${brandGroups.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist>
-    <p class="form-note">ใส่ราคา 2 ช่องเมื่อมีการลดราคา ระบบจะจับเองว่าเลขไหนเป็นราคาก่อนลดและเลขไหนเป็นราคาที่ขายจริง จากนั้นคำนวณ % ลดให้อัตโนมัติ พร้อมใช้ลำดับขึ้นก่อนภายในกลุ่มสินค้า</p>
-    <label>คำโปรย (สั้น)<input name="short" value="${e.short || ''}"></label>
-    <label>รายละเอียด<textarea name="desc" rows="3">${e.desc || ''}</textarea></label>
-    <label>จุดขายบนหน้าเว็บ (บรรทัดละ 1 ข้อ)<textarea name="sellingPoints" rows="3" placeholder="เช่น พร้อมส่ง / เหมาะกับลูกค้าใหม่ / ทีมช่วยแนะนำก่อนซื้อ">${esc(asArray(extra.sellingPoints).join('\n'))}</textarea></label>
-    <label>รูปสินค้า (อัปโหลดรูปจริงได้)<input name="image" type="file" accept="image/*"></label>
-    <input type="hidden" name="existingImage" value="${esc(e.image || '')}">
-    <div class="pf-media-stack" data-product-image-draft></div>
-    <details class="detail-fold product-form-advanced" open>
-      <summary>ข้อมูลเสริมที่ใช้บ่อย</summary>
+    <section class="product-form-block">
+      <div class="product-form-block-head">
+        <div><b>ข้อมูลที่ต้องใช้ก่อน</b><span>ชุดนี้พอสำหรับสร้างสินค้าใหม่ให้พร้อมแสดงบนหน้าเว็บแบบเร็วที่สุด</span></div>
+      </div>
+      <div class="pf-grid product-form-main-grid">
+        <label><span class="field-label">ชื่อสินค้า</span><span class="field-help">ชื่อหลักที่ลูกค้าเห็นบนหน้าเว็บและในตะกร้า</span><input name="name" required value="${e.name || ''}" placeholder="เช่น เซรั่มสูตรเข้มข้น 30 ml"></label>
+        <label><span class="field-label">ประเภทสินค้า</span><span class="field-help">ใช้กำหนดรูปแบบฟิลด์และการแสดงผลของสินค้า</span><select name="productType">${productTypeOptions}</select></label>
+        <label><span class="field-label">กลุ่มแบรนด์</span><span class="field-help">ใช้แยก family / collection เช่น Signature หรือ Summer Drop</span><input name="brandGroup" list="productBrandGroupOptions" value="${esc(selectedBrandGroup)}" placeholder="พิมพ์ชื่อเองได้ เช่น Signature / Premium / Summer Drop"></label>
+        <label><span class="field-label">หมวดหมู่</span><span class="field-help">ใช้กรองหน้าเว็บและจัดสินค้าในร้านนี้</span><select name="category">${categoryOptions}</select></label>
+        <label><span class="field-label">ราคาขาย (บาท)</span><span class="field-help">ราคาที่ลูกค้าจ่ายจริง ถ้าไม่มีโปร ใส่ช่องนี้ช่องเดียว</span><input name="price" type="number" required value="${e.price || ''}" placeholder="0"></label>
+        <label><span class="field-label">ราคาเทียบ / ก่อนลด (บาท)</span><span class="field-help">ใส่เมื่ออยากให้หน้าเว็บแสดงราคาก่อนลดและคำนวณส่วนลดอัตโนมัติ</span><input name="salePrice" type="number" min="0" value="${parseInt(e?.salePrice ?? extra.salePrice ?? extra.comparePrice ?? 0, 10) || ''}" placeholder="เว้นว่างได้ถ้าไม่มีโปร"></label>
+        <label><span class="field-label">สต็อก</span><span class="field-help">จำนวนคงเหลือที่ใช้ตัดขาย</span><input name="stock" type="number" value="${e.stock ?? 0}" placeholder="0"></label>
+        <label><span class="field-label">ลำดับขึ้นก่อน</span><span class="field-help">เลขน้อยจะถูกจัดขึ้นก่อนในหมวดเดียวกัน</span><input name="sort" type="number" value="${productSortValue(e)}" placeholder="0"></label>
+        <label class="pf-check"><input type="checkbox" name="active" ${e.active === false ? '' : 'checked'}> เปิดขายทันที</label>
+        <label class="pf-check"><input type="checkbox" name="featured" ${productIsFeatured(e) ? 'checked' : ''}> ปักเป็นสินค้าแนะนำ</label>
+      </div>
+      <datalist id="productBrandGroupOptions">${brandGroups.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist>
+      <div class="product-form-story">
+        <label><span class="field-label">คำโปรย (สั้น)</span><span class="field-help">ประโยคสั้นใต้ชื่อสินค้า เช่น จุดเด่นหรือผลลัพธ์หลัก</span><input name="short" value="${e.short || ''}" placeholder="เช่น สูตรดูแลง่าย ใช้ได้ทุกวัน"></label>
+        <label><span class="field-label">รายละเอียด</span><span class="field-help">เนื้อหาแนะนำสินค้าแบบเต็ม ใช้บนหน้ารายละเอียดสินค้า</span><textarea name="desc" rows="3">${e.desc || ''}</textarea></label>
+        <label><span class="field-label">จุดขายบนหน้าเว็บ</span><span class="field-help">ใส่บรรทัดละ 1 ข้อ ระบบจะนำไปจัดเป็น bullet ให้ลูกค้าอ่านง่าย</span><textarea name="sellingPoints" rows="3" placeholder="เช่น พร้อมส่ง / เหมาะกับลูกค้าใหม่ / ทีมช่วยแนะนำก่อนซื้อ">${esc(asArray(extra.sellingPoints).join('\n'))}</textarea></label>
+      </div>
+      <div class="product-form-media-main">
+        <label><span class="field-label">รูปสินค้าหลัก</span><span class="field-help">แนะนำ 1 รูปที่สื่อสินค้าได้ชัดที่สุด ถ้าไม่ใส่ระบบจะใช้ไอคอนแทน</span><input name="image" type="file" accept="image/*"></label>
+        <input type="hidden" name="existingImage" value="${esc(e.image || '')}">
+        <div class="pf-media-stack" data-product-image-draft></div>
+      </div>
+    </section>
+    <p class="form-note">ใส่ราคาขายจริงก่อนเสมอ ถ้ามีราคาโปรค่อยใส่ราคาเทียบเพิ่ม ระบบจะช่วยจัดรูปแบบราคาและส่วนลดให้อัตโนมัติ</p>
+    <details class="detail-fold product-form-advanced">
+      <summary>ตั้งค่าการแสดงผลและข้อมูลเสริมที่ใช้บ่อย</summary>
       <div class="fold-content">
-        <div class="pf-grid">
-          <label>สเปก (บรรทัดละ "หัวข้อ: ค่า")<textarea name="specs" rows="4" placeholder="กำลังไฟ: 80W">${specsText}</textarea></label>
-          <label>วิดีโอสินค้า (วาง URL .mp4 หรือ /uploads/...)<input name="video" value="${esc(e.video || '')}" placeholder="https://…/clip.mp4"></label>
-          <label>โมเดล 3D (URL .glb / .gltf)<input name="model" value="${esc(e.model || '')}" placeholder="https://…/model.glb"></label>
-          <label>คีย์เวิร์ดค้นหา (คั่นด้วย comma)<input name="searchKeywords" value="${esc(asArray(extra.searchKeywords).join(', '))}" placeholder="เช่น ทุเรียน, เร่งใบ, ซื้อซ้ำ"></label>
-          <label>Bundle IDs แนะนำ (คั่นด้วย comma)<input name="bundleIds" value="${esc(productBundleIds(e).join(', '))}" placeholder="เช่น p2, p3"></label>
-          <label>Upsell IDs แนะนำ (คั่นด้วย comma)<input name="upsellIds" value="${esc(productUpsellIds(e).join(', '))}" placeholder="เช่น p4, p5"></label>
+        <div class="pf-grid product-form-secondary-grid">
+          <label><span class="field-label">ป้ายโปรโมชัน (tag)</span><span class="field-help">ป้ายเสริมเช่น แพ็กคู่ / โปรแรง / ลิมิเต็ด</span><input name="tag" value="${e.tag || ''}" placeholder="เช่น แพ็กคู่ / โปรแรง"></label>
+          <label><span class="field-label">ป้ายหน้าเว็บ</span><span class="field-help">Badge สั้นบนการ์ดสินค้า เช่น ขายดี / พร้อมส่ง / แนะนำ</span><input name="marketingBadge" value="${esc(productMarketingBadge(e))}" placeholder="เช่น ขายดี / พร้อมส่ง"></label>
+          <label><span class="field-label">ชื่อสั้นบนการ์ด</span><span class="field-help">ใช้เมื่ออยากให้การ์ดสั้นกว่าชื่อสินค้าจริง</span><input name="cardName" value="${esc(extra.cardName || '')}" placeholder="เว้นว่างเพื่อใช้ชื่อสินค้าหลัก"></label>
+          <label><span class="field-label">ไอคอนสำรอง</span><span class="field-help">ใช้เมื่อยังไม่มีรูปหลัก หรืออยากให้มี icon fallback</span><select name="icon">${icons.map((i) => `<option value="${i}" ${e.icon === i ? 'selected' : ''}>${i}</option>`).join('')}</select></label>
+          <label><span class="field-label">วิดีโอสินค้า</span><span class="field-help">วาง URL ไฟล์ .mp4 หรือไฟล์ใน uploads</span><input name="video" value="${esc(e.video || '')}" placeholder="https://…/clip.mp4"></label>
+          <label><span class="field-label">โมเดล 3D</span><span class="field-help">ใส่ URL .glb / .gltf เมื่อสินค้ามีโมเดลหมุนดูได้</span><input name="model" value="${esc(e.model || '')}" placeholder="https://…/model.glb"></label>
+          <label><span class="field-label">คีย์เวิร์ดค้นหา</span><span class="field-help">คั่นด้วย comma เพื่อให้ค้นเจอง่ายขึ้นในร้าน</span><input name="searchKeywords" value="${esc(asArray(extra.searchKeywords).join(', '))}" placeholder="เช่น ทุเรียน, เร่งใบ, ซื้อซ้ำ"></label>
+          <label><span class="field-label">Bundle IDs แนะนำ</span><span class="field-help">รหัสสินค้าที่อยากให้ระบบดึงมาแนะนำเป็นชุด</span><input name="bundleIds" value="${esc(productBundleIds(e).join(', '))}" placeholder="เช่น p2, p3"></label>
+          <label><span class="field-label">Upsell IDs แนะนำ</span><span class="field-help">รหัสสินค้าที่อยากให้เสนอเพิ่มก่อนชำระเงิน</span><input name="upsellIds" value="${esc(productUpsellIds(e).join(', '))}" placeholder="เช่น p4, p5"></label>
         </div>
-        <label>รูปเพิ่มเติม — แกลเลอรี (เลือกได้หลายไฟล์)<input name="images" type="file" accept="image/*" multiple></label>
+        <label><span class="field-label">สเปกสินค้า</span><span class="field-help">ใส่บรรทัดละ "หัวข้อ: ค่า" เช่น ขนาด: 30 ml</span><textarea name="specs" rows="4" placeholder="กำลังไฟ: 80W">${specsText}</textarea></label>
+        <label><span class="field-label">รูปเพิ่มเติม — แกลเลอรี</span><span class="field-help">ใช้สำหรับหน้ารายละเอียดสินค้า ถ้ามีหลายมุมหรือรูปวิธีใช้</span><input name="images" type="file" accept="image/*" multiple></label>
         <input type="hidden" name="existingImages" value="${esc(JSON.stringify(e.images || []))}">
         <div class="pf-media-stack" data-product-gallery-draft></div>
       </div>
@@ -7753,21 +7883,21 @@ function productForm(p) {
     <details class="detail-fold product-form-advanced">
       <summary>ตัวเลือกสินค้า / Variant / SEO</summary>
       <div class="fold-content">
-        <label>ตัวเลือกสินค้า / Variant (1 บรรทัดต่อ 1 ตัวเลือก ในรูปแบบ "id :: label :: price :: stock :: key=value, key=value")<textarea name="variants" rows="5" placeholder="size_s :: ไซซ์ S :: 590 :: 12 :: ขนาด=S, สี=ขาว">${esc(serializeVariantRowsForForm(extra.variants))}</textarea></label>
+        <label><span class="field-label">ตัวเลือกสินค้า / Variant</span><span class="field-help">1 บรรทัดต่อ 1 ตัวเลือก ในรูปแบบ "id :: label :: price :: stock :: key=value, key=value"</span><textarea name="variants" rows="5" placeholder="size_s :: ไซซ์ S :: 590 :: 12 :: ขนาด=S, สี=ขาว">${esc(serializeVariantRowsForForm(extra.variants))}</textarea></label>
         <p class="form-note">ถ้าไม่กรอก ระบบจะใช้ราคาและสต็อกหลักของสินค้าแทน แต่ถ้ากรอกแล้วหน้า product, cart, checkout และ order จะอ้างอิงระดับ variant ทันที</p>
         <div class="pf-grid">
-          <label>SEO Title<input name="seoTitle" value="${esc(extra.seoTitle || '')}" placeholder="เว้นว่างเพื่อใช้ชื่อสินค้า"></label>
-          <label>SEO Description<input name="seoDescription" value="${esc(extra.seoDescription || '')}" placeholder="เว้นว่างเพื่อใช้คำโปรยสินค้า"></label>
+          <label><span class="field-label">SEO Title</span><span class="field-help">เว้นว่างได้ ระบบจะใช้ชื่อสินค้าให้อัตโนมัติ</span><input name="seoTitle" value="${esc(extra.seoTitle || '')}" placeholder="เว้นว่างเพื่อใช้ชื่อสินค้า"></label>
+          <label><span class="field-label">SEO Description</span><span class="field-help">ข้อความสั้นสำหรับ Google / การแชร์ลิงก์</span><input name="seoDescription" value="${esc(extra.seoDescription || '')}" placeholder="เว้นว่างเพื่อใช้คำโปรยสินค้า"></label>
         </div>
       </div>
     </details>
     <details class="detail-fold product-form-advanced">
       <summary>FAQ / จุดขาย / เอกสารประกอบ</summary>
       <div class="fold-content">
-        <label>FAQ (บรรทัดละ "คำถาม :: คำตอบ")<textarea name="faq" rows="4" placeholder="จัดส่งกี่วัน? :: โดยปกติ 1-3 วันทำการ">${esc(faqText)}</textarea></label>
-        <label>ไฟล์ฉลาก / PDF / รูป<input name="labelFile" type="file" accept="image/*,.pdf,application/pdf"></label>
+        <label><span class="field-label">FAQ</span><span class="field-help">บรรทัดละ "คำถาม :: คำตอบ" เพื่อให้ลูกค้าเห็นคำถามที่พบบ่อยในหน้าสินค้า</span><textarea name="faq" rows="4" placeholder="จัดส่งกี่วัน? :: โดยปกติ 1-3 วันทำการ">${esc(faqText)}</textarea></label>
+        <label><span class="field-label">ไฟล์ฉลาก / PDF / รูป</span><span class="field-help">ใช้แนบเอกสารประกอบ วิธีใช้ หรือไฟล์ฉลากสินค้า</span><input name="labelFile" type="file" accept="image/*,.pdf,application/pdf"></label>
         ${extra.labelUrl ? `<div class="pf-file"><a href="${esc(extra.labelUrl)}" target="_blank" rel="noopener">เปิดไฟล์ประกอบปัจจุบัน</a></div>` : ''}
-        <label>คำอธิบายไฟล์ / หมายเหตุ<input name="labelNote" value="${esc(extra.labelNote || '')}" placeholder="เช่น ดูรายละเอียดขนาด / วิธีใช้ / เอกสารประกอบ"></label>
+        <label><span class="field-label">คำอธิบายไฟล์ / หมายเหตุ</span><span class="field-help">ช่วยบอกลูกค้าว่าไฟล์นี้คืออะไร เช่น วิธีใช้ หรือเอกสารประกอบ</span><input name="labelNote" value="${esc(extra.labelNote || '')}" placeholder="เช่น ดูรายละเอียดขนาด / วิธีใช้ / เอกสารประกอบ"></label>
       </div>
     </details>
     <details class="detail-fold product-form-advanced">
@@ -7928,6 +8058,16 @@ async function viewAdminProducts() {
     <div class="stat-card"><span>สินค้าที่แนะนำ</span><b>${featuredCount}</b></div>
   </div>
   <div class="form-note" style="margin:0">หน้าสินค้าในเว็บแสดงเฉพาะรายการที่เปิดขายเท่านั้น ถ้าสินค้าหายจากหน้าสินค้า ให้ตรวจปุ่ม "ซ่อน / เปิดขาย" ในรายการนี้ได้ทันที</div>`;
+  const workflowGuide = `<section class="glass product-stage-panel product-stage-guide">
+    <div class="product-stage-head">
+      <div><b>เพิ่มสินค้าให้เร็วที่สุด</b><span>เริ่มจากข้อมูลหลักก่อน แล้วค่อยเปิดขั้นสูงเมื่อจำเป็น จะลดการเลื่อนและลดโอกาสกรอกเกินความจำเป็น</span></div>
+    </div>
+    <div class="product-workflow-grid">
+      <article class="product-workflow-card"><b>ขั้น 1</b><span>กด “เพิ่มสินค้า” แล้วกรอกชื่อสินค้า ประเภท หมวด ราคา สต็อก และรูปหลัก</span></article>
+      <article class="product-workflow-card"><b>ขั้น 2</b><span>เปิดขายทันทีได้เลยถ้าสินค้ายังไม่มี variant หรือ SEO ซับซ้อน</span></article>
+      <article class="product-workflow-card"><b>ขั้น 3</b><span>ถ้าต้องจัดหมวดจำนวนมาก ค่อยใช้แผงด้านซ้าย ไม่ต้องเปิดทุกกล่องพร้อมกัน</span></article>
+    </div>
+  </section>`;
   const filterPanel = `<section class="glass product-stage-panel product-stage-toolbar">
     <div class="product-stage-head">
       <div><b>ค้นหาและจัดรายการ</b><span>กรองตามชื่อสินค้า ประเภท กลุ่มแบรนด์ และสถานะ เพื่อให้ดูแค่งานที่กำลังทำ</span></div>
@@ -7954,17 +8094,33 @@ async function viewAdminProducts() {
     </div>
     <div class="adm-list admin-product-list">${rows || '<div class="empty-state"><b>ไม่พบสินค้าในเงื่อนไขนี้</b><span class="muted">ลองล้างตัวกรอง หรือเพิ่มสินค้าใหม่จากปุ่มด้านบน</span></div>'}</div>
   </section>`;
+  const formPlaceholder = `<section class="glass product-stage-panel product-form-empty">
+    <div class="product-stage-head">
+      <div><b>ฟอร์มเพิ่มสินค้า</b><span>เมื่อกด “เพิ่มสินค้า” หรือ “แก้ไข” ระบบจะเปิดฟอร์มในพื้นที่นี้ โดยเริ่มจากข้อมูลจำเป็นก่อนเสมอ</span></div>
+    </div>
+    <div class="product-form-empty-grid">
+      <div class="product-form-empty-card"><b>ต้องกรอกแน่ ๆ</b><span>ชื่อสินค้า หมวดหมู่ ราคา สต็อก รูปหลัก และสถานะเปิดขาย</span></div>
+      <div class="product-form-empty-card"><b>ค่อยกรอกเมื่อจำเป็น</b><span>Variant, SEO, FAQ, PDF ฉลาก และข้อมูลเฉพาะทาง</span></div>
+    </div>
+  </section>`;
   return adminLayout('products', `<div class="admin-workspace admin-products-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Product Command</span><h2>จัดการสินค้า</h2><p class="muted">จัดลำดับ เพิ่ม/แก้ไขสินค้า ย้ายหมวด และควบคุมการแสดงผลของร้านที่เลือกไว้แบบเป็นระเบียบกว่าเดิม</p></div><div class="admin-inline-actions"><button class="btn btn-glass" type="button" data-export-products>Export CSV</button><button class="btn btn-primary" id="addProdBtn">+ เพิ่มสินค้า</button></div></div>
+    ${workflowGuide}
     ${visibilitySummary}
     <div class="product-admin-shell">
       <aside class="product-admin-rail">
         ${bulkManager}
-        ${categoryManager}
-        ${brandGroupManager}
+        <details class="detail-fold product-rail-fold">
+          <summary>จัดการหมวดหมู่สินค้า</summary>
+          <div class="fold-content product-rail-body">${categoryManager}</div>
+        </details>
+        <details class="detail-fold product-rail-fold">
+          <summary>จัดการกลุ่มแบรนด์</summary>
+          <div class="fold-content product-rail-body">${brandGroupManager}</div>
+        </details>
       </aside>
       <section class="product-admin-stage">
         ${filterPanel}
-        <div id="prodFormWrap" class="product-form-slot"></div>
+        <div id="prodFormWrap" class="product-form-slot">${formPlaceholder}</div>
         ${listPanel}
       </section>
     </div></div>`);
@@ -8498,10 +8654,19 @@ async function viewAdminSettings() {
       <div class="form-note" style="margin:0 0 12px"><b>Bind admin:</b> สร้างรหัสจากหลังบ้าน แล้วให้คนที่จะเป็นแอดมินส่ง <code>bindadminddd CODE</code> ใน LINE OA ภายใน 10 นาที</div>
       <div class="form-note" style="margin:0">การตอบห้องแชตยังใช้รูปแบบเดิม: <code>#SESSION_ID ข้อความ</code></div>
     </div>`;
-  return adminLayout('settings', `<h2>ตั้งค่า API / LINE OA</h2>
-    <div class="conn-status">LINE OA ${badge(health.lineConfigured)} · Stripe ${badge(health.stripeConfigured)} · PromptPay ${badge(health.promptpayConfigured)} · SlipOK ${badge(health.slipokConfigured)} · อีเมล ${badge(health.mailConfigured)}</div>
+  return adminLayout('settings', `<div class="admin-workspace admin-settings-ui">
+    <section class="settings-hero">
+      <div class="settings-hero-copy">
+        <span class="eyebrow">Config Center</span>
+        <h2>ตั้งค่า API / LINE OA</h2>
+        <p class="muted">รวมการตั้งค่า LINE OA, อีเมล, Stripe และ health check ไว้ใน workspace เดียวที่อ่านง่ายและแก้ไขได้เป็นขั้นตอน</p>
+      </div>
+      <div class="settings-hero-side">
+        <div class="conn-status">LINE OA ${badge(health.lineConfigured)} · Stripe ${badge(health.stripeConfigured)} · PromptPay ${badge(health.promptpayConfigured)} · SlipOK ${badge(health.slipokConfigured)} · อีเมล ${badge(health.mailConfigured)}</div>
+      </div>
+    </section>
     ${configCenter}
-    <form id="settingsForm" class="set-form glass">
+    <form id="settingsForm" class="set-form glass settings-primary-form">
       <label class="set-field">
         <span>LINE Chat Mode <em class="ok">เลือกได้ 2 โหมด โดย flow เดิมยังอยู่</em></span>
         <select name="LINE_CHAT_MODE">
@@ -8514,11 +8679,12 @@ async function viewAdminSettings() {
         <input name="LINE_WEB_CHAT_PATH" value="${esc(webChatPath)}" placeholder="/line-room">
       </label>
       ${fields}
-      <div class="pf-actions"><button class="btn btn-primary" type="submit">บันทึกและตรวจสอบอัตโนมัติ</button><button class="btn btn-glass" type="button" id="testLineBtn">ทดสอบส่ง LINE</button><button class="btn btn-glass" type="button" id="testLineRoomBtn">ทดสอบลิงก์ห้องแชต</button><button class="btn btn-glass" type="button" id="testMailBtn">ทดสอบส่งอีเมล</button><a class="btn btn-glass" href="${routeHref('/admin/diagnostics')}">เปิด Diagnostics</a></div>
+      <div class="pf-actions settings-action-bar"><button class="btn btn-primary" type="submit">บันทึกและตรวจสอบอัตโนมัติ</button><button class="btn btn-glass" type="button" id="testLineBtn">ทดสอบส่ง LINE</button><button class="btn btn-glass" type="button" id="testLineRoomBtn">ทดสอบลิงก์ห้องแชต</button><button class="btn btn-glass" type="button" id="testMailBtn">ทดสอบส่งอีเมล</button><a class="btn btn-glass" href="${routeHref('/admin/diagnostics')}">เปิด Diagnostics</a></div>
     </form>
-    <p class="form-note">ค่า secret จะแสดงแบบปิดบัง เว้นว่างไว้ = ใช้ค่าเดิม · บันทึกแล้วระบบจะเช็ก config, LINE token, line-room และ health ให้อัตโนมัติ พร้อมเก็บ revision สำหรับ rollback และเข้ารหัส secret ก่อนบันทึกลง settings</p>
+    <p class="form-note settings-form-note">ค่า secret จะแสดงแบบปิดบัง เว้นว่างไว้ = ใช้ค่าเดิม · บันทึกแล้วระบบจะเช็ก config, LINE token, line-room และ health ให้อัตโนมัติ พร้อมเก็บ revision สำหรับ rollback และเข้ารหัส secret ก่อนบันทึกลง settings</p>
     ${lineAdminManager}
-    ${cheatSheet}`);
+    ${cheatSheet}
+  </div>`);
 }
 function normalizeStoreSubdomainDraft(value = '') {
   return String(value || '')
@@ -8980,11 +9146,27 @@ async function viewAdminStores() {
   const launchNeedsSetup = launchPercent < 85;
   const wizardState = getStoreWizardState(selectedStoreId);
   const activeWorkspacePanel = wizardState?.active ? 'store-settings' : (readStoreWorkspacePanel() || (launchNeedsSetup ? 'store-launch' : 'store-settings'));
-  const quickCards = `<div class="store-overview-grid">
-    ${diagnosticsMetricCard('Root Domain', diagnosticsStateBadge(rootDomain ? 'ok' : 'warn'), rootDomain || 'ยังจับ root domain ไม่ได้', currentHost ? `host ปัจจุบัน ${currentHost}` : '')}
-    ${diagnosticsMetricCard('ร้านทั้งหมด', diagnosticsStateBadge(stores.length ? 'ok' : 'info'), `${stores.length} ร้าน`, defaultStore?.name ? `ร้านหลัก ${defaultStore.name}` : 'ยังไม่มีร้านหลัก')}
-    ${diagnosticsMetricCard('ร้านที่เลือก', diagnosticsStateBadge(selectedReady.databaseReady ? 'ok' : 'warn'), selectedStore?.name || selectedStoreId, selectedHost)}
-    ${diagnosticsMetricCard('Launch', diagnosticsStateBadge(launchPercent >= 85 ? 'ok' : 'warn'), launchPercent ? `${launchPercent}% พร้อมใช้งาน` : 'รอข้อมูล checklist', selectedReady.domainReady ? 'Domain พร้อม' : 'Domain รอตรวจ')}
+  const overviewCards = `<div class="store-overview-grid">
+    <article class="store-overview-card">
+      <span>Root Domain</span>
+      <b>${esc(rootDomain || 'ยังจับ root domain ไม่ได้')}</b>
+      <small>${esc(currentHost ? `host ปัจจุบัน ${currentHost}` : 'ใช้ root domain นี้สำหรับ subdomain ทุกเว็บไซต์')}</small>
+    </article>
+    <article class="store-overview-card">
+      <span>Store Count</span>
+      <b>${stores.length} ร้าน</b>
+      <small>${esc(defaultStore?.name ? `ร้านหลักคือ ${defaultStore.name}` : 'ยังไม่มี default store')}</small>
+    </article>
+    <article class="store-overview-card">
+      <span>Selected</span>
+      <b>${esc(selectedStore?.name || selectedStoreId)}</b>
+      <small>${esc(selectedHost || 'ยังไม่มี host')}</small>
+    </article>
+    <article class="store-overview-card">
+      <span>Launch Score</span>
+      <b>${launchPercent ? `${launchPercent}%` : 'รอตรวจ'}</b>
+      <small>${esc(selectedReady.domainReady ? 'Domain พร้อมสำหรับ production QA' : 'ควรตรวจ domain และ SSL ต่อ')}</small>
+    </article>
   </div>`;
   const selectedPublicUrl = String(selectedStore?.publicUrl || selectedHealthData?.publicUrl || '').trim();
   const deleteConfirm = selectedStore?.subdomain || selectedStore?.id || '';
@@ -9001,18 +9183,22 @@ async function viewAdminStores() {
     ${selectedStore?.subdomain ? `<small>subdomain: ${esc(selectedStore.subdomain)}</small>` : '<small>main store</small>'}
   </div>`;
   const selectedActions = `<div class="store-workspace-actions">
-    <button class="btn btn-primary" type="button" data-store-panel-target="${launchNeedsSetup ? 'store-launch' : 'store-settings'}">${launchNeedsSetup ? 'เก็บ Checklist ร้านนี้' : 'แก้ settings ร้านนี้'}</button>
-    <button class="btn btn-glass" type="button" data-store-panel-target="${launchNeedsSetup ? 'store-settings' : 'store-launch'}">${launchNeedsSetup ? 'ไปกรอกข้อมูลร้าน' : 'เช็ก Launch'}</button>
-    ${selectedPublicUrl ? (launchNeedsSetup
-      ? `<button class="btn btn-glass is-gated" type="button" data-launch-blocked="1" data-launch-current="${launchPercent}" data-launch-required="${STORE_LAUNCH_GATE_THRESHOLD}">เปิดหน้าเว็บร้าน</button>`
-      : `<a class="btn btn-glass" href="${esc(selectedPublicUrl)}" target="_blank" rel="noopener">เปิดหน้าเว็บร้าน</a>`) : ''}
-    ${selectedPublicUrl ? (launchNeedsSetup
-      ? `<button class="btn btn-glass is-gated" type="button" data-launch-blocked="1" data-launch-current="${launchPercent}" data-launch-required="${STORE_LAUNCH_GATE_THRESHOLD}">คัดลอก URL</button>`
-      : `<button class="btn btn-glass" type="button" data-copystoreurl="${esc(selectedPublicUrl)}">คัดลอก URL</button>`) : ''}
-    <button class="btn btn-glass" type="button" data-storeops="open-diagnostics">Production QA</button>
-    <button class="btn btn-glass" type="button" data-storeops="run-diagnostics-recheck">เช็ก config ใหม่</button>
-    ${selectedStore?.id && selectedStore?.subdomain ? `<button class="btn btn-glass" type="button" data-provisionstore="${esc(selectedStore.id)}">Retry Domain</button>` : ''}
-    ${selectedStore?.id && !selectedStore?.isDefault ? `<button class="btn btn-glass store-delete-btn" type="button" data-deletestore="${esc(selectedStore.id)}" data-deletestore-name="${esc(selectedStore.name || selectedStore.id)}" data-deletestore-confirm="${esc(deleteConfirm)}">ลบร้าน</button>` : ''}
+    <div class="store-action-row">
+      <button class="btn btn-primary" type="button" data-store-panel-target="${launchNeedsSetup ? 'store-launch' : 'store-settings'}">${launchNeedsSetup ? 'เก็บ Checklist ร้านนี้' : 'แก้ settings ร้านนี้'}</button>
+      <button class="btn btn-glass" type="button" data-store-panel-target="${launchNeedsSetup ? 'store-settings' : 'store-launch'}">${launchNeedsSetup ? 'ไปกรอกข้อมูลร้าน' : 'เช็ก Launch'}</button>
+      ${selectedPublicUrl ? (launchNeedsSetup
+        ? `<button class="btn btn-glass is-gated" type="button" data-launch-blocked="1" data-launch-current="${launchPercent}" data-launch-required="${STORE_LAUNCH_GATE_THRESHOLD}">เปิดหน้าเว็บร้าน</button>`
+        : `<a class="btn btn-glass" href="${esc(selectedPublicUrl)}" target="_blank" rel="noopener">เปิดหน้าเว็บร้าน</a>`) : ''}
+      ${selectedPublicUrl ? (launchNeedsSetup
+        ? `<button class="btn btn-glass is-gated" type="button" data-launch-blocked="1" data-launch-current="${launchPercent}" data-launch-required="${STORE_LAUNCH_GATE_THRESHOLD}">คัดลอก URL</button>`
+        : `<button class="btn btn-glass" type="button" data-copystoreurl="${esc(selectedPublicUrl)}">คัดลอก URL</button>`) : ''}
+    </div>
+    <div class="store-action-row store-action-row-secondary">
+      <button class="btn btn-glass" type="button" data-storeops="open-diagnostics">Production QA</button>
+      <button class="btn btn-glass" type="button" data-storeops="run-diagnostics-recheck">เช็ก config ใหม่</button>
+      ${selectedStore?.id && selectedStore?.subdomain ? `<button class="btn btn-glass" type="button" data-provisionstore="${esc(selectedStore.id)}">Retry Domain</button>` : ''}
+      ${selectedStore?.id && !selectedStore?.isDefault ? `<button class="btn btn-glass store-delete-btn" type="button" data-deletestore="${esc(selectedStore.id)}" data-deletestore-name="${esc(selectedStore.name || selectedStore.id)}" data-deletestore-confirm="${esc(deleteConfirm)}">ลบร้าน</button>` : ''}
+    </div>
   </div>`;
   const selectedSummaryCards = `<div class="store-selected-summary">
     <article class="store-summary-card">
@@ -9036,16 +9222,40 @@ async function viewAdminStores() {
       <small>${selectedStore?.isDefault ? 'แกนกลางของระบบหลายเว็บไซต์' : 'แยกค่า config เป็นรายร้าน'}</small>
     </article>
   </div>`;
-  return adminLayout('stores', `<div class="admin-workspace admin-stores-ui store-manager-ui">
-    <div class="adm-head admin-lux-head store-manager-head">
-      <div><span class="eyebrow">Multi-store Center</span><h2>หลายเว็บไซต์</h2><p class="muted">สร้างร้าน เลือกร้าน แก้ settings ตรวจโดเมน จัดสิทธิ์ และ backup ได้จากหน้าสั้นลงกว่าเดิม</p></div>
-      <div class="admin-inline-actions"><button class="btn btn-glass" type="button" id="refreshStoresBtn">รีเฟรช</button></div>
+  const directorySummary = `<div class="store-directory-summary">
+    <span>${esc(defaultStore?.name ? `Main: ${defaultStore.name}` : 'ยังไม่มีร้านหลัก')}</span>
+    <span>${esc(domainAutomationConfigured ? 'Vercel Domain Automation พร้อม' : 'ยังไม่เปิด Domain Automation')}</span>
+  </div>`;
+  const selectedHeroAside = `<div class="store-selected-aside">
+    <div class="store-selected-aside-card">
+      <span class="eyebrow">Control Center</span>
+      <b>${launchPercent ? `${launchPercent}% พร้อมใช้งาน` : 'รอคะแนน Launch'}</b>
+      <p>${esc(launchNeedsSetup ? 'แนะนำเริ่มจาก checklist แล้วค่อยเปิดร้านออก production' : 'ร้านนี้พร้อมไล่ตรวจ QA และปรับจุดละเอียดก่อน launch')}</p>
     </div>
-    ${quickCards}
+    ${selectedActions}
+  </div>`;
+  return adminLayout('stores', `<div class="admin-workspace admin-stores-ui store-manager-ui">
+    <section class="store-manager-hero">
+      <div class="store-manager-hero-copy">
+        <span class="eyebrow">Multi-store Center</span>
+        <h2>หลายเว็บไซต์</h2>
+        <p class="muted">จัดร้านทั้งหมดจากมุมมองเดียวที่สั้นลง ชัดขึ้น และโฟกัสที่ร้านที่กำลังแก้จริง</p>
+      </div>
+      <div class="store-manager-hero-side">
+        <div class="store-manager-hero-meta">
+          <span>${esc(rootDomain || 'ยังไม่มี root domain')}</span>
+          <span>${stores.length} ร้าน</span>
+          <span>${esc(domainAutomationConfigured ? 'Domain automation พร้อม' : 'Domain automation ยังไม่ครบ')}</span>
+        </div>
+        <div class="admin-inline-actions"><button class="btn btn-glass" type="button" id="refreshStoresBtn">รีเฟรช</button></div>
+      </div>
+    </section>
+    ${overviewCards}
     <div class="store-manager-shell">
       <aside class="store-manager-rail">
         <section class="store-quick-card store-directory-card">
-          <div class="store-card-head"><div><span class="eyebrow">Store List</span><h3>เลือกร้านเพื่อแก้ไข</h3></div><span class="status-badge">${stores.length}</span></div>
+          <div class="store-card-head"><div><span class="eyebrow">Directory</span><h3>เลือกร้านที่ต้องการโฟกัส</h3></div><span class="status-badge">${stores.length}</span></div>
+          ${directorySummary}
           ${renderAdminStoreList(stores, rootDomain, selectedStoreId)}
         </section>
         ${renderAdminStoreCreateCard(stores)}
@@ -9054,11 +9264,11 @@ async function viewAdminStores() {
         <section class="store-workspace-head">
           <div class="store-workspace-top">
             <div class="store-workspace-title">
-              <span class="eyebrow">Selected Website</span>
+              <span class="eyebrow">Focused Workspace</span>
               <h3>${esc(selectedStore?.name || selectedStoreId)}</h3>
               <p>${esc(selectedHost)}</p>
             </div>
-            ${selectedActions}
+            ${selectedHeroAside}
           </div>
           ${selectedStatusBadges}
           ${selectedMeta}
@@ -10275,10 +10485,10 @@ async function viewLineRoom({ token } = {}) {
 }
 
 const ROUTE_CHUNK_ASSETS = {
-  calc: '/route-calc.js',
-  community: '/route-community.js',
-  account: '/route-account.js',
-  admin: '/api/admin/client/route-admin.js',
+  r1: '/x1.js',
+  r2: '/x2.js',
+  r3: '/x3.js',
+  r4: '/api/admin/client/b.js',
 };
 const routeChunkTasks = new Map();
 window.__NFLRouteExports = window.__NFLRouteExports || {};
@@ -10412,8 +10622,8 @@ function clearAdminOpsRefresh() {
 }
 function syncAdminOpsRefresh(path = currentPath()) {
   clearAdminOpsRefresh();
-  if (!['/admin', '/admin/diagnostics'].includes(path)) return;
-  const intervalMs = path === '/admin/diagnostics' ? 45000 : 30000;
+  if (path !== '/admin/diagnostics') return;
+  const intervalMs = 45000;
   adminOpsRefreshTimer = setInterval(() => {
     if (currentPath() !== path) {
       clearAdminOpsRefresh();
@@ -12549,7 +12759,7 @@ document.body.addEventListener('click', async (e) => {
     _adminSelectedProductIds.clear();
     adminInboxState.sessionId = '';
     _adminInboxUnreadTotal = 0;
-    refreshAdminInboxSummary().catch(() => {});
+    refreshAdminInboxSummary({ force: true }).catch(() => {});
     toast('เปลี่ยนร้านที่แก้ไขแล้ว', 'ok');
     await render();
     return;
@@ -13851,7 +14061,7 @@ document.body.addEventListener('change', async (e) => {
       go('/admin/inbox');
       return;
     }
-    refreshAdminInboxSummary().catch(() => {});
+    refreshAdminInboxSummary({ force: true }).catch(() => {});
     toast(nextStoreId === 'all' ? 'แสดง Inbox จากทุกเว็บไซต์' : 'เปลี่ยนร้านที่จัดการแล้ว', 'ok');
     render();
     return;
@@ -14323,6 +14533,7 @@ document.body.addEventListener('submit', async (e) => {
 (async function init() {
   const bootPath = currentPath();
   const requiresAuthBootstrap = bootPath === '/account' || bootPath.startsWith('/admin');
+  const isAdminBoot = bootPath.startsWith('/admin');
   captureAttribution();
   applySite();
   renderSaleBanner();
@@ -14340,17 +14551,20 @@ document.body.addEventListener('submit', async (e) => {
   }
   render();
   // ยิง bootstrap เบื้องหลังแล้วค่อย rerender เมื่อข้อมูลหลักกลับมา แทนการบล็อก first paint
-  Promise.allSettled([
-    refreshProductsCache(),
-    requiresAuthBootstrap ? Promise.resolve() : loadMe(),
-    loadSite(routeNeedsHeavySiteData()),
-  ]).then(() => {
+  const backgroundBootstrapTasks = isAdminBoot
+    ? [Promise.resolve()]
+    : [
+      refreshProductsCache(),
+      requiresAuthBootstrap ? Promise.resolve() : loadMe(),
+      loadSite(routeNeedsHeavySiteData()),
+    ];
+  Promise.allSettled(backgroundBootstrapTasks).then(() => {
     applySite();
     renderSaleBanner();
     renderAccountNav();
     renderWishCount();
     renderCart();
-    render();
+    if (!isAdminBoot) render();
   }).catch(() => {});
   // อุ่นแคชบทความ + แกลเลอรีรีวิวเบื้องหลัง (ไม่บล็อกหน้าแรก) ให้กดเข้าหน้าพวกนี้แล้วไวทันที
   setTimeout(() => { refreshArticlesCache(); refreshReviewGallery(); }, 1200);
