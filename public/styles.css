@@ -10091,6 +10091,7 @@ body .product-admin-shell {
   grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+  min-width: 0;
 }
 
 body .product-admin-rail,
@@ -10098,6 +10099,7 @@ body .product-admin-stage {
   display: grid;
   gap: 16px;
   min-width: 0;
+  align-content: start;
 }
 
 body .product-admin-rail {
@@ -10110,6 +10112,8 @@ body .admin-products-ui .category-bulk,
 body .admin-products-ui .category-admin {
   margin: 0;
   padding: 18px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 body .product-stage-panel {
@@ -10140,9 +10144,9 @@ body .product-stage-head span {
 }
 
 body .product-stage-toolbar {
-  position: sticky;
-  top: 132px;
-  z-index: 8;
+  position: static;
+  top: auto;
+  z-index: auto;
 }
 
 body .product-filter-grid {
@@ -10169,7 +10173,8 @@ body .admin-products-ui .category-bulk {
 }
 
 body .admin-products-ui .category-bulk-grid {
-  grid-template-columns: minmax(140px, .4fr) minmax(220px, 1fr) auto;
+  grid-template-columns: 1fr;
+  align-items: stretch;
 }
 
 body .admin-products-ui .category-admin {
@@ -10178,10 +10183,22 @@ body .admin-products-ui .category-admin {
   margin-bottom: 0;
 }
 
+body .admin-products-ui .category-admin-create,
+body .admin-products-ui .category-merge-grid {
+  grid-template-columns: 1fr;
+}
+
+body .admin-products-ui .category-bulk-actions,
+body .admin-products-ui .category-merge-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
 body .admin-product-list {
   max-height: min(780px, calc(100dvh - 220px));
   overflow: auto;
   padding-right: 4px;
+  min-width: 0;
 }
 
 body .admin-product-list .adm-prod {
@@ -11319,6 +11336,22 @@ body .admin-products-ui textarea {
   }
 }
 
+@media (max-width: 1380px) {
+  body .product-admin-shell {
+    grid-template-columns: 1fr;
+  }
+
+  body .product-admin-rail {
+    position: static;
+  }
+
+  body .admin-products-ui .category-admin,
+  body .admin-product-list {
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 @media (max-width: 760px) {
   body .admin {
     width: min(100% - 18px, 720px);
@@ -12088,5 +12121,64 @@ body .chip { border-radius: 999px; }
   body .hero,
   body .page-top {
     width: min(100% - 16px, 680px) !important;
+  }
+}
+
+/* ════════ ✦ PRODUCT COMMAND RAIL FIX — ฟอร์มในรางแคบต้องไม่บีบ/ทะลุขอบ ✦ ════════
+   rail กว้าง 320–380px แต่ grid ฟอร์มเดิมกว้างขั้นต่ำ ~600px ทำให้ช่องกรอกทับกัน
+   และปุ่มโดน clip ครึ่งใบ — เลเยอร์นี้บังคับคอลัมน์เดียวเมื่ออยู่ในราง */
+body .product-admin-rail .category-bulk-grid,
+body .product-admin-rail .category-merge-grid,
+body .product-admin-rail .category-admin-create,
+body .product-admin-rail .category-chip-list {
+  grid-template-columns: 1fr !important;
+}
+body .product-admin-rail .category-bulk-grid { gap: 12px; align-items: stretch; }
+body .product-admin-rail .category-bulk-grid label,
+body .product-admin-rail .category-merge-grid label { min-width: 0; }
+body .product-admin-rail .category-bulk-grid select,
+body .product-admin-rail .category-merge-grid select,
+body .product-admin-rail .category-merge-grid input,
+body .product-admin-rail .category-admin-create input {
+  width: 100%;
+  min-width: 0;
+}
+body .product-admin-rail .category-bulk-actions,
+body .product-admin-rail .category-merge-actions {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  justify-content: stretch;
+}
+body .product-admin-rail .category-bulk-actions .btn,
+body .product-admin-rail .category-merge-actions .btn,
+body .product-admin-rail .category-admin-create .btn,
+body .product-admin-rail .pf-actions .btn {
+  width: 100%;
+  justify-content: center;
+  padding-left: 12px;
+  padding-right: 12px;
+  white-space: nowrap;
+}
+body .product-admin-rail .category-admin-count { justify-self: start; }
+/* จอแคบ (rail กลายเป็นเต็มความกว้าง) — กางกลับเป็นหลายคอลัมน์ให้ไม่เทอะทะ */
+@media (max-width: 1380px) {
+  body .product-admin-rail .category-bulk-grid,
+  body .product-admin-rail .category-merge-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important;
+  }
+  body .product-admin-rail .category-chip-list {
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)) !important;
+  }
+}
+@media (max-width: 640px) {
+  body .product-admin-rail .category-bulk-grid,
+  body .product-admin-rail .category-merge-grid,
+  body .product-admin-rail .category-chip-list {
+    grid-template-columns: 1fr !important;
+  }
+  body .product-admin-rail .category-bulk-actions,
+  body .product-admin-rail .category-merge-actions {
+    grid-template-columns: 1fr;
   }
 }

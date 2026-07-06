@@ -373,9 +373,10 @@ function selectedAdminStore() {
 }
 function renderAdminStoreSwitcher() {
   if (isChatAdminClient(currentUser)) return '';
+  if (!canAccessMultistoreConsoleClient()) return '';
   const stores = Array.isArray(_adminStoresContext?.stores) ? _adminStoresContext.stores : [];
   const selected = adminSelectedStoreId();
-  if (!stores.length) return '';
+  if (!stores.length || stores.length <= 1) return '';
   const options = [
     ...(isFullAdminClient(currentUser) ? [{ id: 'all', name: 'ทุกเว็บไซต์ (Inbox)', meta: 'รวมทุกเว็บไซต์' }] : []),
     ...stores.map((store) => ({ id: store.id, name: store.name || store.id, meta: store.subdomain || (store.isDefault ? 'main store' : 'store') })),
@@ -847,6 +848,13 @@ const S = (k) => SITE[k] || '';
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function isDefaultPublicStore() {
   return !SITE?.store || SITE.store.isDefault !== false;
+}
+function canAccessMultistoreConsoleClient() {
+  if (_adminStoresContext && _adminStoresContext.multistoreConsoleEnabled === false) return false;
+  return isDefaultPublicStore();
+}
+function storeManagerRoute() {
+  return canAccessMultistoreConsoleClient() ? '/admin/stores' : '/admin/site';
 }
 function currentBrandName() {
   return String(S('SITE_NAME') || '').trim() || (isDefaultPublicStore() ? 'นุชฟอร์ไลฟ์' : 'แบรนด์นี้');
@@ -6569,10 +6577,11 @@ function adminGuard(options = {}) {
 function adminLayout(active, content) {
   const storeRole = currentStoreRoleClient(currentUser);
   const storeScopedTabs = [['', 'แดชบอร์ด', 'dashboard'], ['products', 'จัดการสินค้า', 'products'], ['community', 'ชุมชน', 'community'], ['articles', 'บทความเดิม', 'articles'], ['inbox', 'Inbox แชต', 'inbox'], ['leads', 'ลีดลูกค้า', 'leads'], ['customers', 'CRM ลูกค้า', 'customers'], ['orders', 'ออเดอร์', 'orders'], ['coupons', 'คูปองส่วนลด', 'coupons'], ['site', 'ข้อมูลร้าน', 'site']];
+  const fullAdminTabs = [['', 'แดชบอร์ด', 'dashboard'], ['products', 'จัดการสินค้า', 'products'], ['community', 'ชุมชน', 'community'], ['articles', 'บทความเดิม', 'articles'], ['inbox', 'Inbox แชต', 'inbox'], ['leads', 'ลีดลูกค้า', 'leads'], ['customers', 'CRM ลูกค้า', 'customers'], ['orders', 'ออเดอร์', 'orders'], ['coupons', 'คูปองส่วนลด', 'coupons'], ['users', 'ผู้ใช้', 'users'], ['stores', 'หลายเว็บไซต์', 'stores'], ['site', 'ข้อมูลร้าน', 'site'], ['diagnostics', 'Diagnostics', 'diagnostics'], ['settings', 'ตั้งค่า API', 'settings']];
   const tabs = isChatAdminClient(currentUser) || (!isFullAdminClient(currentUser) && storeRole === 'chat_admin')
     ? [['inbox', 'Inbox แชต', 'inbox']]
     : (isFullAdminClient(currentUser)
-      ? [['', 'แดชบอร์ด', 'dashboard'], ['products', 'จัดการสินค้า', 'products'], ['community', 'ชุมชน', 'community'], ['articles', 'บทความเดิม', 'articles'], ['inbox', 'Inbox แชต', 'inbox'], ['leads', 'ลีดลูกค้า', 'leads'], ['customers', 'CRM ลูกค้า', 'customers'], ['orders', 'ออเดอร์', 'orders'], ['coupons', 'คูปองส่วนลด', 'coupons'], ['users', 'ผู้ใช้', 'users'], ['stores', 'หลายเว็บไซต์', 'stores'], ['site', 'ข้อมูลร้าน', 'site'], ['diagnostics', 'Diagnostics', 'diagnostics'], ['settings', 'ตั้งค่า API', 'settings']]
+      ? fullAdminTabs.filter(([key]) => canAccessMultistoreConsoleClient() || !['stores', 'users'].includes(key))
       : storeScopedTabs);
   // ไอคอน + หมวดหมู่เมนู — จัดกลุ่มให้หาง่าย (มือถือจะยุบเป็น grid เดิมผ่าน display:contents)
   const NAV_ICONS = { '': 'dashboard', customers: 'customers', products: 'products', community: 'community', articles: 'articles', inbox: 'inbox', leads: 'leads', orders: 'orders', coupons: 'coupons', users: 'users', stores: 'stores', site: 'site', diagnostics: 'diagnostics', settings: 'settings' };
@@ -7356,8 +7365,8 @@ function buildGrowthRecommendations({ analytics = {}, stats = {}, products = [],
         ? `ระบบ LINE พร้อมใช้งาน${followUpCount ? ` และมีคิวติดตาม ${followUpCount} รายการ` : ''}`
         : 'ยังไม่พบ LINE token/secret หรือห้องแชตเว็บยังไม่พร้อมสำหรับร้านนี้',
       impact: lineReady ? 'ลูกค้าทักเข้าเว็บและ LINE ต่อเนื่องได้' : 'ปิดจุดหลุดของ inbox, webhook และ handoff ไปห้องแชตก่อนเปิดขาย',
-      action: lineReady ? 'mark-done' : 'open-stores',
-      confirm: lineReady ? 'ทำเครื่องหมายว่าเรียบร้อย' : 'เปิด Brand & API รายร้าน',
+      action: lineReady ? 'mark-done' : (canAccessMultistoreConsoleClient() ? 'open-stores' : 'open-site-contact'),
+      confirm: lineReady ? 'ทำเครื่องหมายว่าเรียบร้อย' : (canAccessMultistoreConsoleClient() ? 'เปิด Brand & API รายร้าน' : 'เปิดข้อมูลร้าน'),
     },
     {
       id: 'payment-readiness',
@@ -7367,8 +7376,8 @@ function buildGrowthRecommendations({ analytics = {}, stats = {}, products = [],
         ? `พร้อมใช้ ${health.promptpayConfigured ? 'PromptPay' : ''}${health.promptpayConfigured && health.stripeConfigured ? ' และ ' : ''}${health.stripeConfigured ? 'Stripe' : ''}`
         : 'ยังไม่พบ PromptPay หรือ Stripe สำหรับร้านที่เลือกอยู่ตอนนี้',
       impact: paymentReady ? 'ลูกค้าจ่ายเงินได้ต่อเนื่องโดยไม่สะดุด' : 'ลดการหลุดก่อนปิดการขายจริง',
-      action: paymentReady ? 'mark-done' : 'open-stores',
-      confirm: paymentReady ? 'ทำเครื่องหมายว่าเรียบร้อย' : 'เปิด Brand & API รายร้าน',
+      action: paymentReady ? 'mark-done' : (canAccessMultistoreConsoleClient() ? 'open-stores' : 'open-site-contact'),
+      confirm: paymentReady ? 'ทำเครื่องหมายว่าเรียบร้อย' : (canAccessMultistoreConsoleClient() ? 'เปิด Brand & API รายร้าน' : 'เปิดข้อมูลร้าน'),
     },
     {
       id: 'stock-health',
@@ -7486,7 +7495,7 @@ async function viewAdminDash() {
           <a href="${routeHref('/admin/products')}">จัดการสินค้า / เติมสต็อก</a>
           <a href="${routeHref('/admin/site')}">แก้ Hero และข้อมูลร้าน</a>
           <a href="${routeHref('/admin/coupons')}">สร้างคูปองกระตุ้นยอด</a>
-          <a href="${routeHref('/admin/stores')}">ตั้งค่า Brand & API รายร้าน</a>
+          ${canAccessMultistoreConsoleClient() ? `<a href="${routeHref(storeManagerRoute())}">ตั้งค่า Brand & API รายร้าน</a>` : ''}
           <a href="${routeHref('/admin/diagnostics')}">เปิด Production QA / Diagnostics</a>
           <a href="${routeHref('/admin/inbox')}">ตอบ Inbox ลูกค้า</a>
         </div>
@@ -7937,12 +7946,11 @@ async function viewAdminProducts() {
       <label>ประเภทสินค้า<select id="adminProductTypeFilter">${typeOptions}</select></label>
       <label>กลุ่มแบรนด์<select id="adminProductBrandFilter">${brandOptions}</select></label>
     </div>
-    <div class="product-stage-actions"><button class="btn btn-glass" type="button" id="resetAdminProductFiltersBtn">ล้างตัวกรอง</button><button class="btn btn-primary" type="button" id="addProdBtn">+ เพิ่มสินค้า</button></div>
+    <div class="product-stage-actions"><button class="btn btn-glass" type="button" id="resetAdminProductFiltersBtn">ล้างตัวกรอง</button></div>
   </section>`;
   const listPanel = `<section class="glass product-stage-panel">
     <div class="product-stage-head">
       <div><b>รายการสินค้า</b><span>เลือก แก้ไข จัดลำดับ หรือซ่อนสินค้าได้จากตรงนี้ทันที</span></div>
-      <div class="admin-inline-actions"><button class="btn btn-glass" type="button" data-export-products>Export CSV</button></div>
     </div>
     <div class="adm-list admin-product-list">${rows || '<div class="empty-state"><b>ไม่พบสินค้าในเงื่อนไขนี้</b><span class="muted">ลองล้างตัวกรอง หรือเพิ่มสินค้าใหม่จากปุ่มด้านบน</span></div>'}</div>
   </section>`;
@@ -8379,6 +8387,11 @@ async function viewAdminInbox() {
 async function viewAdminUsers() {
   if (!adminGuard()) return loadingView();
   await ensureAdminStoresContext();
+  if (!canAccessMultistoreConsoleClient()) {
+    toast('ร้านลูกไม่แสดงรายชื่อผู้ใช้ของเว็บหลัก', 'err');
+    setTimeout(() => go('/admin/site'), 0);
+    return loadingView();
+  }
   const data = await fetchAdminPage('users');
   const users = data.items || [];
   const createForm = `<form id="adminCreateUserForm" class="prod-form admin-user-create glass">
@@ -8719,7 +8732,7 @@ function renderStoreOnboardingPanel(store = {}, settingsData = {}, qa = null) {
       </div>
       <div class="launch-progress"><span style="width:${Math.max(0, Math.min(100, Number(checklist.percent || 0)))}%"></span></div>
       <div class="store-checklist">
-        ${checklist.items.map((item) => `<a class="store-check-item ${item.status === 'ok' ? 'done' : item.status === 'warn' ? 'warn' : ''}" href="${routeHref(item.href || '/admin/stores')}">
+        ${checklist.items.map((item) => `<a class="store-check-item ${item.status === 'ok' ? 'done' : item.status === 'warn' ? 'warn' : ''}" href="${routeHref(item.href || storeManagerRoute())}">
           <span>${item.status === 'ok' ? '✓' : item.status === 'warn' ? '!' : '○'}</span>
           <b>${esc(item.label)}</b>
           <small>${esc(item.detail || '')}</small>
@@ -8892,6 +8905,11 @@ function renderStoreWorkspacePanel(title, desc, content, open = false) {
 async function viewAdminStores() {
   if (!adminGuard()) return loadingView();
   await ensureAdminStoresContext(true).catch(() => null);
+  if (!canAccessMultistoreConsoleClient()) {
+    toast('ร้านที่สร้างจากเว็บหลักไม่มีสิทธิ์เข้าหน้าหลายเว็บไซต์', 'err');
+    setTimeout(() => go('/admin/site'), 0);
+    return loadingView();
+  }
   const r = await api('/api/admin/stores');
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
@@ -9328,7 +9346,7 @@ async function viewAdminDiagnostics() {
     </div>`)}
   </div>`;
   return adminLayout('diagnostics', `<div class="admin-workspace admin-diagnostics-ui diagnostics-compact"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Health Center</span><h2>System Diagnostics</h2><p class="muted">ตรวจสุขภาพระบบและจุดที่ต้องแก้จากหน้าเดียว โดยรายละเอียดรองถูกพับไว้ให้เปิดดูเฉพาะเวลาต้องใช้</p></div></div>
-    <div class="pf-actions diagnostics-actions" style="margin-bottom:16px"><button class="btn btn-primary" type="button" id="runDiagnosticsRecheckBtn">Re-check Config</button><button class="btn btn-glass" type="button" id="refreshDiagnosticsBtn">รีเฟรชหน้านี้</button><a class="btn btn-glass" href="${routeHref('/admin/settings')}">ไปหน้าตั้งค่า</a><a class="btn btn-glass" href="${routeHref('/admin/stores')}">Store Manager</a></div>
+    <div class="pf-actions diagnostics-actions" style="margin-bottom:16px"><button class="btn btn-primary" type="button" id="runDiagnosticsRecheckBtn">Re-check Config</button><button class="btn btn-glass" type="button" id="refreshDiagnosticsBtn">รีเฟรชหน้านี้</button><a class="btn btn-glass" href="${routeHref('/admin/settings')}">ไปหน้าตั้งค่า</a>${canAccessMultistoreConsoleClient() ? `<a class="btn btn-glass" href="${routeHref(storeManagerRoute())}">Store Manager</a>` : ''}</div>
     ${diagnosticsSection('Live Production QA', 'หน้าเดียวสำหรับเช็กความพร้อมหลัง deploy และก่อนเปิดร้านใหม่', productionQaDashboard(productionQa))}
     ${foldedSections}
   </div>`);
@@ -12360,7 +12378,7 @@ document.body.addEventListener('click', async (e) => {
       }
       if (action === 'open-stores') {
         setGrowthActionDone(actionId);
-        go('/admin/stores');
+        go(storeManagerRoute());
         return;
       }
       if (action === 'open-diagnostics') {

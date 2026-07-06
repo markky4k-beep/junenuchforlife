@@ -386,6 +386,17 @@ async function userHasAnyStoreRole(req = {}) {
 async function canAccessAdminSurface(req = {}) {
   return canAccessAdminShell(req.user) || await userHasAnyStoreRole(req);
 }
+function multistoreConsoleEnabledForStore(store = null) {
+  return !store || store.isDefault === true;
+}
+async function multistoreConsoleEnabledForRequest(req = {}) {
+  const store = req.store || await getRequestStore(req).catch(() => null);
+  return multistoreConsoleEnabledForStore(store);
+}
+async function requireMultistoreConsole(req, res, next) {
+  if (await multistoreConsoleEnabledForRequest(req)) return next();
+  return res.status(404).json({ error: 'ไม่พบรายการที่ร้องขอ' });
+}
 function requireStoreScopedAccess(minRole = 'staff') {
   return async (req, res, next) => {
     if (!req.user) return res.status(404).json({ error: 'ไม่พบรายการที่ร้องขอ' });
@@ -4927,7 +4938,7 @@ app.post('/api/admin/orders/:id/support', requireStoreScopedAccess('staff'), asy
   invalidateCrmSnapshot(storeId);
   res.json({ ok: true, order: { ...clientOrder(updated), statusLabel: STATUS_LABEL[updated.status] } });
 });
-app.get('/api/admin/users', requireAdmin, async (req, res) => {
+app.get('/api/admin/users', requireAdmin, requireMultistoreConsole, async (req, res) => {
   const { page, limit, offset, search, role } = parseAdminListQuery(req, 20);
   const [items, total] = await Promise.all([
     listAdminUsers(limit, offset, { search, role }),
@@ -4935,7 +4946,7 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
   ]);
   res.json(pagedAdminResponse({ items, page, limit, total }));
 });
-app.post('/api/admin/users', requireAdmin, async (req, res) => {
+app.post('/api/admin/users', requireAdmin, requireMultistoreConsole, async (req, res) => {
   const { email, password, name, role } = req.body || {};
   const normalizedEmail = String(email || '').trim().toLowerCase();
   const normalizedRole = String(role || '').trim();
@@ -4958,6 +4969,8 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
   res.json({ ok: true, user: publicUser(user) });
 });
 app.get('/api/admin/stores', requireAdminConsole, async (req, res) => {
+  const currentStore = await getRequestStore(req).catch(() => null);
+  const multistoreConsoleEnabled = multistoreConsoleEnabledForStore(currentStore);
   const stores = await listStores();
   const domains = await listStoreDomains().catch(() => []);
   const databases = await listStoreDatabases().catch(() => []);
@@ -4979,12 +4992,18 @@ app.get('/api/admin/stores', requireAdminConsole, async (req, res) => {
   const currentHost = extractRequestHost(req);
   const globalAdmin = String(req.user?.role || '') === ROLE_ADMIN;
   const visibleStores = globalAdmin ? stores : stores.filter((store) => roleByStore.has(store.id));
+  const scopedVisibleStores = multistoreConsoleEnabled
+    ? visibleStores
+    : visibleStores.filter((store) => String(store.id || '') === String(currentStore?.id || '').trim());
+  const responseStores = scopedVisibleStores.length ? scopedVisibleStores : (currentStore ? [currentStore] : []);
   res.json({
     ok: true,
     rootDomain: tenantRootDomain(req),
     currentHost,
+    currentStoreId: String(currentStore?.id || '').trim(),
+    multistoreConsoleEnabled,
     domainAutomationConfigured: vercelDomainAutomationConfigured(),
-    stores: visibleStores.map((store) => ({
+    stores: responseStores.map((store) => ({
       ...store,
       publicUrl: currentStorePublicUrl(req, store),
       domains: domainsByStore.get(store.id) || [],
@@ -4993,7 +5012,7 @@ app.get('/api/admin/stores', requireAdminConsole, async (req, res) => {
     })),
   });
 });
-app.get('/api/admin/stores/check-subdomain', requireAdmin, async (req, res) => {
+app.get('/api/admin/stores/check-subdomain', requireAdmin, requireMultistoreConsole, async (req, res) => {
   const subdomain = normalizeRequestedSubdomain(String(req.query?.subdomain || '').trim());
   const valid = isValidStoreSubdomain(subdomain);
   const available = valid ? await isStoreSubdomainAvailable(subdomain) : false;
@@ -5006,7 +5025,7 @@ app.get('/api/admin/stores/check-subdomain', requireAdmin, async (req, res) => {
     previewUrl: valid && available ? currentStorePublicUrl(req, { subdomain }) : '',
   });
 });
-app.post('/api/admin/stores', requireAdmin, async (req, res) => {
+app.post('/api/admin/stores', requireAdmin, requireMultistoreConsole, async (req, res) => {
   const name = String(req.body?.name || '').trim();
   const subdomain = normalizeRequestedSubdomain(String(req.body?.subdomain || '').trim());
   const templateKey = String(req.body?.templateKey || 'blank').trim() || 'blank';
@@ -5064,7 +5083,7 @@ app.post('/api/admin/stores', requireAdmin, async (req, res) => {
   });
 });
 // ลบร้านย่อย (subdomain store) — เฉพาะ global admin, ต้องยืนยันด้วย subdomain/ชื่อร้าน, ห้ามลบร้านหลัก
-app.delete('/api/admin/stores/:id', requireAdmin, async (req, res) => {
+app.delete('/api/admin/stores/:id', requireAdmin, requireMultistoreConsole, async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้านที่ต้องการลบ' });
   if (store.isDefault === true || store.id === 'store_main') {
@@ -5103,7 +5122,7 @@ app.delete('/api/admin/stores/:id', requireAdmin, async (req, res) => {
   });
   res.json({ ok: true, storeId: store.id, cascade, domainRemovals });
 });
-app.post('/api/admin/stores/:id/provision-domain', requireStoreParamAccess('admin'), async (req, res) => {
+app.post('/api/admin/stores/:id/provision-domain', requireMultistoreConsole, requireStoreParamAccess('admin'), async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้านที่ต้องการตั้งค่าโดเมน' });
   if (store.isDefault || !store.subdomain) return res.status(400).json({ error: 'ร้านหลักไม่ต้อง provision subdomain' });
@@ -5121,7 +5140,7 @@ app.post('/api/admin/stores/:id/provision-domain', requireStoreParamAccess('admi
     },
   });
 });
-app.get('/api/admin/stores/:id/domain-health', requireStoreParamAccess('staff'), async (req, res) => {
+app.get('/api/admin/stores/:id/domain-health', requireMultistoreConsole, requireStoreParamAccess('staff'), async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
   const domains = await listStoreDomains(store.id).catch(() => []);
@@ -5248,22 +5267,23 @@ function buildStoreFeatureGates({ store = {}, value = () => '', products = [] } 
     chatReady: state.chatReady,
   };
 }
-function buildStoreLaunchChecklist({ store = {}, value = () => '', products = [], orderCount = 0, domainHealth = {}, webhookCounters = {} } = {}) {
+function buildStoreLaunchChecklist({ store = {}, value = () => '', products = [], orderCount = 0, domainHealth = {}, webhookCounters = {}, multistoreConsoleEnabled = true } = {}) {
   const has = (key) => String(value(key) || '').trim().length > 0;
   const state = buildStorePreviewFeatureState({ store, value, products });
+  const storeManagerHref = multistoreConsoleEnabled ? '/admin/stores' : '/admin/site';
   const items = [
-    { key: 'brand', label: 'แบรนด์และคำโปรย', ok: state.brandReady, detail: state.brandReady ? `${value('SITE_NAME')}${has('SITE_TAGLINE') ? ` · ${value('SITE_TAGLINE')}` : ''}` : 'ใส่ชื่อร้านและคำโปรยเพื่อให้หน้าเว็บดูครบ', href: '/admin/stores' },
-    { key: 'hero', label: 'Hero หน้าแรก', ok: state.heroReady, detail: state.heroReady ? 'มีหัวข้อและคำโปรยหน้าแรกแล้ว' : 'ตั้ง Hero title และ subtitle ก่อนเปิด preview', href: '/admin/stores' },
-    { key: 'share', label: 'การ์ดแชร์พร้อมรูป', ok: state.shareReady, warn: !state.shareReady, detail: state.shareReady ? 'มี title, description และรูปแชร์ของร้านแล้ว' : 'ตั้ง title, description และรูปแชร์ของร้านก่อน', href: '/admin/stores' },
-    { key: 'contact', label: 'เบอร์ติดต่อหลัก', ok: has('CONTACT_PRIMARY_PHONE'), detail: has('CONTACT_PRIMARY_PHONE') ? value('CONTACT_PRIMARY_PHONE') : 'ใส่เบอร์ติดต่อหลักของร้านนี้', href: '/admin/stores' },
-    { key: 'line', label: 'ปุ่ม + แอดไลน์', ok: state.lineReady, detail: state.lineReady ? 'ลูกค้ากดเพิ่มเพื่อน LINE ของร้านนี้ได้แล้ว' : 'ต้องตั้ง LINE ID, LINE OA ID หรือลิงก์ LINE ก่อนใช้งาน', href: '/admin/stores' },
-    { key: 'chat', label: 'หน้าช่องแชทและ Contact Dock', ok: state.chatReady, detail: state.chatReady ? 'ตั้งข้อมูล LIVECHAT / โทร / LINE ส่วนตัว / LINE OA ครบแล้ว' : 'กรอกข้อมูลบล็อกติดต่อและปุ่มใน dock ให้ครบก่อนเปิดร้าน', href: '/admin/stores' },
+    { key: 'brand', label: 'แบรนด์และคำโปรย', ok: state.brandReady, detail: state.brandReady ? `${value('SITE_NAME')}${has('SITE_TAGLINE') ? ` · ${value('SITE_TAGLINE')}` : ''}` : 'ใส่ชื่อร้านและคำโปรยเพื่อให้หน้าเว็บดูครบ', href: storeManagerHref },
+    { key: 'hero', label: 'Hero หน้าแรก', ok: state.heroReady, detail: state.heroReady ? 'มีหัวข้อและคำโปรยหน้าแรกแล้ว' : 'ตั้ง Hero title และ subtitle ก่อนเปิด preview', href: storeManagerHref },
+    { key: 'share', label: 'การ์ดแชร์พร้อมรูป', ok: state.shareReady, warn: !state.shareReady, detail: state.shareReady ? 'มี title, description และรูปแชร์ของร้านแล้ว' : 'ตั้ง title, description และรูปแชร์ของร้านก่อน', href: storeManagerHref },
+    { key: 'contact', label: 'เบอร์ติดต่อหลัก', ok: has('CONTACT_PRIMARY_PHONE'), detail: has('CONTACT_PRIMARY_PHONE') ? value('CONTACT_PRIMARY_PHONE') : 'ใส่เบอร์ติดต่อหลักของร้านนี้', href: storeManagerHref },
+    { key: 'line', label: 'ปุ่ม + แอดไลน์', ok: state.lineReady, detail: state.lineReady ? 'ลูกค้ากดเพิ่มเพื่อน LINE ของร้านนี้ได้แล้ว' : 'ต้องตั้ง LINE ID, LINE OA ID หรือลิงก์ LINE ก่อนใช้งาน', href: storeManagerHref },
+    { key: 'chat', label: 'หน้าช่องแชทและ Contact Dock', ok: state.chatReady, detail: state.chatReady ? 'ตั้งข้อมูล LIVECHAT / โทร / LINE ส่วนตัว / LINE OA ครบแล้ว' : 'กรอกข้อมูลบล็อกติดต่อและปุ่มใน dock ให้ครบก่อนเปิดร้าน', href: storeManagerHref },
     { key: 'promptpay', label: 'PromptPay', ok: has('PROMPTPAY_ID'), detail: has('PROMPTPAY_ID') ? 'พร้อมรับชำระเงิน' : 'ใส่ PromptPay ID ก่อนขายจริง', href: '/admin/site' },
     { key: 'smtp', label: 'SMTP อีเมล', ok: state.smtpReady, warn: !state.smtpReady, detail: state.smtpReady ? 'พร้อมส่งอีเมลระบบ' : 'ยังไม่ตั้ง SMTP หรือ SMTP_FROM', href: '/admin/site' },
     { key: 'product', label: 'เพิ่มสินค้าอย่างน้อย 3 รายการ', ok: state.productCount >= 3, detail: state.productCount >= 3 ? `มีสินค้า ${state.productCount} รายการ` : `ตอนนี้มี ${state.productCount} รายการ · ควรมีอย่างน้อย 3 เพื่อให้ preview ดูเต็ม`, href: '/admin/products' },
     { key: 'product_media', label: 'เติมรูปสินค้าให้ preview', ok: state.productVisualCount >= Math.min(3, Math.max(1, state.productCount)), warn: state.productCount > 0 && state.productVisualCount === 0, detail: state.productVisualCount >= Math.min(3, Math.max(1, state.productCount)) ? `มีรูปสินค้าพร้อม ${state.productVisualCount} รายการ` : `มีรูปสินค้า ${state.productVisualCount}/${Math.min(3, Math.max(1, state.productCount || 3))} รายการ`, href: '/admin/products' },
     { key: 'checkout', label: 'ทดสอบสั่งซื้อ', ok: orderCount > 0, warn: orderCount <= 0, detail: orderCount > 0 ? `มีออเดอร์ ${orderCount} รายการล่าสุด` : 'ยังไม่พบออเดอร์ร้านนี้', href: '/admin/orders' },
-    { key: 'domain', label: 'DNS / SSL', ok: domainHealth?.dns?.ready === true && domainHealth?.ssl?.ready === true, detail: domainHealth?.host || store.primaryDomain || store.publicUrl || 'ยังไม่พบโดเมน', href: '/admin/stores' },
+    { key: 'domain', label: 'DNS / SSL', ok: domainHealth?.dns?.ready === true && domainHealth?.ssl?.ready === true, detail: domainHealth?.host || store.primaryDomain || store.publicUrl || 'ยังไม่พบโดเมน', href: storeManagerHref },
     { key: 'webhook', label: 'LINE webhook ล่าสุด', ok: Math.max(0, Number(webhookCounters.failed || 0)) === 0, warn: Math.max(0, Number(webhookCounters.received || 0)) === 0, detail: `ok ${Math.max(0, Number(webhookCounters.success || 0))} / fail ${Math.max(0, Number(webhookCounters.failed || 0))}`, href: '/admin/diagnostics' },
   ];
   const done = items.filter((item) => item.ok).length;
@@ -5294,7 +5314,15 @@ app.get('/api/admin/production-qa', requireStoreScopedAccess('staff'), async (re
   const health = buildHealthSnapshot();
   const webhookCounters = summarizeLineWebhookAudits(audits);
   const sharePreview = buildStoreSharePreview(req, store, value);
-  const checklist = buildStoreLaunchChecklist({ store, value, products, orderCount: orders.length, domainHealth, webhookCounters });
+  const checklist = buildStoreLaunchChecklist({
+    store,
+    value,
+    products,
+    orderCount: orders.length,
+    domainHealth,
+    webhookCounters,
+    multistoreConsoleEnabled: await multistoreConsoleEnabledForRequest(req),
+  });
   const smokeBaseUrl = String(domainHealth.publicUrl || sharePreview.url || '').replace(/\/+$/, '');
   res.json({
     ok: true,
@@ -5323,7 +5351,7 @@ app.get('/api/admin/production-qa', requireStoreScopedAccess('staff'), async (re
     smokeCommand: smokeBaseUrl ? `BASE_URL=${smokeBaseUrl} ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=*** npm run verify:multistore` : 'npm run verify:multistore',
   });
 });
-app.get('/api/admin/stores/:id/export', requireStoreParamAccess('admin'), async (req, res) => {
+app.get('/api/admin/stores/:id/export', requireMultistoreConsole, requireStoreParamAccess('admin'), async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
   const storeId = store.id;
@@ -5341,7 +5369,7 @@ app.get('/api/admin/stores/:id/export', requireStoreParamAccess('admin'), async 
   res.setHeader('Content-Disposition', `attachment; filename="${storeId}-backup.json"`);
   res.json({ exportedAt: new Date().toISOString(), store, domains, database, settings, products, orders, leads, articles, coupons });
 });
-app.post('/api/admin/stores/:id/import', requireStoreParamAccess('admin'), async (req, res) => {
+app.post('/api/admin/stores/:id/import', requireMultistoreConsole, requireStoreParamAccess('admin'), async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
   const body = req.body || {};
@@ -5411,7 +5439,7 @@ app.post('/api/admin/stores/:id/import', requireStoreParamAccess('admin'), async
   });
   res.json({ ok: true, dryRun: false, store, summary });
 });
-app.get('/api/admin/stores/:id/roles', requireStoreParamAccess('admin'), async (req, res) => {
+app.get('/api/admin/stores/:id/roles', requireMultistoreConsole, requireStoreParamAccess('admin'), async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
   const roles = (await listUserStoreRoles().catch(() => [])).filter((role) => String(role.storeId || '') === store.id);
@@ -5419,7 +5447,7 @@ app.get('/api/admin/stores/:id/roles', requireStoreParamAccess('admin'), async (
   const userById = new Map(users.map((user) => [String(user.id || ''), user]));
   res.json({ ok: true, store, roles: roles.map((role) => ({ ...role, user: userById.get(role.userId) || null })) });
 });
-app.post('/api/admin/stores/:id/roles', requireStoreParamAccess('owner'), async (req, res) => {
+app.post('/api/admin/stores/:id/roles', requireMultistoreConsole, requireStoreParamAccess('owner'), async (req, res) => {
   const store = await getStore(req.params.id);
   if (!store) return res.status(404).json({ error: 'ไม่พบร้าน' });
   const email = String(req.body?.email || '').trim().toLowerCase();
@@ -5474,7 +5502,7 @@ app.put('/api/admin/stores/:id/settings', requireStoreParamAccess('admin'), asyn
   const overrides = await allStoreSettings(store.id).catch(() => ({}));
   res.json({ ok: true, store, changedKeys, site: storeSiteConfig({ store, overrides, req, strict: true }), overrides, isolated: store.isDefault !== true });
 });
-app.put('/api/admin/users/:id', requireAdmin, async (req, res) => {
+app.put('/api/admin/users/:id', requireAdmin, requireMultistoreConsole, async (req, res) => {
   const target = await getUserById(req.params.id);
   if (!target) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
   const { name, role } = req.body || {};
@@ -5484,7 +5512,7 @@ app.put('/api/admin/users/:id', requireAdmin, async (req, res) => {
   const u = await updateUser(req.params.id, { name: name !== undefined ? String(name).slice(0, 80) : target.name, role: newRole });
   res.json({ ok: true, user: publicUser(u) });
 });
-app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
+app.delete('/api/admin/users/:id', requireAdmin, requireMultistoreConsole, async (req, res) => {
   const target = await getUserById(req.params.id);
   if (!target) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
   if (target.id === req.user.id) return res.status(400).json({ error: 'ลบบัญชีตัวเองไม่ได้' });
