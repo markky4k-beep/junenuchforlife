@@ -9,41 +9,108 @@ function assert(condition, message, payload) {
 }
 
 const BASE_URL = String(process.env.BASE_URL || process.env.PUBLIC_URL || 'http://localhost:3000').replace(/\/+$/, '');
+const BASE_ORIGIN = new URL(BASE_URL);
 const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || process.env.ADMIN_SEED_EMAIL || '').trim();
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || process.env.ADMIN_SEED_PASSWORD || '').trim();
 const ADMIN_KEY = String(process.env.ADMIN_KEY || process.env.ADMIN_ACCESS_KEY || '').trim();
 const TEST_PREFIX = String(process.env.SMOKE_PREFIX || `smoke-${Date.now().toString(36)}`).toLowerCase();
+const LOCAL_HOST_RE = /^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])$/i;
+const DIRECT_HOST_RETRY_STATUSES = new Set([404, 421, 425, 429, 502, 503, 504]);
+
+function sleep(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isLocalOrigin(origin) {
+  return LOCAL_HOST_RE.test(String(origin?.hostname || '').trim());
+}
+
+function requestOriginForHost(host = '') {
+  const normalizedHost = String(host || '').trim().toLowerCase();
+  if (!normalizedHost || isLocalOrigin(BASE_ORIGIN)) return BASE_ORIGIN;
+  const nextOrigin = new URL(BASE_ORIGIN.toString());
+  nextOrigin.host = normalizedHost;
+  return nextOrigin;
+}
+
+function requestModeForHost(host = '') {
+  return host && !isLocalOrigin(BASE_ORIGIN) ? 'direct-subdomain' : 'forwarded-host';
+}
 
 class ApiClient {
   constructor() {
-    this.cookie = '';
+    this.cookies = new Map();
+  }
+
+  cookieHeader() {
+    return [...this.cookies.entries()].map(([key, value]) => `${key}=${value}`).join('; ');
+  }
+
+  csrfToken() {
+    return this.cookies.get('__Host-nfl_csrf') || this.cookies.get('nfl_csrf') || '';
+  }
+
+  hasSessionCookie() {
+    return this.cookies.has('__Host-nfl_session') || this.cookies.has('nfl_session');
+  }
+
+  storeSetCookies(res) {
+    const setCookies = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')] : []);
+    for (const rawCookie of setCookies) {
+      const first = String(rawCookie || '').split(';')[0] || '';
+      const index = first.indexOf('=');
+      if (index <= 0) continue;
+      const key = first.slice(0, index).trim();
+      const value = first.slice(index + 1).trim();
+      if (!key) continue;
+      if (value) this.cookies.set(key, value);
+      else this.cookies.delete(key);
+    }
   }
 
   async request(path, { method = 'GET', body, headers = {}, host = '', storeId = '' } = {}) {
     const nextHeaders = { ...headers };
+    const upperMethod = String(method || 'GET').toUpperCase();
+    const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(upperMethod);
+    const targetOrigin = requestOriginForHost(host);
+    const requestMode = requestModeForHost(host);
     if (body !== undefined && !nextHeaders['Content-Type']) nextHeaders['Content-Type'] = 'application/json';
-    if (this.cookie) nextHeaders.Cookie = this.cookie;
-    if (host) nextHeaders.Host = host;
-    if (storeId) nextHeaders['x-store-id'] = storeId;
-    const res = await fetch(`${BASE_URL}${path}`, {
-      method,
-      headers: nextHeaders,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      redirect: 'manual',
-    });
-    const setCookie = res.headers.get('set-cookie');
-    if (setCookie) {
-      const parts = setCookie.split(/,(?=\s*[^;,]+=)/).map((item) => item.split(';')[0].trim()).filter(Boolean);
-      const jar = new Map(this.cookie.split(';').map((item) => item.trim()).filter(Boolean).map((item) => {
-        const eq = item.indexOf('=');
-        return [item.slice(0, eq), item.slice(eq + 1)];
-      }));
-      for (const part of parts) {
-        const eq = part.indexOf('=');
-        if (eq > 0) jar.set(part.slice(0, eq), part.slice(eq + 1));
-      }
-      this.cookie = [...jar.entries()].map(([key, value]) => `${key}=${value}`).join('; ');
+    const cookieHeader = this.cookieHeader();
+    if (cookieHeader) nextHeaders.Cookie = cookieHeader;
+    if (host && targetOrigin.host === BASE_ORIGIN.host) {
+      nextHeaders['x-forwarded-host'] = host;
+      if (!nextHeaders['x-forwarded-proto']) nextHeaders['x-forwarded-proto'] = BASE_ORIGIN.protocol.replace(':', '');
     }
+    if (storeId) nextHeaders['x-store-id'] = storeId;
+    if (isWrite && this.hasSessionCookie() && !nextHeaders.Authorization && !nextHeaders['x-csrf-token'] && !nextHeaders['x-xsrf-token']) {
+      const csrfToken = this.csrfToken();
+      if (csrfToken) nextHeaders['x-csrf-token'] = csrfToken;
+    }
+    const requestUrl = `${targetOrigin.toString().replace(/\/+$/, '')}${path}`;
+    const maxAttempts = requestMode === 'direct-subdomain' ? 5 : 1;
+    let res;
+    let lastFetchError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        res = await fetch(requestUrl, {
+          method: upperMethod,
+          headers: nextHeaders,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          redirect: 'manual',
+        });
+        if (!DIRECT_HOST_RETRY_STATUSES.has(res.status) || attempt >= maxAttempts) break;
+      } catch (error) {
+        lastFetchError = error;
+        if (attempt >= maxAttempts) throw error;
+      }
+      await sleep(attempt * 1200);
+    }
+    if (!res) {
+      throw lastFetchError || new Error(`request_failed:${upperMethod}:${requestUrl}`);
+    }
+    this.storeSetCookies(res);
     const text = await res.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
@@ -51,6 +118,8 @@ class ApiClient {
       const error = new Error(data?.error || `${method} ${path} failed with ${res.status}`);
       error.payload = data;
       error.status = res.status;
+      error.requestUrl = requestUrl;
+      error.requestMode = requestMode;
       throw error;
     }
     return data;
@@ -160,6 +229,7 @@ async function main() {
   console.log(JSON.stringify({
     ok: true,
     baseUrl: BASE_URL,
+    publicRequestMode: requestModeForHost(storeHost),
     storeId: store.id,
     secondStoreId: secondStore.id,
     storeHost,
