@@ -3085,11 +3085,6 @@ function renderFloatingContactDock(path = currentPath()) {
     dock?.remove();
     return;
   }
-  const featureGates = currentStoreFeatureGates();
-  if (!isDefaultPublicStore() && featureGates.chatReady !== true) {
-    dock?.remove();
-    return;
-  }
   const contacts = supportContacts();
   if (!dock) {
     dock = document.createElement('div');
@@ -3288,10 +3283,19 @@ const clientSecurityDeterrent = {
 function shouldEnableClientSecurityDeterrent() {
   if (typeof window === 'undefined' || typeof document === 'undefined') return false;
   const host = String(window.location?.hostname || '').trim().toLowerCase();
+  const protocol = String(window.location?.protocol || '').trim().toLowerCase();
+  const port = String(window.location?.port || '').trim();
   const search = String(window.location?.search || '');
   const pathName = String(window.location?.pathname || '').replace(/\/+$/, '') || '/';
+  const isLoopbackHost = host === 'localhost'
+    || host.endsWith('.localhost')
+    || host === '127.0.0.1'
+    || host === '[::1]'
+    || host === '0.0.0.0';
+  const isPrivateNetworkHost = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host);
+  const isLocalPreviewSurface = protocol === 'http:' && (Boolean(port) || isLoopbackHost || isPrivateNetworkHost);
   if (pathName === '/secure-admin') return false;
-  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return false;
+  if (isLoopbackHost || isPrivateNetworkHost || isLocalPreviewSurface) return false;
   if (/[?&](inspect|debug|allow_inspect)=1\b/.test(search)) return false;
   return true;
 }
@@ -4490,7 +4494,17 @@ async function viewHome() {
   const slugMap = cropSlugMap();
   const contacts = supportContacts();
   const featureGates = currentStoreFeatureGates();
-  const chatPanelReady = featureGates.chatReady === true;
+  const chatPanelReady = featureGates.chatReady === true
+    || Boolean(String(
+      S('SITE_HOME_CONTACT_TITLE')
+      || S('SITE_HOME_CONTACT_BODY')
+      || S('SITE_HOME_CONTACT_NOTE')
+      || S('SITE_DOCK_TITLE')
+      || S('SITE_DOCK_BODY')
+      || '',
+    ).trim())
+    || contacts.phones.length > 0
+    || Boolean(contacts.lineId || contacts.lineOfficialId || contacts.linePersonalUrl || contacts.lineOfficialUrl);
   const hasLeadSection = isDefaultStore
     || Boolean(String(S('SITE_HOME_CONSULT_TITLE') || S('SITE_HOME_CONSULT_BODY') || S('SITE_HOME_CONTACT_TITLE') || S('SITE_HOME_CONTACT_BODY') || S('SITE_HOME_CONTACT_NOTE')).trim())
     || caseStudies.length > 0
@@ -4603,7 +4617,8 @@ async function viewHome() {
             ${contacts.lineOfficialId ? `<div class="contact-pill contact-static"><span>LINE OA</span><b>${esc(contacts.lineOfficialId)}</b></div>` : ''}
           </div>
           <div class="contact-actions">
-            ${contacts.phones[0]?.number ? `<a class="btn btn-primary" href="tel:${contacts.phones[0].number}">${esc(S('SITE_HOME_CONTACT_CALL_PRIMARY_LABEL') || 'โทร')}</a>` : ''}
+            <button class="btn btn-primary" type="button" data-openchat>${esc(S('SITE_DOCK_LIVECHAT_LABEL') || 'LIVECHAT')}</button>
+            ${contacts.phones[0]?.number ? `<a class="btn btn-glass" href="tel:${contacts.phones[0].number}">${esc(S('SITE_HOME_CONTACT_CALL_PRIMARY_LABEL') || 'โทร')}</a>` : ''}
             ${contacts.phones[1]?.number ? `<a class="btn btn-glass" href="tel:${contacts.phones[1].number}">${esc(S('SITE_HOME_CONTACT_CALL_SECONDARY_LABEL') || 'โทร')}</a>` : ''}
             ${contacts.linePersonalUrl ? `<a class="btn btn-glass" href="${esc(contacts.linePersonalUrl)}" target="_blank" rel="noopener">${esc(S('SITE_HOME_CONTACT_PERSONAL_LABEL') || 'LINE')}</a>` : ''}
             ${contacts.lineOfficialUrl ? `<a class="btn btn-glass" href="${esc(contacts.lineOfficialUrl)}" target="_blank" rel="noopener">${esc(S('SITE_HOME_CONTACT_OA_LABEL') || 'LINE OA')}</a>` : ''}
@@ -9003,7 +9018,7 @@ function renderAdminStoreCreateCard(stores = []) {
       <div><span class="eyebrow">New Store</span><h3>สร้างเว็บไซต์ใหม่</h3></div>
       <span class="status-badge">Wizard</span>
     </div>
-    <p class="form-note store-create-note">เริ่มจากชื่อร้านและ subdomain ก่อน แล้วค่อยไปแต่งรายละเอียดร้านทางฝั่งขวา</p>
+    <p class="form-note store-create-note">เริ่มจากชื่อร้าน, subdomain และบัญชีแอดมินของร้านนี้ ระบบจะผูกบัญชีนี้ให้เข้าได้เฉพาะเว็บไซต์เช่านี้เท่านั้น</p>
     <form id="adminStoreCreateForm" class="set-form store-create-form">
       <div class="store-create-grid">
         <label class="set-field">
@@ -9030,6 +9045,23 @@ function renderAdminStoreCreateCard(stores = []) {
             ${stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name || store.id)}</option>`).join('')}
           </select>
         </label>
+      </div>
+      <input type="hidden" name="adminName" value="">
+      <div class="store-create-admin-card">
+        <div class="store-create-admin-head">
+          <b>แอดมินเต็มของเว็บไซต์นี้</b>
+          <small>บัญชีนี้จะเข้าได้เฉพาะเว็บไซต์เช่านี้ และใช้ล็อกอินหลังบ้านของร้านนี้เท่านั้น</small>
+        </div>
+        <div class="store-create-admin-grid">
+          <label class="set-field">
+            <span>อีเมลแอดมิน</span>
+            <input name="adminEmail" type="email" placeholder="admin@brand.com" autocomplete="email" required>
+          </label>
+          <label class="set-field">
+            <span>รหัสผ่านแอดมิน</span>
+            <input name="adminPassword" type="password" minlength="6" placeholder="อย่างน้อย 6 ตัวอักษร" autocomplete="new-password" required>
+          </label>
+        </div>
       </div>
       <div id="storeSubdomainCheckResult">${renderStoreSubdomainCheck()}</div>
       <div class="pf-actions store-create-actions">
@@ -11341,16 +11373,20 @@ document.body.addEventListener('submit', async (e) => {
     const subdomain = normalizeStoreSubdomainDraft(fd.get('subdomain') || '');
     const templateKey = String(fd.get('templateKey') || 'blank').trim();
     const cloneFromStoreId = String(fd.get('cloneFromStoreId') || '').trim();
+    const adminName = String(fd.get('adminName') || '').trim();
+    const adminEmail = String(fd.get('adminEmail') || '').trim().toLowerCase();
+    const adminPassword = String(fd.get('adminPassword') || '');
     const btn = form.querySelector('button[type=submit]');
     if (btn) btn.disabled = true;
     try {
       const r = await api('/api/admin/stores', {
         method: 'POST',
-        body: JSON.stringify({ name, subdomain, templateKey, cloneFromStoreId }),
+        body: JSON.stringify({ name, subdomain, templateKey, cloneFromStoreId, adminName, adminEmail, adminPassword }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d?.error || 'สร้างร้านไม่สำเร็จ');
       const publicUrl = String(d?.store?.publicUrl || '').trim();
+      const tenantAdminEmail = String(d?.tenantAdmin?.email || adminEmail).trim();
       if (d?.store?.id) {
         setAdminSelectedStoreId(d.store.id);
         startStoreWizard(d.store.id);
@@ -11369,6 +11405,7 @@ document.body.addEventListener('submit', async (e) => {
       const provisionStatus = String(d?.store?.domainProvision?.status || '').trim();
       const statusParts = [databaseStatus && databaseStatus !== 'ready' ? `database ${databaseStatus}` : '', provisionStatus && provisionStatus !== 'ready' ? `domain ${provisionStatus}` : ''].filter(Boolean);
       toast(publicUrl ? `สร้างร้านแล้ว: ${publicUrl}${statusParts.length ? ` (${statusParts.join(', ')})` : ''}` : 'สร้างร้านใหม่แล้ว', statusParts.length ? 'err' : 'ok');
+      toast(`สร้างบัญชีแอดมินร้านแล้ว: ${tenantAdminEmail}`, 'ok');
       toast('เริ่ม Setup Wizard: กรอกแบรนด์ > ติดต่อ > ช่องแชท > แชร์ลิงก์ ให้ครบก่อน', 'ok');
       await render();
     } catch (err) {

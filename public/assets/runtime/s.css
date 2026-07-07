@@ -10495,6 +10495,36 @@ body .store-create-grid .set-field {
   min-width: 0;
 }
 
+body .store-create-admin-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(88, 64, 180, .10);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(247,244,255,.88), rgba(255,255,255,.72));
+}
+
+body .store-create-admin-head {
+  display: grid;
+  gap: 4px;
+}
+
+body .store-create-admin-head b {
+  font-size: .98rem;
+  color: #251f47;
+}
+
+body .store-create-admin-head small {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+body .store-create-admin-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
 body .store-create-actions {
   margin-top: 0;
 }
@@ -11089,6 +11119,10 @@ body .store-card-head h3 {
 }
 
 body .store-create-grid {
+  grid-template-columns: 1fr;
+}
+
+body .store-create-admin-grid {
   grid-template-columns: 1fr;
 }
 

@@ -15,6 +15,7 @@
     "verify:lineoa": "node server/scripts/verify-lineoa-runtime-smoke.js",
     "verify:multistore": "node server/scripts/verify-multistore-smoke.js",
     "verify:order": "node server/scripts/verify-order-service-smoke.js",
+    "verify:tenant-auth": "node server/scripts/verify-tenant-bound-auth.js",
     "verify:release": "npm run build && npm run verify:hard-isolation && npm run verify:community && npm run verify:order && npm run verify:lineoa",
     "import:markky": "node server/scripts/import-markkyproduction-products.js",
     "migrate:supabase": "node server/scripts/migrate-sqlite-to-supabase.js",
