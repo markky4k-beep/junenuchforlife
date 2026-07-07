@@ -22,6 +22,7 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT DEFAULT '',
+    bound_store_id TEXT DEFAULT '',
     username TEXT DEFAULT '', avatar TEXT DEFAULT '', bio TEXT DEFAULT '',
     line_id TEXT DEFAULT '', phone TEXT DEFAULT '', location TEXT DEFAULT '',
     salt TEXT NOT NULL, hash TEXT NOT NULL, role TEXT DEFAULT 'user', created_at INTEGER NOT NULL
@@ -49,6 +50,7 @@ if (!userCols.includes('bio')) db.exec(`ALTER TABLE users ADD COLUMN bio TEXT DE
 if (!userCols.includes('line_id')) db.exec(`ALTER TABLE users ADD COLUMN line_id TEXT DEFAULT ''`);
 if (!userCols.includes('phone')) db.exec(`ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''`);
 if (!userCols.includes('location')) db.exec(`ALTER TABLE users ADD COLUMN location TEXT DEFAULT ''`);
+if (!userCols.includes('bound_store_id')) db.exec(`ALTER TABLE users ADD COLUMN bound_store_id TEXT DEFAULT ''`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS coupons (
@@ -396,10 +398,10 @@ const S = {
   updOrder: db.prepare(`UPDATE orders SET status=@status,paid=@paid,payment_claimed=@payment_claimed,tracking=@tracking,stripe_session=@stripe_session,resources_reserved=@resources_reserved,updated_at=@updated_at WHERE id=@id`),
   insMsg: db.prepare(`INSERT INTO messages (store_id,session_id,sender,text,at) VALUES (?,?,?,?,?)`),
   // users
-  insUser: db.prepare(`INSERT INTO users (id,email,name,username,avatar,bio,line_id,phone,location,salt,hash,role,created_at) VALUES (@id,@email,@name,@username,@avatar,@bio,@line_id,@phone,@location,@salt,@hash,@role,@created_at)`),
+  insUser: db.prepare(`INSERT INTO users (id,email,name,bound_store_id,username,avatar,bio,line_id,phone,location,salt,hash,role,created_at) VALUES (@id,@email,@name,@bound_store_id,@username,@avatar,@bio,@line_id,@phone,@location,@salt,@hash,@role,@created_at)`),
   userByEmail: db.prepare(`SELECT * FROM users WHERE email=?`),
   userById: db.prepare(`SELECT * FROM users WHERE id=?`),
-  listUsers: db.prepare(`SELECT id,email,name,username,avatar,bio,line_id,phone,location,role,created_at FROM users ORDER BY created_at DESC`),
+  listUsers: db.prepare(`SELECT id,email,name,bound_store_id,username,avatar,bio,line_id,phone,location,role,created_at FROM users ORDER BY created_at DESC`),
   // tokens
   insToken: db.prepare(`INSERT INTO auth_tokens (token,user_id,created_at,expires_at) VALUES (?,?,?,?)`),
   getToken: db.prepare(`SELECT * FROM auth_tokens WHERE token=?`),
@@ -463,7 +465,7 @@ const S = {
   listCommunityStoriesAll: db.prepare(`SELECT * FROM community_stories WHERE store_id=@store_id ORDER BY created_at DESC LIMIT @limit`),
   delCommunityStory: db.prepare(`DELETE FROM community_stories WHERE id=? AND store_id=?`),
   // user update/delete
-  updUser: db.prepare(`UPDATE users SET name=@name, username=@username, avatar=@avatar, bio=@bio, line_id=@line_id, phone=@phone, location=@location, role=@role WHERE id=@id`),
+  updUser: db.prepare(`UPDATE users SET name=@name, bound_store_id=@bound_store_id, username=@username, avatar=@avatar, bio=@bio, line_id=@line_id, phone=@phone, location=@location, role=@role WHERE id=@id`),
   delUser: db.prepare(`DELETE FROM users WHERE id=?`),
   countAdmins: db.prepare(`SELECT COUNT(*) n FROM users WHERE role='admin'`),
   // coupons
@@ -718,7 +720,7 @@ export function findLatestOrderBySessionId(sessionId, options = {}) {
 }
 
 // ───────────── users / tokens ─────────────
-export function createUser(u) { S.insUser.run({ username: '', avatar: '', bio: '', line_id: '', phone: '', location: '', ...u, created_at: Date.now() }); return getUserById(u.id); }
+export function createUser(u) { S.insUser.run({ bound_store_id: '', username: '', avatar: '', bio: '', line_id: '', phone: '', location: '', ...u, created_at: Date.now() }); return getUserById(u.id); }
 export function getUserByEmail(email) { return S.userByEmail.get(String(email).toLowerCase()); }
 export function getUserById(id) { return S.userById.get(id); }
 export function listUsers() { return S.listUsers.all(); }
@@ -743,6 +745,7 @@ export function updateUser(id, patch) {
   S.updUser.run({
     id,
     name: patch.name ?? u.name,
+    bound_store_id: patch.bound_store_id ?? u.bound_store_id ?? '',
     username: patch.username ?? u.username ?? '',
     avatar: patch.avatar ?? u.avatar ?? '',
     bio: patch.bio ?? u.bio ?? '',

@@ -91,6 +91,13 @@ async function staticAudit() {
   expectSource(/function multistoreConsoleEnabledForStore\(store = null\) \{\s*return !store \|\| store\.isDefault === true;\s*\}/, 'server multistore console gate no longer restricts to default store');
   expectSource(/app\.get\('\/api\/admin\/users',\s*requireAdmin,\s*requireMultistoreConsole,/, 'admin users endpoint is not protected by multistore console');
   expectSource(/app\.get\('\/api\/admin\/stores\/check-subdomain',\s*requireAdmin,\s*requireMultistoreConsole,/, 'store creation helper endpoint is not protected by multistore console');
+  expectSource(/function normalizedUserBoundStoreId\(user = null\)/, 'user bound-store helper is missing');
+  expectSource(/app\.post\('\/api\/auth\/register'[\s\S]*?const boundStoreId = await getRequestStoreId\(req\);[\s\S]*?bound_store_id:\s*boundStoreId/, 'register flow does not bind new accounts to the current store');
+  expectSource(/app\.post\('\/api\/auth\/login'[\s\S]*?requestMatchesUserBoundStore\(req,\s*user\)/, 'login flow does not enforce host-based store binding');
+  expectSource(/app\.post\('\/api\/admin\/stores',[\s\S]*?adminEmail[\s\S]*?adminPassword[\s\S]*?bound_store_id:\s*store\.id/, 'store creation does not force tenant admin credentials or bind admin account to the store');
+  expectSource(/app\.post\('\/api\/admin\/stores\/:id\/roles'[\s\S]*?boundStoreId && boundStoreId !== String\(store\.id \|\| ''\)\.trim\(\)/, 'store role assignment does not block tenant-bound accounts from crossing stores');
+  expectSource(/app\.put\('\/api\/admin\/users\/:id'[\s\S]*?normalizedUserBoundStoreId\(target\) && newRole !== ROLE_USER/, 'bound accounts can still be elevated to global roles');
+  expectClientSource(/name="adminEmail"[\s\S]*name="adminPassword"/, 'store creation UI does not require tenant admin credentials');
   expectSource(/app\.get\('\/api\/admin\/products',\s*requireStoreScopedAccess\('staff'\)/, 'admin products list is not store-role guarded');
   expectSource(/app\.post\('\/api\/admin\/products',\s*requireStoreScopedAccess\('staff'\)/, 'admin products create is not store-role guarded');
   expectSource(/app\.get\('\/api\/admin\/orders',\s*requireStoreScopedAccess\('staff'\)/, 'admin orders list is not store-role guarded');

@@ -700,13 +700,14 @@ export async function findLatestOrderBySessionId(sessionId, options = {}) {
 }
 
 export async function createUser(u) {
-  const row = { username: '', avatar: '', bio: '', line_id: '', phone: '', location: '', ...u, email: String(u.email).toLowerCase(), created_at: Date.now() };
+  const row = { bound_store_id: '', username: '', avatar: '', bio: '', line_id: '', phone: '', location: '', ...u, email: String(u.email).toLowerCase(), created_at: Date.now() };
   const { data, error } = await supabase.from('users').insert(row).select('*').single();
   if (isMissingColumn(error)) {
     const { username, avatar, bio, line_id, phone, location, ...legacyRow } = row;
     const fallback = await supabase.from('users').insert(legacyRow).select('*').single();
     fail(fallback.error, 'createUser');
     return {
+      bound_store_id: fallback.data?.bound_store_id || legacyRow.bound_store_id || '',
       username: fallback.data?.name || '',
       avatar: '',
       bio: '',
@@ -733,11 +734,12 @@ export async function getUserById(id) {
 }
 
 export async function listUsers() {
-  const { data, error } = await supabase.from('users').select('id,email,name,username,avatar,bio,line_id,phone,location,role,created_at').order('created_at', { ascending: false });
+  const { data, error } = await supabase.from('users').select('id,email,name,bound_store_id,username,avatar,bio,line_id,phone,location,role,created_at').order('created_at', { ascending: false });
   if (isMissingColumn(error)) {
-    const fallback = await supabase.from('users').select('id,email,name,role,created_at').order('created_at', { ascending: false });
+    const fallback = await supabase.from('users').select('id,email,name,bound_store_id,role,created_at').order('created_at', { ascending: false });
     fail(fallback.error, 'listUsers');
     return (fallback.data || []).map((user) => ({
+      bound_store_id: user.bound_store_id || '',
       username: user.name || '',
       avatar: '',
       bio: '',
@@ -753,15 +755,16 @@ export async function listUsers() {
 export async function listAdminUsers(limit = 500, offset = 0, filters = {}) {
   const safeLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 500));
   const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
-  let query = supabase.from('users').select('id,email,name,username,avatar,bio,line_id,phone,location,role,created_at').order('created_at', { ascending: false }).range(safeOffset, safeOffset + safeLimit - 1);
+  let query = supabase.from('users').select('id,email,name,bound_store_id,username,avatar,bio,line_id,phone,location,role,created_at').order('created_at', { ascending: false }).range(safeOffset, safeOffset + safeLimit - 1);
   query = applyAdminUserFilters(query, filters);
   const { data, error } = await query;
   if (isMissingColumn(error)) {
-    let fallbackQuery = supabase.from('users').select('id,email,name,role,created_at').order('created_at', { ascending: false }).range(safeOffset, safeOffset + safeLimit - 1);
+    let fallbackQuery = supabase.from('users').select('id,email,name,bound_store_id,role,created_at').order('created_at', { ascending: false }).range(safeOffset, safeOffset + safeLimit - 1);
     fallbackQuery = applyAdminUserFilters(fallbackQuery, filters);
     const fallback = await fallbackQuery;
     fail(fallback.error, 'listAdminUsers');
     return (fallback.data || []).map((user) => ({
+      bound_store_id: user.bound_store_id || '',
       username: user.name || '',
       avatar: '',
       bio: '',
@@ -816,6 +819,7 @@ export async function updateUser(id, patch) {
   if (!cur) return null;
   const payload = {
     name: patch.name ?? cur.name,
+    bound_store_id: patch.bound_store_id ?? cur.bound_store_id ?? '',
     username: patch.username ?? cur.username ?? '',
     avatar: patch.avatar ?? cur.avatar ?? '',
     bio: patch.bio ?? cur.bio ?? '',
@@ -830,6 +834,7 @@ export async function updateUser(id, patch) {
     const fallback = await supabase.from('users').update(legacyPayload).eq('id', id).select('*').single();
     fail(fallback.error, 'updateUser');
     return {
+      bound_store_id: fallback.data?.bound_store_id || legacyPayload.bound_store_id || '',
       username: fallback.data?.name || '',
       avatar: '',
       bio: '',

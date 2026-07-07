@@ -142,16 +142,21 @@ async function main() {
 
   const storeName = `Smoke Store ${TEST_PREFIX}`;
   const subdomain = TEST_PREFIX.replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 28) || `smoke-${Date.now().toString(36)}`;
+  const tenantAdminPassword = 'StorePass123!';
+  const tenantAdminEmail = `${subdomain}-admin@example.com`;
   const createdStore = await api.request('/api/admin/stores', {
     method: 'POST',
-    body: { name: storeName, subdomain, templateKey: 'agri' },
+    body: { name: storeName, subdomain, templateKey: 'agri', adminName: `${storeName} Admin`, adminEmail: tenantAdminEmail, adminPassword: tenantAdminPassword },
   });
   const store = createdStore.store || {};
   assert(store.id, 'store_create_failed', createdStore);
+  assert(createdStore?.tenantAdmin?.email === tenantAdminEmail, 'tenant_admin_not_created', createdStore);
+  assert(createdStore?.tenantAdmin?.boundStoreId === store.id, 'tenant_admin_not_bound_to_store', createdStore);
   const secondSubdomain = `${subdomain}-b`.slice(0, 32).replace(/-+$/, '') || `smoke-b-${Date.now().toString(36)}`;
+  const secondTenantAdminEmail = `${secondSubdomain}-admin@example.com`;
   const secondStoreRes = await api.request('/api/admin/stores', {
     method: 'POST',
-    body: { name: `${storeName} B`, subdomain: secondSubdomain, templateKey: 'blank' },
+    body: { name: `${storeName} B`, subdomain: secondSubdomain, templateKey: 'blank', adminName: `${storeName} B Admin`, adminEmail: secondTenantAdminEmail, adminPassword: tenantAdminPassword },
   });
   const secondStore = secondStoreRes.store || {};
   assert(secondStore.id && secondStore.id !== store.id, 'second_store_create_failed', secondStoreRes);
@@ -159,7 +164,11 @@ async function main() {
   const storeHost = (() => {
     try { return new URL(store.publicUrl || '').host; } catch { return store.primaryDomain || ''; }
   })();
+  const secondStoreHost = (() => {
+    try { return new URL(secondStore.publicUrl || '').host; } catch { return secondStore.primaryDomain || ''; }
+  })();
   assert(storeHost, 'store_host_missing', store);
+  assert(secondStoreHost, 'second_store_host_missing', secondStore);
   const subStoreConsole = await api.request('/api/admin/stores', { host: storeHost });
   assert(subStoreConsole?.multistoreConsoleEnabled === false, 'substore_multistore_console_should_be_disabled', subStoreConsole);
   assert(Array.isArray(subStoreConsole?.stores) && subStoreConsole.stores.length === 1 && subStoreConsole.stores[0]?.id === store.id, 'substore_store_list_should_only_include_current_store', subStoreConsole);
@@ -169,6 +178,58 @@ async function main() {
   await api.request(`/api/admin/stores/check-subdomain?subdomain=${encodeURIComponent(`${subdomain}-check`)}`, { host: storeHost })
     .then((payload) => assert(false, 'substore_check_subdomain_endpoint_should_404', payload))
     .catch((err) => assert(err.status === 404, 'substore_check_subdomain_expected_404', { status: err.status, payload: err.payload }));
+
+  const tenantAdminClient = new ApiClient();
+  const tenantAdminLogin = await tenantAdminClient.request('/api/auth/login', {
+    method: 'POST',
+    host: storeHost,
+    body: { email: tenantAdminEmail, password: tenantAdminPassword },
+  });
+  assert(tenantAdminLogin?.user?.email === tenantAdminEmail, 'tenant_admin_login_failed', tenantAdminLogin);
+  assert(tenantAdminLogin?.user?.boundStoreId === store.id, 'tenant_admin_bound_store_missing_in_login', tenantAdminLogin);
+  const tenantAdminMe = await tenantAdminClient.request('/api/auth/me', { host: storeHost });
+  assert(Array.isArray(tenantAdminMe?.user?.storeRoles) && tenantAdminMe.user.storeRoles.some((role) => role.storeId === store.id && role.role === 'admin'), 'tenant_admin_store_role_missing', tenantAdminMe);
+
+  const tenantWrongMain = new ApiClient();
+  await tenantWrongMain.request('/api/auth/login', {
+    method: 'POST',
+    body: { email: tenantAdminEmail, password: tenantAdminPassword },
+  }).then((payload) => assert(false, 'tenant_admin_should_not_login_on_main_host', payload))
+    .catch((err) => assert(err.status === 403, 'tenant_admin_main_host_expected_403', { status: err.status, payload: err.payload }));
+
+  const tenantWrongStore = new ApiClient();
+  await tenantWrongStore.request('/api/auth/login', {
+    method: 'POST',
+    host: secondStoreHost,
+    body: { email: tenantAdminEmail, password: tenantAdminPassword },
+  }).then((payload) => assert(false, 'tenant_admin_should_not_login_on_other_store', payload))
+    .catch((err) => assert(err.status === 403, 'tenant_admin_other_store_expected_403', { status: err.status, payload: err.payload }));
+
+  const customerClient = new ApiClient();
+  const customerEmail = `${subdomain}-customer@example.com`;
+  const customerPassword = 'CustomerPass123!';
+  const customerRegister = await customerClient.request('/api/auth/register', {
+    method: 'POST',
+    host: storeHost,
+    body: { email: customerEmail, password: customerPassword, name: 'Smoke Customer Bound' },
+  });
+  assert(customerRegister?.user?.email === customerEmail, 'tenant_customer_register_failed', customerRegister);
+  assert(customerRegister?.user?.boundStoreId === store.id, 'tenant_customer_not_bound_to_store', customerRegister);
+
+  const customerWrongStore = new ApiClient();
+  await customerWrongStore.request('/api/auth/login', {
+    method: 'POST',
+    host: secondStoreHost,
+    body: { email: customerEmail, password: customerPassword },
+  }).then((payload) => assert(false, 'tenant_customer_should_not_login_on_other_store', payload))
+    .catch((err) => assert(err.status === 403, 'tenant_customer_other_store_expected_403', { status: err.status, payload: err.payload }));
+
+  const customerWrongMain = new ApiClient();
+  await customerWrongMain.request('/api/auth/login', {
+    method: 'POST',
+    body: { email: customerEmail, password: customerPassword },
+  }).then((payload) => assert(false, 'tenant_customer_should_not_login_on_main_host', payload))
+    .catch((err) => assert(err.status === 403, 'tenant_customer_main_host_expected_403', { status: err.status, payload: err.payload }));
 
   const productId = `p_${TEST_PREFIX.replace(/-/g, '_')}`;
   const product = await api.request('/api/admin/products', {

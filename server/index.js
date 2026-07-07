@@ -356,6 +356,23 @@ async function getRequestStoreSettings(req) {
   req.storeSettings = store?.id ? await allStoreSettings(store.id).catch(() => ({})) : {};
   return req.storeSettings;
 }
+function normalizedUserBoundStoreId(user = null) {
+  return String(user?.bound_store_id || user?.boundStoreId || '').trim();
+}
+async function getRequestStoreId(req = {}) {
+  const store = req.store || await getRequestStore(req).catch(() => null);
+  return String(store?.id || 'store_main').trim() || 'store_main';
+}
+async function requestMatchesUserBoundStore(req = {}, user = null) {
+  const boundStoreId = normalizedUserBoundStoreId(user);
+  if (!boundStoreId) return true;
+  return boundStoreId === await getRequestStoreId(req);
+}
+function storeBoundLoginErrorMessage(reqStoreId = 'store_main') {
+  return reqStoreId === 'store_main'
+    ? 'บัญชีนี้เข้าได้เฉพาะเว็บไซต์หลักที่สมัครไว้'
+    : 'บัญชีนี้เข้าได้เฉพาะเว็บไซต์ของร้านที่ผูกบัญชีไว้';
+}
 function requestedAdminStoreId(req = {}) {
   return String(
     req.query?.storeId ||
@@ -2839,6 +2856,19 @@ app.use(express.static(publicDir, {
   },
 }));
 app.use(authMiddleware);
+app.use(async (req, res, next) => {
+  if (!req.user) return next();
+  if (await requestMatchesUserBoundStore(req, req.user)) return next();
+  if (req.token) {
+    await deleteToken(req.token).catch(() => {});
+  }
+  clearSessionCookies(req, res);
+  req.user = null;
+  req.token = '';
+  req.adminKeyAccepted = false;
+  req.userStoreRoles = [];
+  next();
+});
 app.use((req, res, next) => {
   const method = String(req.method || 'GET').toUpperCase();
   const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
@@ -3978,9 +4008,10 @@ app.post('/api/auth/register', async (req, res) => {
   if (!email || !password) return res.status(400).json({ error: 'กรอกอีเมลและรหัสผ่าน' });
   if (String(password).length < 6) return res.status(400).json({ error: 'รหัสผ่านอย่างน้อย 6 ตัวอักษร' });
   if (await getUserByEmail(email)) return res.status(409).json({ error: 'อีเมลนี้ถูกใช้แล้ว' });
+  const boundStoreId = await getRequestStoreId(req);
   const { salt, hash } = hashPassword(password);
   const displayName = (name || '').trim() || String(email).split('@')[0];
-  const user = await createUser({ id: 'u_' + crypto.randomBytes(6).toString('hex'), email: String(email).toLowerCase(), name: displayName, username: displayName, avatar: '', salt, hash, role: ROLE_USER });
+  const user = await createUser({ id: 'u_' + crypto.randomBytes(6).toString('hex'), email: String(email).toLowerCase(), name: displayName, bound_store_id: boundStoreId, username: displayName, avatar: '', salt, hash, role: ROLE_USER });
   const token = newToken(); await createToken(token, user.id);
   writeSessionCookies(req, res, { token, adminGrant: '' });
   ensureCsrfCookie(req, res, { rotate: true });
@@ -3991,6 +4022,11 @@ app.post('/api/auth/login', async (req, res) => {
   const { email, password, adminKey } = req.body || {};
   const user = await getUserByEmail(email || '');
   if (!user || !verifyPassword(password || '', user.salt, user.hash)) return res.status(401).json({ error: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' });
+  const requestStoreId = await getRequestStoreId(req);
+  if (!(await requestMatchesUserBoundStore(req, user))) {
+    clearSessionCookies(req, res);
+    return res.status(403).json({ error: storeBoundLoginErrorMessage(requestStoreId) });
+  }
   if (adminKey && !hasValidAdminKey(adminKey)) return res.status(403).json({ error: 'คีย์แอดมินไม่ถูกต้อง' });
   const resolvedUser = withResolvedAdminRole(user, adminKey);
   const token = newToken(); await createToken(token, user.id);
@@ -4000,10 +4036,10 @@ app.post('/api/auth/login', async (req, res) => {
     userId: user.id,
     storedRole: user.role || '',
     adminKeyPresent: Boolean(String(adminKey || '').trim()),
-    grantPreview: adminKey && isAdminRole(user.role) ? createAdminGrant(user.id) : '',
+    grantPreview: adminKey && isAdminRole(user.role) && !normalizedUserBoundStoreId(user) ? createAdminGrant(user.id) : '',
   });
   // #endregion
-  writeSessionCookies(req, res, { token, adminGrant: adminKey && isAdminRole(user.role) ? createAdminGrant(user.id) : '' });
+  writeSessionCookies(req, res, { token, adminGrant: adminKey && isAdminRole(user.role) && !normalizedUserBoundStoreId(user) ? createAdminGrant(user.id) : '' });
   ensureCsrfCookie(req, res, { rotate: true });
   // #region debug-point E:login-response
   reportServerDebug('E', 'server/index.js:/api/auth/login', '[DEBUG] login issued session cookies', {
@@ -5088,57 +5124,86 @@ app.post('/api/admin/stores', requireAdmin, requireMultistoreConsole, async (req
   const subdomain = normalizeRequestedSubdomain(String(req.body?.subdomain || '').trim());
   const templateKey = String(req.body?.templateKey || 'blank').trim() || 'blank';
   const cloneFromStoreId = String(req.body?.cloneFromStoreId || '').trim();
+  const adminEmail = String(req.body?.adminEmail || '').trim().toLowerCase();
+  const adminPassword = String(req.body?.adminPassword || '');
+  const adminName = String(req.body?.adminName || '').trim();
   if (!name) return res.status(400).json({ error: 'กรุณาตั้งชื่อร้าน' });
+  if (!adminEmail || !adminPassword) return res.status(400).json({ error: 'กรอกอีเมลแอดมินร้านและรหัสผ่านให้ครบ' });
+  if (String(adminPassword).length < 6) return res.status(400).json({ error: 'รหัสผ่านแอดมินร้านอย่างน้อย 6 ตัวอักษร' });
+  if (await getUserByEmail(adminEmail)) return res.status(409).json({ error: 'อีเมลแอดมินร้านนี้ถูกใช้แล้ว' });
   if (!isValidStoreSubdomain(subdomain)) return res.status(400).json({ error: 'Subdomain ไม่ถูกต้องหรือเป็นคำสงวนของระบบ' });
   if (!(await isStoreSubdomainAvailable(subdomain))) return res.status(409).json({ error: 'Subdomain นี้ถูกใช้แล้ว' });
   const rootDomain = tenantRootDomain(req);
   const publicUrl = currentStorePublicUrl(req, { subdomain });
   const host = storeHostFromPublicUrl(publicUrl, `${subdomain}.${rootDomain}`);
-  const store = await createStore({
-    id: buildStoreId(subdomain),
-    name,
-    slug: subdomain,
-    subdomain,
-    status: 'active',
-    templateKey,
-    primaryDomain: host,
-    ownerUserId: String(req.user?.id || '').trim(),
-    metadata: {
-      source: 'admin_create_store',
-      createdFromHost: extractRequestHost(req),
-    },
-  });
-  const database = await provisionStoreDatabase(store, { req, publicUrl });
-  const domainProvision = await provisionStoreDomain({ req, store, host, isPrimary: true });
-  await addUserStoreRole(String(req.user?.id || '').trim(), store.id, ROLE_ADMIN);
-  const cloneSettings = cloneFromStoreId ? await allStoreSettings(cloneFromStoreId).catch(() => ({})) : {};
-  const seedSettings = {
-    ...cloneSettings,
-    ...buildStoreBootstrapSettings({ storeName: name, publicUrl }),
-    ...storeTemplateSettings(templateKey, name),
-  };
-  for (const [key, value] of Object.entries(seedSettings)) {
-    await setStoreSetting(store.id, key, String(value ?? ''));
-  }
-  if (cloneFromStoreId) await setStoreSetting(store.id, '__STORE_CLONED_FROM', cloneFromStoreId);
-  await recordSystemEvent({
-    level: 'info',
-    source: 'multi_tenant',
-    type: 'store_created',
-    message: `สร้างร้านใหม่ ${name} (${subdomain}) สำเร็จแล้ว`,
-    data: { storeId: store.id, subdomain, host, database, domainProvision },
-  });
-  res.json({
-    ok: true,
-    store: {
-      ...store,
-      publicUrl,
+  let store = null;
+  let tenantAdmin = null;
+  try {
+    store = await createStore({
+      id: buildStoreId(subdomain),
+      name,
+      slug: subdomain,
+      subdomain,
+      status: 'active',
+      templateKey,
       primaryDomain: host,
-      domains: [{ host, isPrimary: true, verified: domainProvision.ok === true }],
-      database,
-      domainProvision,
-    },
-  });
+      ownerUserId: String(req.user?.id || '').trim(),
+      metadata: {
+        source: 'admin_create_store',
+        createdFromHost: extractRequestHost(req),
+      },
+    });
+    const database = await provisionStoreDatabase(store, { req, publicUrl });
+    const domainProvision = await provisionStoreDomain({ req, store, host, isPrimary: true });
+    const cloneSettings = cloneFromStoreId ? await allStoreSettings(cloneFromStoreId).catch(() => ({})) : {};
+    const seedSettings = {
+      ...cloneSettings,
+      ...buildStoreBootstrapSettings({ storeName: name, publicUrl }),
+      ...storeTemplateSettings(templateKey, name),
+    };
+    for (const [key, value] of Object.entries(seedSettings)) {
+      await setStoreSetting(store.id, key, String(value ?? ''));
+    }
+    if (cloneFromStoreId) await setStoreSetting(store.id, '__STORE_CLONED_FROM', cloneFromStoreId);
+    const { salt, hash } = hashPassword(adminPassword);
+    const displayName = adminName || `${name} Admin`;
+    tenantAdmin = await createUser({
+      id: 'u_' + crypto.randomBytes(6).toString('hex'),
+      email: adminEmail,
+      name: displayName,
+      bound_store_id: store.id,
+      username: displayName,
+      avatar: '',
+      salt,
+      hash,
+      role: ROLE_USER,
+    });
+    await addUserStoreRole(tenantAdmin.id, store.id, ROLE_ADMIN);
+    await addUserStoreRole(String(req.user?.id || '').trim(), store.id, ROLE_ADMIN);
+    await recordSystemEvent({
+      level: 'info',
+      source: 'multi_tenant',
+      type: 'store_created',
+      message: `สร้างร้านใหม่ ${name} (${subdomain}) สำเร็จแล้ว`,
+      data: { storeId: store.id, subdomain, host, database, domainProvision, tenantAdminEmail: adminEmail, tenantAdminUserId: tenantAdmin.id },
+    });
+    res.json({
+      ok: true,
+      store: {
+        ...store,
+        publicUrl,
+        primaryDomain: host,
+        domains: [{ host, isPrimary: true, verified: domainProvision.ok === true }],
+        database,
+        domainProvision,
+      },
+      tenantAdmin: publicUser(tenantAdmin),
+    });
+  } catch (error) {
+    if (tenantAdmin?.id) await deleteUser(tenantAdmin.id).catch(() => {});
+    if (store?.id) await deleteStoreCascade(store.id).catch(() => {});
+    throw error;
+  }
 });
 // ลบร้านย่อย (subdomain store) — เฉพาะ global admin, ต้องยืนยันด้วย subdomain/ชื่อร้าน, ห้ามลบร้านหลัก
 app.delete('/api/admin/stores/:id', requireAdmin, requireMultistoreConsole, async (req, res) => {
@@ -5513,6 +5578,10 @@ app.post('/api/admin/stores/:id/roles', requireMultistoreConsole, requireStorePa
   if (!STORE_ROLE_ORDER.has(role)) return res.status(400).json({ error: 'role รายร้านไม่ถูกต้อง' });
   const user = await getUserByEmail(email);
   if (!user) return res.status(404).json({ error: 'ไม่พบผู้ใช้จากอีเมลนี้' });
+  const boundStoreId = normalizedUserBoundStoreId(user);
+  if (boundStoreId && boundStoreId !== String(store.id || '').trim()) {
+    return res.status(403).json({ error: 'บัญชีที่ผูกกับร้านหนึ่งแล้ว ไม่สามารถมอบสิทธิ์ให้ร้านอื่นได้' });
+  }
   await addUserStoreRole(user.id, store.id, role);
   res.json({ ok: true, store, role: { userId: user.id, storeId: store.id, role, user: publicUser(user) } });
 });
@@ -5566,6 +5635,9 @@ app.put('/api/admin/users/:id', requireAdmin, requireMultistoreConsole, async (r
   const { name, role } = req.body || {};
   const allowedRoles = new Set([ROLE_USER, ROLE_ADMIN, ROLE_CHAT_ADMIN]);
   const newRole = allowedRoles.has(String(role || '').trim()) ? String(role || '').trim() : target.role;
+  if (normalizedUserBoundStoreId(target) && newRole !== ROLE_USER) {
+    return res.status(400).json({ error: 'บัญชีที่ผูกกับร้านต้องเป็นสมาชิกธรรมดา และใช้สิทธิ์รายร้านแทน global role' });
+  }
   if (target.role === ROLE_ADMIN && newRole !== ROLE_ADMIN && await countAdmins() <= 1) return res.status(400).json({ error: 'ต้องมีแอดมินอย่างน้อย 1 คน' });
   const u = await updateUser(req.params.id, { name: name !== undefined ? String(name).slice(0, 80) : target.name, role: newRole });
   res.json({ ok: true, user: publicUser(u) });

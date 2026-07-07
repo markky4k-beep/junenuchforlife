@@ -231,8 +231,13 @@ export function canAccessAdminInbox(user) {
   return canAccessAdminShell(user);
 }
 
+function isStoreBoundUser(user) {
+  return Boolean(String(user?.bound_store_id || user?.boundStoreId || '').trim());
+}
+
 export function withResolvedAdminRole(user, adminKey) {
   if (!user) return null;
+  if (isStoreBoundUser(user)) return user;
   if (isAdminRole(user.role) && hasValidAdminKey(adminKey)) return { ...user, role: ROLE_ADMIN };
   return user;
 }
@@ -247,7 +252,7 @@ export async function resolveAuthenticatedUser({ token = '', adminKey = '', admi
     return { user: null, token: rawToken, adminGranted: false };
   }
   const user = await getUserById(record.user_id) || null;
-  const adminGranted = Boolean(user && isAdminRole(user.role) && (verifyAdminGrant(adminGrant, user.id) || hasValidAdminKey(adminKey)));
+  const adminGranted = Boolean(user && !isStoreBoundUser(user) && isAdminRole(user.role) && (verifyAdminGrant(adminGrant, user.id) || hasValidAdminKey(adminKey)));
   // #region debug-point A:resolve-authenticated-user
   reportAuthDebug('A', 'server/auth.js:resolveAuthenticatedUser', '[DEBUG] resolveAuthenticatedUser computed role', {
     tokenPresent: Boolean(rawToken),
@@ -329,6 +334,7 @@ export function publicUser(u) {
     id: u.id,
     email: u.email,
     name: u.name,
+    boundStoreId: u.bound_store_id || u.boundStoreId || '',
     username: u.username || '',
     avatar: u.avatar || '',
     bio: u.bio || '',

@@ -4,6 +4,7 @@ create table if not exists public.users (
   id text primary key,
   email text not null unique,
   name text not null default '',
+  bound_store_id text not null default '',
   salt text not null,
   hash text not null,
   role text not null default 'user',

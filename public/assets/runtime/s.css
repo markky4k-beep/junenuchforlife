@@ -12717,3 +12717,218 @@ body .product-admin-rail .category-admin-count { justify-self: start; }
     grid-template-columns: 1fr;
   }
 }
+
+/* Final storefront nav cleanup:
+   - desktop "เพิ่มเติม" dropdown must open directly below its trigger
+   - mobile burger menu should be a single centered panel, not split into floating clusters */
+@media (min-width: 981px) {
+  body .nav-more {
+    position: relative !important;
+  }
+
+  body .nav-more.open .nav-more-menu,
+  body .nav-more:hover .nav-more-menu,
+  body .nav-more:focus-within .nav-more-menu {
+    position: absolute !important;
+    top: calc(100% + 10px) !important;
+    left: 50% !important;
+    right: auto !important;
+    transform: translateX(-50%) translateY(0) !important;
+    z-index: 140 !important;
+  }
+
+  body .nav-more-menu a {
+    justify-content: flex-start !important;
+  }
+}
+
+@media (max-width: 980px) {
+  body .nav {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    grid-template-areas: "brand actions" !important;
+    gap: 10px 12px !important;
+    align-items: center !important;
+    width: calc(100% - 18px) !important;
+    padding: 11px 10px !important;
+    border-radius: 24px !important;
+  }
+
+  body.has-sale .nav {
+    top: max(42px, calc(env(safe-area-inset-top) + 38px)) !important;
+  }
+
+  body .brand {
+    grid-area: brand !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  body .nav-burger {
+    display: inline-flex !important;
+    grid-area: actions !important;
+    justify-self: end !important;
+    z-index: 124 !important;
+  }
+
+  body .nav-panel {
+    position: fixed !important;
+    top: 78px !important;
+    left: 10px !important;
+    right: 10px !important;
+    z-index: 123 !important;
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 14px !important;
+    padding: 16px !important;
+    border-radius: 26px !important;
+    border: 1px solid rgba(123, 92, 255, .14) !important;
+    background: linear-gradient(180deg, rgba(250, 246, 255, .99), rgba(255, 255, 255, .985)) !important;
+    box-shadow: 0 30px 70px -32px rgba(80, 50, 180, .5) !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    transform: translateY(-12px) scale(.98) !important;
+    pointer-events: none !important;
+    max-height: calc(100dvh - 98px) !important;
+    overflow: auto !important;
+  }
+
+  body.has-sale .nav-panel {
+    top: 112px !important;
+    max-height: calc(100dvh - 132px) !important;
+  }
+
+  body .nav-panel.open {
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: translateY(0) scale(1) !important;
+    pointer-events: auto !important;
+  }
+
+  body .nav-links,
+  body .nav-panel .nav-links,
+  body .nav-panel.open .nav-links {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  body .nav-panel .nav-links a,
+  body .nav-panel.open .nav-links a,
+  body .nav-panel .nav-more,
+  body .nav-panel .nav-more-toggle {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  body .nav-panel .nav-links a,
+  body .nav-panel .nav-more-toggle {
+    justify-content: center !important;
+  }
+
+  body .nav-panel .nav-more {
+    position: static !important;
+    display: grid !important;
+    gap: 8px !important;
+  }
+
+  body .nav-panel .nav-more-toggle {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  body .nav-panel .nav-more-menu {
+    position: static !important;
+    display: none !important;
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    transform: none !important;
+    pointer-events: auto !important;
+  }
+
+  body .nav-panel .nav-more.open .nav-more-menu {
+    display: grid !important;
+  }
+
+  body .nav-panel .nav-more-menu a {
+    width: 100% !important;
+    min-width: 0 !important;
+    min-height: 42px !important;
+    justify-content: center !important;
+  }
+
+  body .nav-tools,
+  body .nav-panel.open .nav-tools {
+    position: static !important;
+    display: grid !important;
+    gap: 10px !important;
+    width: 100% !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+    pointer-events: auto !important;
+  }
+
+  body .nav-account,
+  body .nav-icons {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+    width: 100% !important;
+  }
+
+  body .nav-account a,
+  body .nav-cart,
+  body .nav-wish {
+    width: 100% !important;
+    min-height: 44px !important;
+    border-radius: 18px !important;
+    justify-content: center !important;
+  }
+
+  body .nav-dim.show {
+    opacity: .55 !important;
+  }
+}
+
+@media (max-width: 520px) {
+  body .nav-panel {
+    top: 74px !important;
+    left: 8px !important;
+    right: 8px !important;
+    padding: 14px !important;
+    border-radius: 22px !important;
+    max-height: calc(100dvh - 90px) !important;
+  }
+
+  body.has-sale .nav-panel {
+    top: 108px !important;
+    max-height: calc(100dvh - 126px) !important;
+  }
+
+  body .nav-account,
+  body .nav-icons {
+    grid-template-columns: 1fr !important;
+  }
+}
