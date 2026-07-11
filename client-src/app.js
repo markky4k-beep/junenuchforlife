@@ -8066,22 +8066,16 @@ async function viewAdminProducts() {
     <div class="adm-prod-act"><button class="btn-mini" type="button" data-moveprod="${p.id}" data-direction="up" ${fullIndex <= 0 ? 'disabled' : ''}>เลื่อนขึ้น</button><button class="btn-mini" type="button" data-moveprod="${p.id}" data-direction="down" ${fullIndex >= _adminProducts.length - 1 ? 'disabled' : ''}>เลื่อนลง</button><button class="btn-mini ${p.active === false ? 'is-confirm' : ''}" type="button" data-toggleprodactive="${p.id}">${p.active === false ? 'เปิดขาย' : 'ซ่อน'}</button><button class="btn-mini" type="button" data-editprod="${p.id}">แก้ไข</button><button class="btn-mini danger" type="button" data-delprod="${p.id}">ลบ</button></div>
   </div>`;
   }).join('');
-  const visibilitySummary = `<div class="product-insight-grid">
-    <div class="stat-card"><span>สินค้าทั้งหมด</span><b>${_adminProducts.length}</b></div>
-    <div class="stat-card"><span>แสดงบนหน้าเว็บ</span><b>${activeCount}</b></div>
-    <div class="stat-card"><span>ซ่อนอยู่</span><b>${hiddenCount}</b></div>
-    <div class="stat-card"><span>สินค้าที่แนะนำ</span><b>${featuredCount}</b></div>
-  </div>
-  <div class="form-note" style="margin:0">หน้าสินค้าในเว็บแสดงเฉพาะรายการที่เปิดขายเท่านั้น ถ้าสินค้าหายจากหน้าสินค้า ให้ตรวจปุ่ม "ซ่อน / เปิดขาย" ในรายการนี้ได้ทันที</div>`;
-  const workflowGuide = `<section class="glass product-stage-panel product-stage-guide">
-    <div class="product-stage-head">
-      <div><b>เพิ่มสินค้าให้เร็วที่สุด</b><span>เริ่มจากข้อมูลหลักก่อน แล้วค่อยเปิดขั้นสูงเมื่อจำเป็น จะลดการเลื่อนและลดโอกาสกรอกเกินความจำเป็น</span></div>
-    </div>
-    <div class="product-workflow-grid">
-      <article class="product-workflow-card"><b>ขั้น 1</b><span>กด “เพิ่มสินค้า” แล้วกรอกชื่อสินค้า ประเภท หมวด ราคา สต็อก และรูปหลัก</span></article>
-      <article class="product-workflow-card"><b>ขั้น 2</b><span>เปิดขายทันทีได้เลยถ้าสินค้ายังไม่มี variant หรือ SEO ซับซ้อน</span></article>
-      <article class="product-workflow-card"><b>ขั้น 3</b><span>ถ้าต้องจัดหมวดจำนวนมาก ค่อยใช้แผงด้านซ้าย ไม่ต้องเปิดทุกกล่องพร้อมกัน</span></article>
-    </div>
+  const commandSummary = `<div class="product-command-summary">
+    <article class="product-command-pill"><span>สินค้าทั้งหมด</span><b>${_adminProducts.length}</b></article>
+    <article class="product-command-pill"><span>แสดงบนหน้าเว็บ</span><b>${activeCount}</b></article>
+    <article class="product-command-pill"><span>ซ่อนอยู่</span><b>${hiddenCount}</b></article>
+    <article class="product-command-pill"><span>สินค้าแนะนำ</span><b>${featuredCount}</b></article>
+  </div>`;
+  const commandStrip = `<section class="glass product-command-strip">
+    <span><b>เพิ่มเร็ว:</b> ชื่อสินค้า ราคา สต็อก และรูปหลักก็เปิดขายได้แล้ว</span>
+    <span><b>ลดการเลื่อน:</b> ข้อมูลลึกอย่าง Variant / SEO อยู่ในส่วนขั้นสูงทั้งหมด</span>
+    <span><b>จัดหลายชิ้น:</b> ถ้าจะย้ายหมวดทีละหลายสินค้า ค่อยใช้แผงซ้าย</span>
   </section>`;
   const filterPanel = `<section class="glass product-stage-panel product-stage-toolbar">
     <div class="product-stage-head">
@@ -8089,7 +8083,7 @@ async function viewAdminProducts() {
       <span class="category-admin-count">${filteredProducts.length} / ${_adminProducts.length} รายการ</span>
     </div>
     <div class="product-filter-grid">
-      <label>ค้นหาสินค้า<input id="adminProductSearchInput" type="text" value="${esc(_adminProductUiState.q)}" placeholder="ค้นหาจากชื่อสินค้า รหัส ป้าย หรือกลุ่มแบรนด์"></label>
+      <label class="product-filter-search">ค้นหาสินค้า<input id="adminProductSearchInput" type="text" value="${esc(_adminProductUiState.q)}" placeholder="ค้นหาจากชื่อสินค้า รหัส ป้าย หรือกลุ่มแบรนด์"></label>
       <label>สถานะ
         <select id="adminProductStatusFilter">
           <option value="all" ${_adminProductUiState.status === 'all' ? 'selected' : ''}>ทุกสถานะ</option>
@@ -8111,16 +8105,15 @@ async function viewAdminProducts() {
   </section>`;
   const formPlaceholder = `<section class="glass product-stage-panel product-form-empty">
     <div class="product-stage-head">
-      <div><b>ฟอร์มเพิ่มสินค้า</b><span>เมื่อกด “เพิ่มสินค้า” หรือ “แก้ไข” ระบบจะเปิดฟอร์มในพื้นที่นี้ โดยเริ่มจากข้อมูลจำเป็นก่อนเสมอ</span></div>
+      <div><b>ฟอร์มเพิ่มสินค้า</b><span>กด “เพิ่มสินค้า” แล้วระบบจะเลื่อนมาที่โซนนี้ทันที โดยเริ่มจากข้อมูลจำเป็นก่อนเสมอ</span></div>
     </div>
     <div class="product-form-empty-grid">
       <div class="product-form-empty-card"><b>ต้องกรอกแน่ ๆ</b><span>ชื่อสินค้า หมวดหมู่ ราคา สต็อก รูปหลัก และสถานะเปิดขาย</span></div>
       <div class="product-form-empty-card"><b>ค่อยกรอกเมื่อจำเป็น</b><span>Variant, SEO, FAQ, PDF ฉลาก และข้อมูลเฉพาะทาง</span></div>
     </div>
   </section>`;
-  return adminLayout('products', `<div class="admin-workspace admin-products-ui"><div class="adm-head admin-lux-head"><div><span class="eyebrow">Product Command</span><h2>จัดการสินค้า</h2><p class="muted">จัดลำดับ เพิ่ม/แก้ไขสินค้า ย้ายหมวด และควบคุมการแสดงผลของร้านที่เลือกไว้แบบเป็นระเบียบกว่าเดิม</p></div><div class="admin-inline-actions"><button class="btn btn-glass" type="button" data-export-products>Export CSV</button><button class="btn btn-primary" id="addProdBtn">+ เพิ่มสินค้า</button></div></div>
-    ${workflowGuide}
-    ${visibilitySummary}
+  return adminLayout('products', `<div class="admin-workspace admin-products-ui"><div class="adm-head admin-lux-head product-command-head"><div><span class="eyebrow">Product Command</span><h2>จัดการสินค้า</h2><p class="muted">เพิ่ม/แก้ไขสินค้าได้เร็วขึ้น ลดความแน่นของหน้า และเก็บเฉพาะเครื่องมือที่ต้องใช้บ่อยไว้ด้านบน</p></div><div class="product-command-side">${commandSummary}<div class="admin-inline-actions"><button class="btn btn-glass" type="button" data-export-products>Export CSV</button><button class="btn btn-primary" id="addProdBtn">+ เพิ่มสินค้า</button></div></div></div>
+    ${commandStrip}
     <div class="product-admin-shell">
       <aside class="product-admin-rail">
         ${bulkManager}
@@ -12201,7 +12194,15 @@ document.body.addEventListener('click', async (e) => {
   }
   if (id === 'logoutBtn') { await requestLogoutSilently(); setAuth('', null, ''); toast('ออกจากระบบแล้ว', 'ok'); go('/'); return; }
   if (e.target.closest('[data-resetleadform]')) { render(); return; }
-  if (id === 'addProdBtn') { const w = document.getElementById('prodFormWrap'); w.innerHTML = w.innerHTML ? '' : productForm(null); ensureProductFormCropState(w.querySelector('#productForm')); return; }
+  if (id === 'addProdBtn') {
+    const w = document.getElementById('prodFormWrap');
+    const isOpen = Boolean(w?.querySelector('#productForm'));
+    if (!w) return;
+    w.innerHTML = isOpen ? '' : productForm(null);
+    ensureProductFormCropState(w.querySelector('#productForm'));
+    if (!isOpen) w.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
   if (id === 'resetAdminProductFiltersBtn') { resetAdminProductUiFilters(); _adminSelectedProductIds.clear(); render(); return; }
   if (id === 'cancelProd') { document.getElementById('prodFormWrap').innerHTML = ''; return; }
   if (id === 'clearProductSelectionBtn') {
